@@ -1,0 +1,9 @@
+-- The installed root-py's list map stays in the nexus: no pool is built.
+module main (run)
+import root-py
+
+record R where
+  x :: Int
+
+run :: [R] -> [Int]
+run xs = .[:].x xs

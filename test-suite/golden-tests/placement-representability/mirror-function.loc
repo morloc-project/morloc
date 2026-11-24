@@ -9,7 +9,6 @@ import root-rust
 
 record PyOpts where
   m :: Int
-record Py => PyOpts = "dict"
 type Py => Int = "int"
 source Py from "pyhof.py" ("py_m" as pyM, "py_mk" as pyMk)
 pyM :: PyOpts -> Int

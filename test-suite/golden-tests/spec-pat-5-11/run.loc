@@ -1,0 +1,15 @@
+-- A bracket on a receiver that is not a list on the wire reaches it through
+-- its instance, which runs in a pool (PAT-5, COST-15): a pure function runs
+-- there, though nothing else asks for a pool.
+
+module main (first)
+
+import root-py
+
+newtype Two a = (a, a)
+
+instance Indexable Two where
+  source Py from "two.py" ("at" as __access_index__)
+
+first :: Two Int -> Int
+first p = .[0] p

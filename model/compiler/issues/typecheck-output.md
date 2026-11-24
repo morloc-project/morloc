@@ -13,8 +13,9 @@ model/language/issues/typecheck.md.
   check at the boundary that fails as an internal error.
 - **Gap: locations are lost after typechecking.** No item says a
   diagnostic raised after the typechecker names the construct that caused
-  it (DIAG-2). Every code-generation rejection above is reported at the
-  module's export list (`main.loc:1:14`).
+  it (DIAG-2). The table-column rejection above is reported at the
+  module's export list (`main.loc:1:14`); some code-generation errors are
+  now located (Serial.hs:1093's opaque-type message points at the call).
 - **`morloc typecheck` prints a signed export's inferred type.**
   [reproduced, 2026-10-30] `f :: Vector n Int -> Vector (n - 1) Int`
   prints as `f :: Vector (1 + a) Int -> Vector a Int`, and `f :: w@Int ->
@@ -27,9 +28,6 @@ model/language/issues/typecheck.md.
   PairLike a => a -> a` prints as `f :: Int -> Int`. Repro:
   /work/plans/error-clusters/repro/tuple-prefix-class.loc with the class
   renamed `PairLike`.
-- **An unreduced field projection erases to a Nat placeholder.** [read]
-  Namespace/Type.hs `typeOf` gives `NatVoidT` for an `OpU` of kind Type
-  (`ProjectField r f`), so a sourced signature such as table's `getCol ::
-  f@Str -> Table n r -> Vector n (ProjectField r f)`, read by EffectBoundary
-  and the Rust members, carries a value type that `kindOfT` calls a Nat.
-
+- **A Nat variable is printed as `a`.** [reproduced 2026-11-02] `typecheck`
+  shows `g :: Vec a Int -> Int` for `Vec n Int`; the no-instance message
+  does the same.

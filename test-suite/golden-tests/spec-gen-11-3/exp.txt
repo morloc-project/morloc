@@ -1,0 +1,3 @@
+{"pts":[{"x":1,"y":2},{"x":3,"y":4}],"best":{"x":3,"y":4}}
+{"pts":[],"best":null}
+"dict Pt Pt Pt"

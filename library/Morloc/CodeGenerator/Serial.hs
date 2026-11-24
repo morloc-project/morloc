@@ -16,19 +16,27 @@ pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST
+  , makeWireSerialAST
   , checkTableColumns
   , checkPackerCoherence
   , findPackerInstances
   , findCoveringPacker
+  , selectPackerInstance
   , PackerInstance (..)
   , wireSerialAstToType
+  , Unpacked
+  , unpackedAsTypeF
+  , generatedObject
   , containsFunT
   , containsEffectT
   , checkReadDataType
   , checkWriteDataType
+  , checkComparable
   , containsFunF
   , serialAstHasString
   , serialKids
+  , serialSubtrees
+  , serialAstSources
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
@@ -38,6 +46,8 @@ module Morloc.CodeGenerator.Serial
   , serialAstToMsgpackSchema
   , rerootUnder
   , serialOuterName
+  , serialOuterKey
+  , backRefMatches
   , serialAstToGeneralSchema
   , encode64
   , closureWireSchema
@@ -49,6 +59,7 @@ module Morloc.CodeGenerator.Serial
   , generalTypeToSerialAST
   ) where
 
+import Morloc.Data.Zip (zipSame)
 import qualified Data.Char as C
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
@@ -61,9 +72,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, typeUToNatExpr, unqualify)
-import qualified Morloc.Typecheck.NatSolver as NS
-import qualified Data.List as List
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Typecheck.Internal (apply, emptyGamma, prettyConstraint, qualify, substitute, subtype, unqualify)
 import Morloc.Frontend.TypeNames (isReservedTypeName)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
@@ -102,13 +112,13 @@ serialAstToTypeWith' ::
 serialAstToTypeWith' onPack onClosure = go
   where
     go (SerialPack _ (p, s)) = onPack p (go s)
-    go (SerialList v (Just d) s) = AppF (VarF v) [d, go s]
-    go (SerialList v Nothing s) = AppF (VarF v) [go s]
-    go (SerialTuple v ss) = AppF (VarF v) (map go ss)
-    go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
-    go (SerialRec v _) = RecF v
+    go (SerialList v (Just d) s) = AppF (VarF v) [KiA d, TyA (go s)]
+    go (SerialList v Nothing s) = AppF (VarF v) [TyA (go s)]
+    go (SerialTuple v ss) = AppF (VarF v) (map (TyA . go) ss)
+    go (SerialObject o n ps rs) = NamF o n ps (map (second go) rs)
+    go (SerialRec v ps) = RecF v ps
     go (SerialEnum v ps ns) = EnumF v ps ns
-    go (SerialVariant v ps as) = VariantF v ps [(n, map go fs) | (n, fs) <- as]
+    go (SerialVariant v ps _ as) = VariantF v ps [(n, map go fs) | (n, fs) <- as]
     go (SerialReal x) = VarF x
     go (SerialFloat32 x) = VarF x
     go (SerialFloat64 x) = VarF x
@@ -133,9 +143,53 @@ serialAstToTypeWith' onPack onClosure = go
     -- passthrough type, it cannot be deserialized or serialized, only passed in from a different language
     go (SerialUnknown v) = UnkF v
 
-serialAstToType :: SerialAST -> TypeF
-serialAstToType =
-  serialAstToTypeWith (\ins out -> FunF (map serialAstToType ins) (serialAstToType out))
+-- | A type at the unpacked level: the native value after its packers have
+-- run, the shape the marshaller walks. It is distinct from a native type
+-- ('TypeF'): a record at this level carries the native arguments of its
+-- use, which name no unpacked value, so it is spelled from its fields
+-- (GEN-9). 'unpackedAsTypeF' is the one way back to a 'TypeF'.
+newtype Unpacked = Unpacked TypeF
+  deriving (Show, Eq, Ord)
+
+-- | Use an unpacked type where a 'TypeF' is expected: to walk it, or to
+-- render it through a renderer that spells records from their fields.
+unpackedAsTypeF :: Unpacked -> TypeF
+unpackedAsTypeF (Unpacked t) = t
+
+-- | The unpacked type of a serial form. A generated record converts its
+-- own fields (GEN-14), so it is unpacked as it is held: its native type. So
+-- is a closure: it crosses as its origin whatever its signature, and its
+-- arguments are converted where it is called.
+serialAstToType :: SerialAST -> Unpacked
+serialAstToType = Unpacked . throughNodes (\ins out -> FunF (map serialAstToNativeType ins) (serialAstToNativeType out))
+
+-- | A generated record, whose marshalling node converts its own fields
+-- (GEN-14). Only C++ and Rust pools have such nodes; 'makeSerialAST'
+-- refuses the form in any other language.
+generatedObject :: SerialAST -> Bool
+generatedObject (SerialObject _ (FV _ (CV "struct")) _ _) = True
+generatedObject _ = False
+
+-- | A node that converts its own fields: a generated record, or a `data`
+-- type in a compiled pool (GEN-14). It is held and unpacked as its native
+-- type.
+convertsItself :: SerialAST -> Bool
+convertsItself (SerialVariant _ _ c _) = c
+convertsItself s = generatedObject s
+
+throughNodes :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
+throughNodes onClosure s
+  | convertsItself s = serialAstToNativeType s
+  | otherwise = case s of
+      SerialPack _ (_, inner) -> throughNodes onClosure inner
+      SerialList v (Just d) x -> AppF (VarF v) [KiA d, TyA (throughNodes onClosure x)]
+      SerialList v Nothing x -> AppF (VarF v) [TyA (throughNodes onClosure x)]
+      SerialTuple v xs -> AppF (VarF v) (map (TyA . throughNodes onClosure) xs)
+      SerialObject o n ps rs -> NamF o n ps (map (second (throughNodes onClosure)) rs)
+      SerialOptional _ x -> OptionalF (throughNodes onClosure x)
+      SerialVariant v ps _ as -> VariantF v ps [(c, map (throughNodes onClosure) fs) | (c, fs) <- as]
+      SerialClosure ins out -> onClosure ins out
+      _ -> serialAstToTypeWith onClosure s
 
 {- | The NATIVE type a wire form denotes: at a custom-packed node this is the
 type the pool actually holds, where 'serialAstToType' gives the shape the value
@@ -159,8 +213,8 @@ serialAstToNativeType =
 -- not as the native function. Each backend supplies its own concrete wire-tuple
 -- leaf (e.g. the C++ @std::tuple<...>@ or Rust @(String,i64,Vec<Vec<u8>>)@
 -- injected via the leaf's concrete name).
-wireSerialAstToType :: TypeF -> SerialAST -> TypeF
-wireSerialAstToType wire = serialAstToTypeWith (\_ _ -> wire)
+wireSerialAstToType :: TypeF -> SerialAST -> Unpacked
+wireSerialAstToType wire = Unpacked . throughNodes (\_ _ -> wire)
 
 -- | True when a function type appears anywhere in the type (a bare function, or
 -- one nested in a list/tuple/record/optional/effect). Used both by the nexus
@@ -168,8 +222,8 @@ wireSerialAstToType wire = serialAstToTypeWith (\_ _ -> wire)
 -- generating a native struct (de)serializer for a record with a function field).
 containsFunT :: Type -> Bool
 containsFunT (FunT _ _) = True
-containsFunT (AppT t ts) = containsFunT t || any containsFunT ts
-containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) rs
+containsFunT (AppT t ts) = containsFunT t || any containsFunT (tyArgs ts)
+containsFunT (NamT _ _ ts rs) = any containsFunT (tyArgs ts) || any (containsFunT . snd) rs
 containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
@@ -178,8 +232,8 @@ containsFunT _ = False
 containsEffectT :: Type -> Bool
 containsEffectT (EffectT _ _) = True
 containsEffectT (FunT ts t) = any containsEffectT ts || containsEffectT t
-containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT ts
-containsEffectT (NamT _ _ ts rs) = any containsEffectT ts || any (containsEffectT . snd) rs
+containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT (tyArgs ts)
+containsEffectT (NamT _ _ ts rs) = any containsEffectT (tyArgs ts) || any (containsEffectT . snd) rs
 containsEffectT (OptionalT t) = containsEffectT t
 containsEffectT _ = False
 
@@ -217,14 +271,40 @@ checkWriteDataType i intr holdsClosure tdoc
           <+> "Run the suspension first (x <- e) and write the value."
   | otherwise = return ()
 
+-- | INTR-7: @eq and @le compare a wire value the runtime can order, of a
+-- type the program determines.
+checkComparable :: Int -> Intrinsic -> MDoc -> SerialAST -> MorlocMonad ()
+checkComparable i intr tdoc ast = case incomparable ast of
+  Nothing -> return ()
+  Just what ->
+    MM.throwSourcedError i $
+      "Values of type" <+> tdoc <+> "cannot be compared on the wire (@" <> pretty (intrinsicName intr)
+        <> "): the type holds" <+> what <> ". Write an Eq or Ord instance for it instead."
+  where
+    incomparable s0 = case s0 of
+      SerialPack _ (_, s) -> incomparable s
+      SerialList _ _ s -> incomparable s
+      SerialOptional _ s -> incomparable s
+      SerialTuple _ ss -> firstOf ss
+      SerialObject NamTable _ _ _ -> Just "a table"
+      SerialObject _ _ _ rs -> firstOf (map snd rs)
+      SerialVariant _ _ _ arms -> firstOf (concatMap snd arms)
+      SerialIFile {} -> Just "a file handle"
+      SerialOStream {} -> Just "a stream"
+      SerialIStream {} -> Just "a stream"
+      SerialClosure {} -> Just "a function"
+      SerialUnknown _ -> Just "a type the program leaves undetermined"
+      _ -> Nothing
+    firstOf = listToMaybe . mapMaybe incomparable
+
 -- | True when a function appears anywhere in a concrete type. A suspension
 -- is a function of no arguments at this level.
 containsFunF :: TypeF -> Bool
 containsFunF (FunF _ _) = True
-containsFunF (AppF t ts) = containsFunF t || any containsFunF ts
-containsFunF (NamF _ _ ts rs) = any containsFunF ts || any (containsFunF . snd) rs
-containsFunF (EnumF _ ts _) = any containsFunF ts
-containsFunF (VariantF _ ts arms) = any containsFunF ts || any (any containsFunF . snd) arms
+containsFunF (AppF t ts) = containsFunF t || any containsFunF (tyArgs ts)
+containsFunF (NamF _ _ ts rs) = any containsFunF (tyArgs ts) || any (containsFunF . snd) rs
+containsFunF (EnumF _ ts _) = any containsFunF (tyArgs ts)
+containsFunF (VariantF _ ts arms) = any containsFunF (tyArgs ts) || any (any containsFunF . snd) arms
 containsFunF (OptionalF t) = containsFunF t
 containsFunF _ = False
 
@@ -246,7 +326,7 @@ serialAstHasString (SerialTuple _ ss) = any serialAstHasString ss
 serialAstHasString (SerialObject _ _ _ rs) = any (serialAstHasString . snd) rs
 serialAstHasString (SerialPack _ (_, s)) = serialAstHasString s
 serialAstHasString (SerialOptional _ s) = serialAstHasString s
-serialAstHasString (SerialVariant _ _ arms) = any (any serialAstHasString . snd) arms
+serialAstHasString (SerialVariant _ _ _ arms) = any (any serialAstHasString . snd) arms
 serialAstHasString (SerialClosure captured _) = any serialAstHasString captured
 serialAstHasString _ = False
 
@@ -306,7 +386,7 @@ serialAstToSchemaWith renderHint ast = emit [] ast
       declare path node name [] $ \p ->
         renderHint v <> "a" <> encodeDim dim <> emit p s
       where
-        encodeDim (Just (NatLitF n)) = ":" <> pretty n
+        encodeDim (Just (NatLitK n)) = ":" <> pretty n
         encodeDim _                  = ""  -- no slot or void-valued slot
     emit path node@(SerialTuple v@(FV name _) ss) =
       declare path node name [] $ \p ->
@@ -322,9 +402,6 @@ serialAstToSchemaWith renderHint ast = emit [] ast
         renderHint v <> "m" <> encode64D (length rs)
           <> foldl (<>) "" (map (keypair p) rs)
     emit path (SerialRec (FV name _) ps) = "^" <> encodeKey (resolveWireName path name ps)
-    -- A `data` type's occurrence inside itself: a back-reference like the
-    -- record form above, carrying its arguments for the renderers' sake.
-    emit path (SerialVariant (FV name _) ps []) = "^" <> encodeKey (resolveWireName path name ps)
     -- `e <count> ( <klen><CtorName> )*`, with the type's own name carried
     -- by the concrete-type hint exactly as a record's is -- `m` does not
     -- spell out the record name either. Counts and key lengths use the
@@ -336,7 +413,7 @@ serialAstToSchemaWith renderHint ast = emit [] ast
     -- `v <count> ( <klen><ArmName> <arity> <schema>*arity )*`. The arity is
     -- written out rather than implied so a reader can skip an arm without
     -- understanding its field types.
-    emit path node@(SerialVariant v@(FV name _) ps as) =
+    emit path node@(SerialVariant v@(FV name _) ps _ as) =
       declare path node name ps $ \p ->
         renderHint v <> "v" <> encode64D (length as)
           <> foldl (<>) "" [ encodeKey n <> encode64D (length fs)
@@ -376,7 +453,7 @@ serialAstToSchemaWith renderHint ast = emit [] ast
     -- Emit a container node. It goes on the declaration path for its
     -- subtree, and gets the @&<klen><name>@ prefix iff a back-reference
     -- below resolves to it; otherwise the wire form is the unprefixed one.
-    declare :: DeclPath -> SerialAST -> TVar -> [TypeF] -> (DeclPath -> MDoc) -> MDoc
+    declare :: DeclPath -> SerialAST -> TVar -> [ArgF] -> (DeclPath -> MDoc) -> MDoc
     declare path node name ps body =
       let path' = pushDecl path name ps
           wire = declWireName path'
@@ -445,7 +522,7 @@ isFixedWidthShape _ = False
 -- | The container nodes enclosing the node being emitted, innermost
 -- first: each entry is a node's type name, the arguments it was
 -- instantiated with, and the name it declares on the wire.
-type DeclPath = [(TVar, [TypeF], DT.Text)]
+type DeclPath = [(TVar, [ArgF], DT.Text)]
 
 -- | Enter a container node. Two instantiations of one type can nest --
 -- an @L Int@ inside an @L Str@ -- and a back-reference from inside the
@@ -454,7 +531,7 @@ type DeclPath = [(TVar, [TypeF], DT.Text)]
 -- @name#1@, and so on. The runtime resolves a back-reference to the
 -- nearest enclosing declaration with the same wire name, which is then
 -- exactly the node meant.
-pushDecl :: DeclPath -> TVar -> [TypeF] -> DeclPath
+pushDecl :: DeclPath -> TVar -> [ArgF] -> DeclPath
 pushDecl path name ps =
   let k = length [() | (n, _, _) <- path, n == name]
       wire = if k == 0 then unTVar name else unTVar name <> "#" <> DT.pack (show k)
@@ -465,17 +542,22 @@ declWireName ((_, _, wire) : _) = wire
 declWireName [] = ""
 
 -- | The wire name a back-reference resolves to: the nearest enclosing
--- node of that name built with the same arguments, else the nearest of
--- that name (a node that carries no arguments, such as a list-shaped
--- alias, is matched by name alone). A reference with no enclosing node
--- keeps its bare name; the runtime rejects it as undeclared.
-resolveWireName :: DeclPath -> TVar -> [TypeF] -> DT.Text
+-- node it matches ('backRefMatches'). One that matches none keeps its bare
+-- name; 'makeSerialAST' refuses such a schema.
+resolveWireName :: DeclPath -> TVar -> [ArgF] -> DT.Text
 resolveWireName path name ps =
-  case [w | (n, qs, w) <- path, n == name, qs == ps] of
+  case [w | (n, qs, w) <- path, backRefMatches (n, qs) name ps] of
     (w : _) -> w
-    [] -> case [w | (n, _, w) <- path, n == name] of
-      (w : _) -> w
-      [] -> unTVar name
+    [] -> unTVar name
+
+-- | Whether a back-reference names an enclosing node, given the node's
+-- name and arguments: one carrying arguments names the node of its name at
+-- those arguments; one carrying none (a reference cut by name, or the
+-- self-containing instance of a `data` type) names the nearest node of its
+-- name, as does any reference to a node that carries none (a list- or
+-- tuple-shaped recursive alias).
+backRefMatches :: (TVar, [ArgF]) -> TVar -> [ArgF] -> Bool
+backRefMatches (n, qs) name ps = n == name && (null ps || null qs || map argFKey qs == map argFKey ps)
 
 -- | Whether a back-reference somewhere under @node@ resolves to the wire
 -- name @wire@, given that @node@'s own declaration is already the head of
@@ -488,15 +570,22 @@ refersTo path wire node = any (refersFrom path wire) (serialKids node)
 refersFrom :: DeclPath -> DT.Text -> SerialAST -> Bool
 refersFrom path wire n = case n of
   SerialRec (FV name _) ps -> resolveWireName path name ps == wire
-  SerialVariant (FV name _) ps [] -> resolveWireName path name ps == wire
   SerialList (FV name _) _ _ -> refersTo (pushDecl path name []) wire n
   SerialTuple (FV name _) _ -> refersTo (pushDecl path name []) wire n
   SerialObject NamTable _ _ _ -> refersTo path wire n
   SerialObject _ (FV name _) ps _ -> refersTo (pushDecl path name ps) wire n
-  SerialVariant (FV name _) ps _ -> refersTo (pushDecl path name ps) wire n
+  SerialVariant (FV name _) ps _ _ -> refersTo (pushDecl path name ps) wire n
   SerialPack _ _ -> refersTo path wire n
   SerialOptional _ _ -> refersTo path wire n
   _ -> False
+
+-- | A serial AST and every subtree under it ('serialKids').
+serialSubtrees :: SerialAST -> [SerialAST]
+serialSubtrees a = a : concatMap serialSubtrees (serialKids a)
+
+-- | The sources of the packers a serial form calls.
+serialAstSources :: SerialAST -> [Source]
+serialAstSources s = concat [[val (typePackerForward p), val (typePackerReverse p)] | SerialPack _ (p, _) <- serialSubtrees s]
 
 -- | The immediate sub-trees of a node.
 serialKids :: SerialAST -> [SerialAST]
@@ -505,7 +594,7 @@ serialKids (SerialList _ _ s) = [s]
 serialKids (SerialTuple _ ss) = ss
 serialKids (SerialObject _ _ _ rs) = map snd rs
 serialKids (SerialOptional _ s) = [s]
-serialKids (SerialVariant _ _ as) = concatMap snd as
+serialKids (SerialVariant _ _ _ as) = concatMap snd as
 serialKids _ = []
 
 -- | Make a sub-tree of a serial AST self-contained, so it can be emitted
@@ -525,8 +614,7 @@ rerootUnder parent child = case serialOuterName parent of
   where
     -- A nested declaration of the same name shadows the parent, so the
     -- references under it are its own and stay.
-    go v (SerialRec (FV v' _) _) | v' == v = parent
-    go v (SerialVariant (FV v' _) _ []) | v' == v = parent
+    go v n | backRefName n == Just v = parent
     go v (SerialPack fv (p, s)) = SerialPack fv (p, go v s)
     go v n@(SerialList fv@(FV v' _) d s)
       | v' == v = n
@@ -538,22 +626,25 @@ rerootUnder parent child = case serialOuterName parent of
       | v' == v && nt /= NamTable = n
       | otherwise = SerialObject nt fv ps [(k, go v s) | (k, s) <- rs]
     go v (SerialOptional fv s) = SerialOptional fv (go v s)
-    go v n@(SerialVariant fv@(FV v' _) ps as)
+    go v n@(SerialVariant fv@(FV v' _) ps c as)
       | v' == v = n
-      | otherwise = SerialVariant fv ps [(n', map (go v) fs) | (n', fs) <- as]
+      | otherwise = SerialVariant fv ps c [(n', map (go v) fs) | (n', fs) <- as]
     go _ s = s
 
 -- | The name a serial AST's outermost node would declare, if it were the
 -- target of a back-reference.
 serialOuterName :: SerialAST -> Maybe TVar
-serialOuterName (SerialPack _ (_, s)) = serialOuterName s
-serialOuterName (SerialList (FV v _) _ _) = Just v
-serialOuterName (SerialTuple (FV v _) _) = Just v
-serialOuterName (SerialObject _ (FV v _) _ _) = Just v
-serialOuterName (SerialOptional (FV v _) _) = Just v
-serialOuterName (SerialVariant _ _ []) = Nothing
-serialOuterName (SerialVariant (FV v _) _ _) = Just v
-serialOuterName _ = Nothing
+serialOuterName = fmap fst . serialOuterKey
+
+-- | 'serialOuterName', with the arguments the node declares it at.
+serialOuterKey :: SerialAST -> Maybe (TVar, [ArgF])
+serialOuterKey (SerialPack _ (_, s)) = serialOuterKey s
+serialOuterKey (SerialList (FV v _) _ _) = Just (v, [])
+serialOuterKey (SerialTuple (FV v _) _) = Just (v, [])
+serialOuterKey (SerialObject _ (FV v _) ps _) = Just (v, ps)
+serialOuterKey (SerialOptional (FV v _) _) = Just (v, [])
+serialOuterKey (SerialVariant (FV v _) ps _ _) = Just (v, ps)
+serialOuterKey _ = Nothing
 
 -- | Emit a schema hint for a newtype boundary. For a default primitive
 -- (gv is one of the built-in base types like Int, Real, Str, etc.) the
@@ -578,22 +669,18 @@ isBuiltinBaseType v = v `elem`
   , BT.int, BT.i8, BT.i16, BT.i32, BT.i64
   , BT.uint, BT.u8, BT.u16, BT.u32, BT.u64
   , BT.list
-  ] || isTupleBaseType v
-  where
-    isTupleBaseType (TV name) = any (\k -> BT.tuple k == TV name) [2 .. 12]
+  ] || isTupleName (unTVar v)
 
 -- | get only the toplevel type
 --
--- See 'serialAstToType' for the dim-as-NatLitF convention used to keep macro
--- indices aligned with concrete-type bodies.
+-- See 'serialAstToType' for the dim convention used to keep macro indices
+-- aligned with concrete-type bodies.
 shallowType :: SerialAST -> TypeF
 shallowType (SerialPack _ (p, _)) = typePackerPacked p
-shallowType (SerialList v (Just d) s) = AppF (VarF v) [d, shallowType s]
-shallowType (SerialList v Nothing s) = AppF (VarF v) [shallowType s]
-shallowType (SerialTuple v ss) = AppF (VarF v) $ map shallowType ss
-shallowType (SerialObject o n ps rs) =
-  let ts = map (shallowType . snd) rs
-   in NamF o n ps (zip (map fst rs) ts)
+shallowType (SerialList v (Just d) s) = AppF (VarF v) [KiA d, TyA (shallowType s)]
+shallowType (SerialList v Nothing s) = AppF (VarF v) [TyA (shallowType s)]
+shallowType (SerialTuple v ss) = AppF (VarF v) $ map (TyA . shallowType) ss
+shallowType (SerialObject o n ps rs) = NamF o n ps (map (second shallowType) rs)
 shallowType (SerialReal x) = VarF x
 shallowType (SerialFloat32 x) = VarF x
 shallowType (SerialFloat64 x) = VarF x
@@ -615,16 +702,10 @@ shallowType (SerialIStream x _) = VarF x
 shallowType (SerialClosure ins out) = FunF (map shallowType ins) (shallowType out)
 shallowType (SerialNull x) = VarF x
 shallowType (SerialOptional _ s) = OptionalF (shallowType s)
--- A back-reference re-uses the ancestor's NamF identity; downstream
--- consumers resolve it structurally via the FVar's general TVar.
--- The FVar's CVar slot is unreliable -- it carries whatever bnd-
--- protected text @weave@ produced for the position. Consumers that
--- need the language-side name look it up in cscope (e.g. C++ does
--- this in 'CppTranslator.hs' to distinguish legitimate user mappings
--- from pairEval bnd-protect leaks).
-shallowType (SerialRec v _) = RecF v
+-- A back-reference is a reference to its record at its arguments.
+shallowType (SerialRec v ps) = RecF v ps
 shallowType (SerialEnum v ps ns) = EnumF v ps ns
-shallowType (SerialVariant v ps as) = VariantF v ps [(n, map shallowType fs) | (n, fs) <- as]
+shallowType (SerialVariant v ps _ as) = VariantF v ps [(n, map shallowType fs) | (n, fs) <- as]
 shallowType (SerialUnknown v) = UnkF v
 
 -- | One @Packable@ instance: the type it packs, the wire form it packs to,
@@ -636,8 +717,8 @@ shallowType (SerialUnknown v) = UnkF v
 data PackerInstance = PackerInstance
   { piHead :: TypeU
   , piWire :: TypeU
-  , piSources :: Map.Map Lang (Source, Source)
-  , piPacks :: Map.Map Lang Source
+  , piSources :: Map.Map Lang (Indexed Source, Indexed Source)
+  , piPacks :: Map.Map Lang (Indexed Source)
   -- ^ the languages that implement @pack@, whether or not they also
   -- implement @unpack@
   }
@@ -665,6 +746,8 @@ data PackerInstance = PackerInstance
 -- is read by another under a form it was never written with.
 checkPackerCoherence :: MorlocMonad ()
 checkPackerCoherence = do
+  env <- MM.gets stateInstances
+  mapM_ checkPackerSources (FI.instanceDecls env FI.packableClass)
   instances <- findPackerInstances
   let byKey =
         Map.fromListWith
@@ -700,59 +783,42 @@ checkPackerCoherence = do
               <> "\nwritten under one form and read under the other."
               <> "\nGive the type one wire form."
 
+-- CLS-20: in each language an instance has one source of pack and of unpack.
+checkPackerSources :: InstanceDecl -> MorlocMonad ()
+checkPackerSources d =
+  sequence_
+    [ MM.throwSourcedError i $
+        "The instance" <+> prettyConstraint (FI.keyConstraint (idKey d))
+          <+> "has several" <+> pretty lang <+> "sources of" <+> squotes (pretty m) <> ":"
+          <+> hsep [squotes (pretty (srcName s)) | Idx _ s <- srcs]
+          <> ". Import fewer modules or remove one"
+    | m <- [EV "pack", EV "unpack"]
+    , (lang, srcs@(Idx i _ : _ : _)) <- Map.toList (Map.fromListWith (flip (<>)) [(srcLang (val s), [s]) | s <- FI.declSources m d])
+    ]
+
 findPackerInstances :: MorlocMonad [PackerInstance]
 findPackerInstances = do
-  sigmap <- MM.gets stateTypeclasses
-  let packs = methodSignatures (EV "pack") sigmap
-      unpacks = methodSignatures (EV "unpack") sigmap
+  env <- MM.gets stateInstances
   return
     [ PackerInstance
         { piHead = qualify vs1 b1
         , piWire = qualify vs1 a1
         , piSources = pairByLang packSrcs unpackSrcs
-        , piPacks = Map.fromList [(srcLang p, p) | p <- packSrcs]
+        , piPacks = Map.fromList [(srcLang (val p), p) | p <- packSrcs]
         }
-    | ((vs1, FunU [a1] b1), packSrcs) <- packs
-    , ((vs2, FunU [a2] b2), unpackSrcs) <- unpacks
-    , length vs1 == length vs2
-    , canonical vs1 (FunU [a1] b1) == canonical vs2 (FunU [b2] a2)
+    | d <- FI.instanceDecls env FI.packableClass
+    , Just pack <- [FI.methodTerm (EV "pack") d]
+    , Just unpack <- [FI.methodTerm (EV "unpack") d]
+    , (vs1, FunU [a1] b1) <- [unqualify (etype (FI.mtType pack))]
+    , (vs2, FunU [a2] b2) <- [unqualify (etype (FI.mtType unpack))]
+    , canonicalHead [qualify vs1 (FunU [a1] b1)] == canonicalHead [qualify vs2 (FunU [b2] a2)]
+    , let packSrcs = map snd (FI.mtSources pack)
+    , let unpackSrcs = map snd (FI.mtSources unpack)
     ]
   where
-    -- The two signatures come from one instance, but merging instances with
-    -- equal heads may leave them with different variable names, so they are
-    -- compared up to renaming.
-    canonical :: [TVar] -> TypeU -> TypeU
-    canonical vs t =
-      let order = List.nub [v | v <- occurrences t, v `elem` vs]
-          names = Map.fromList (zip order [TV ("_" <> DT.pack (show k)) | k <- [(0 :: Int) ..]])
-       in rename names t
-
-    occurrences :: TypeU -> [TVar]
-    occurrences (VarU v) = [v]
-    occurrences (KVarU (v, _)) = [v]
-    occurrences t = concatMap occurrences (typeUChildren t)
-
-    rename :: Map.Map TVar TVar -> TypeU -> TypeU
-    rename m (VarU v) = VarU (Map.findWithDefault v v m)
-    rename m (KVarU (v, k)) = KVarU (Map.findWithDefault v v m, k)
-    rename m t = mapTypeUChildren (rename m) t
-
-    methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Source])]
-    methodSignatures name sigmap = case Map.lookup name sigmap of
-      (Just (Instance _ _ _ ts)) -> concatMap sigOf ts
-      Nothing -> []
-
-    sigOf :: TermTypes -> [(([TVar], TypeU), [Source])]
-    sigOf (TermTypes (Just et) (map (val . snd) -> srcs) _) =
-      [(unqualify (etype et), srcs)]
-    sigOf (TermTypes Nothing _ _) = []
-
-    -- A language declares at most one source per method; two are rejected
-    -- earlier as ambiguous source declarations.
-    pairByLang :: [Source] -> [Source] -> Map.Map Lang (Source, Source)
+    pairByLang :: [Indexed Source] -> [Indexed Source] -> Map.Map Lang (Indexed Source, Indexed Source)
     pairByLang ps us =
-      Map.fromList
-        [(srcLang p, (p, u)) | p <- ps, u <- us, srcLang p == srcLang u]
+      Map.fromList [(srcLang (val p), (p, u)) | p <- ps, u <- us, srcLang (val p) == srcLang (val u)]
 
 -- Takes a map of packers with concrete type names as keys. A single concrete
 -- type name may map to many single types. For example, the python type "dict"
@@ -762,21 +828,24 @@ findPackerInstances = do
 -- morloc general type system and many other languages. So the map contains a
 -- list of possible packers. Matching the concrete type name to the right packer
 -- will be done through subtyping.
--- | Put a name on the head of a serializer.
+-- | Put a name, with its arguments, on the head of a serializer.
 --
--- The wire form is unchanged -- only which name the schema reports it under.
--- A newtype that declares a per-language form of its own is not simply its
--- wire parent natively, so the serializer built from the parent has to carry
--- the newtype's name for the concrete-type hint to reach the pool.
-setSerialHead :: FVar -> SerialAST -> SerialAST
-setSerialHead v s = case s of
+-- The wire form is unchanged. A newtype that declares a per-language form
+-- of its own is not simply its wire parent natively, so the serializer built
+-- from the parent carries the newtype's name, for the concrete-type hint to
+-- reach the pool, and the newtype's arguments, for its form to be spelled
+-- at them. The back-references inside a renamed record or `data` node that
+-- meant it are renamed with it, so they still name their declaration
+-- (NOM-6); a back-reference keeps the name of the node it was cut at.
+setSerialHead :: FVar -> [ArgF] -> SerialAST -> SerialAST
+setSerialHead v ps s = case s of
   SerialPack _ x -> SerialPack v x
   SerialList _ d x -> SerialList v d x
   SerialTuple _ xs -> SerialTuple v xs
-  SerialObject o _ ps rs -> SerialObject o v ps rs
-  SerialEnum _ ps ns -> SerialEnum v ps ns
-  SerialVariant _ ps as -> SerialVariant v ps as
-  SerialRec _ ps -> SerialRec v ps
+  SerialObject o (FV g _) qs rs -> renameRefs g qs (SerialObject o v ps rs)
+  SerialEnum _ _ ns -> SerialEnum v ps ns
+  SerialVariant (FV g _) qs c as -> renameRefs g qs (SerialVariant v ps c as)
+  SerialRec _ _ -> s
   SerialReal _ -> SerialReal v
   SerialFloat32 _ -> SerialFloat32 v
   SerialFloat64 _ -> SerialFloat64 v
@@ -801,6 +870,27 @@ setSerialHead v s = case s of
   -- A closure carries no name of its own; its wire form is signature
   -- independent, so there is no head to rename.
   SerialClosure _ _ -> s
+  where
+    -- References to the old head, by its name and arguments or by name
+    -- alone, under the renamed node and outside any nested node that
+    -- redeclares it.
+    renameRefs g qs node = case node of
+      SerialObject o w ws rs -> SerialObject o w ws [(k, go x) | (k, x) <- rs]
+      SerialVariant w ws c as -> SerialVariant w ws c [(n, map go xs) | (n, xs) <- as]
+      _ -> node
+      where
+        keys = map argFKey qs
+        go x = case x of
+          SerialRec (FV g' _) rs | g' == g, null rs || map argFKey rs == keys -> SerialRec v ps
+          SerialObject _ (FV g' _) ws _ | g' == g, map argFKey ws == keys -> x
+          SerialVariant (FV g' _) ws _ _ | g' == g, map argFKey ws == keys -> x
+          SerialObject o w ws rs -> SerialObject o w ws [(k, go y) | (k, y) <- rs]
+          SerialVariant w ws c as -> SerialVariant w ws c [(n, map go ys) | (n, ys) <- as]
+          SerialPack w (p, y) -> SerialPack w (p, go y)
+          SerialList w d y -> SerialList w d (go y)
+          SerialTuple w ys -> SerialTuple w (map go ys)
+          SerialOptional w y -> SerialOptional w (go y)
+          _ -> x
 
 -- | A declared column is checked against the block's Arrow type at every
 -- crossing, and only the flat primitives have an Arrow form the runtime
@@ -860,6 +950,44 @@ checkNested m lang ast = case concatMap nested (serialKids (unpack ast)) of
     nested (SerialUnknown (FV v _)) = [Right v]
     nested s = concatMap nested (serialKids s)
 
+-- | The serial form of a value a pool writes to, or reads from, another
+-- process.
+makeWireSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
+makeWireSerialAST m lang t = do
+  ast <- makeSerialAST m lang t
+  checkLevelPacking m lang ast
+  return ast
+
+-- | A recursive value is marshalled by one walk of its type, re-entering
+-- its cycle through a back-reference, so a packer inside the cycle runs at
+-- every level only if a node that converts itself (GEN-14) holds it there.
+-- Any other packer would run at the top level only, so such a type is
+-- refused rather than marshalled unpacked.
+checkLevelPacking :: Int -> Lang -> SerialAST -> MorlocMonad ()
+checkLevelPacking m lang ast
+  | not (any (isJust . backRefName) (serialSubtrees ast)) = return ()
+  | otherwise =
+  case [v | s <- serialSubtrees ast, not (isPack s), Just v <- [serialOuterName s], any ((== Just v) . backRefName) (serialSubtrees s), any isPack (inCycle s)] of
+    (v : _) -> MM.throwSourcedError m $
+      "The recursive type" <+> squotes (pretty v) <+> "holds a value that needs packing in" <+> pretty lang
+        <+> "(a Packable instance) inside its cycle, and a recursive value cannot yet be packed"
+        <+> "level by level here, so it cannot be passed between processes, saved, loaded or shown."
+    [] -> return ()
+  where
+    inCycle s
+      | convertsItself s = []
+      | otherwise = concatMap unconverted (serialKids s)
+    unconverted x
+      | convertsItself x = []
+      | otherwise = x : concatMap unconverted (serialKids x)
+    isPack (SerialPack _ _) = True
+    isPack _ = False
+
+-- | The declaration a back-reference names.
+backRefName :: SerialAST -> Maybe TVar
+backRefName (SerialRec (FV v _) _) = Just v
+backRefName _ = Nothing
+
 noWireForm :: Int -> Lang -> TVar -> MorlocMonad a
 noWireForm m lang v = MM.throwSourcedError m $
   "The type" <+> squotes (pretty v) <+> "has no" <+> pretty lang
@@ -871,7 +999,7 @@ noWireForm m lang v = MM.throwSourcedError m $
 schemaOfHeld :: Int -> Lang -> SerialAST -> MorlocMonad DT.Text
 schemaOfHeld m lang ast = case unpack ast of
   SerialUnknown (FV v _) -> noWireForm m lang v
-  _ -> return (render (serialAstToMsgpackSchema ast))
+  _ -> checkLevelPacking m lang ast >> return (render (serialAstToMsgpackSchema ast))
   where
     unpack (SerialPack _ (_, s)) = unpack s
     unpack s = s
@@ -894,8 +1022,22 @@ makeSerialAST m lang t0 = do
 
   ast <- makeSerialAST' gscope typepackers Set.empty t0
   checkNested m lang ast
+  case danglingRefs [] ast of
+    [] -> return ()
+    (n : _) -> MM.throwCompilerBug ("a wire schema refers back to" <+> squotes (pretty n) <+> "outside any declaration of it:" <+> pretty t0)
+  when (langName lang `notElem` ["cpp", "rust"] && any generatedObject (serialSubtrees ast)) $
+    MM.throwCompilerBug ("a" <+> pretty lang <+> "record has the form of a record a compiled pool marshals itself")
   return ast
   where
+    -- A compiled pool marshals a `data` value in its own node, which
+    -- converts the arms' fields (GEN-14).
+    convertsOwn = langName lang `elem` ["cpp", "rust"]
+    -- A declared type is on the path when an instance with its key is, so
+    -- one instance reached through two spellings is declared once (NOM-6).
+    -- A type that is not declared is matched as written.
+    onPath t anc = case declaredKey t of
+      Just k -> any ((== Just k) . declaredKey) (Set.toList anc)
+      Nothing -> Set.member t anc
     -- The @Set TypeF@ is the types on the path above this one, and it is
     -- what a self-reference is recognised against. The whole type is the
     -- key, not its name: two instantiations of one parameterized type are
@@ -916,51 +1058,44 @@ makeSerialAST m lang t0 = do
         Nothing -> MM.throwSourcedError m "Unsupported language"
         (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
       return $ SerialUnknown (FV gv serialType)
-    -- The constructor table is the wire form, and a constructor LITERAL
-    -- reports a type holding only its own arm. Take the declaration's table
-    -- whenever the scope has it, so the schema cannot be narrowed to
-    -- whichever arm happened to be built here.
+    -- The constructor table is the wire form: take the declaration's.
     makeSerialAST' gscope _ _ (EnumF v@(FV gv _) ps ns) =
       return . SerialEnum v ps $ case TE.enumCtors gscope (TE.whnf gscope (VarU gv)) of
-        Just declared | length declared >= length ns -> declared
-        _ -> ns
+        Just declared -> declared
+        Nothing -> ns
     -- Cycle detection at the VariantF entry, as for NamF. A constructor
     -- field naming the type being lowered is the self-referential back-edge,
     -- and it is representable precisely because the payload sits behind a
     -- pointer: the slot's width does not depend on the arms, so the width
     -- equation has a finite fixed point.
-    -- An occurrence with NO arms is the placeholder inference leaves at a
-    -- type's occurrence inside itself (a `data` has at least one
-    -- constructor, so nothing else has that shape). It names an
-    -- instantiation on the path above, and that is where the knot is tied.
-    -- The back-edge keeps the instantiation's arguments and drops its arms,
-    -- the shape inference gave it: a renderer that declares the type by name
-    -- spells the element of a `[Tree a]` arm from those arguments, and a
-    -- back-reference without them has nothing to instantiate a template
-    -- with.
-    makeSerialAST' gscope typepackers anc t@(VariantF v@(FV gv _) ps as)
-      | Set.member t anc = return $ SerialVariant v ps []
-      | null as =
-          if any (isInstantiation gv ps) (Set.toList anc)
-            then return $ SerialVariant v ps []
-            else MM.throwSourcedError m $
-              "Reference to a `data` instantiation that is not being built:"
-                <+> pretty t
+    makeSerialAST' gscope typepackers anc t@(VariantF v ps as)
+      | onPath t anc = return (SerialRec v ps)
       | otherwise = do
           anc' <- descend t anc
           as' <- mapM (\(n, fs) -> (,) n <$> mapM (makeSerialAST' gscope typepackers anc') fs) as
-          return $ SerialVariant v ps as'
+          return $ SerialVariant v ps convertsOwn as'
+    -- A reference of a record or `data` type to an enclosing occurrence of
+    -- itself, tied in inference. A self-containing `data` instance's
+    -- reference carries no arguments (its own would be infinite) and names
+    -- the one instantiation of its name on the path. One met off its type's
+    -- path (a field type taken out on its own) is the type unfolded: its
+    -- type inferred again.
+    makeSerialAST' gscope typepackers anc r@(RecF v@(FV gv _) ps)
+      | selfContaining || any ((== declaredKey r) . declaredKey) (Set.toList anc) = return (SerialRec v ps)
+      | null ps && not (null (dataTypeParams gscope gv)) =
+          MM.throwSourcedError m $ "Reference to a `data` instantiation that is not being built:" <+> pretty r
+      | otherwise = do
+          unfolded <- inferConcreteType lang (Idx m (typeOf (fst (unweaveTypeF r))))
+          makeSerialAST' gscope typepackers anc unfolded
       where
-        isInstantiation g qs (VariantF (FV g' _) qs' _) = g == g' && qs == qs'
-        isInstantiation _ _ _ = False
+        selfContaining = null ps && length [() | VariantF (FV g _) _ _ <- Set.toList anc, g == gv] == 1
     -- Cycle detection: a bare reference to a type currently being lowered is
-    -- a guarded self-recursive back-edge (TypeEval leaves these as
-    -- VarU/VarF, and a `data` type's own arms cannot be resolved against
-    -- themselves either). This is the one occurrence that carries a name
-    -- rather than a type, so it is matched by name against whatever
+    -- a guarded self-recursive back-edge of a recursive alias or `data`
+    -- type (a record's or a `data` type's arrives tied, as 'RecF'). It carries a name rather
+    -- than a type, so it is matched by name against whatever
     -- instantiation is on the path above it.
     makeSerialAST' gscope typepackers anc ft@(VarF v@(FV gv cv))
-      | any ((== Just gv) . typeFHead) (Set.toList anc) = return $ SerialRec v []
+      | any ((== Just gv) . typeFHead) (Set.toList anc) = return (SerialRec v [])
       | otherwise = dispatchVarF
       where
         -- Push this type onto the ancestor set for the scope of the body
@@ -1010,7 +1145,7 @@ makeSerialAST m lang t0 = do
                    fs)
                 ctors
               -- Reached by its bare name, so it was applied to nothing.
-              return $ SerialVariant v [] as
+              return $ SerialVariant v [] convertsOwn as
           | otherwise = do
               (cscope, _) <- getScope lang
               case aliasShape of
@@ -1044,15 +1179,21 @@ makeSerialAST m lang t0 = do
                 AliasIsOther expanded -> do
                   expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
                   ast <- withAncestorVar anc (\anc' -> makeSerialAST' gscope typepackers anc' expandedTf)
-                  return $ if Map.member gv cscope then setSerialHead v ast else ast
+                  if Map.member gv cscope
+                    then return (setSerialHead v [] ast)
+                    else return ast
                 -- No alias expansion available; fall back to Packable
                 -- lookup the same way this branch did before.
                 AliasIsNone -> case Map.lookup gv typepackers of
                   (Just ps) -> do
-                    packers <- mapM makeTypePacker ps
-                    unpacked <- mapM (makeSerialAST' gscope typepackers anc . typePackerUnpacked) packers
-                    selection <- selectPacker (zip packers unpacked)
-                    return $ SerialPack v selection
+                    selected <- selectPackerInstance m (const True) (VarU gv) ps
+                    case selected of
+                      Just pin -> do
+                        packer <- makeTypePacker pin
+                        ast <- makeSerialAST' gscope typepackers anc (typePackerUnpacked packer)
+                        return $ SerialPack v (packer, ast)
+                      Nothing ->
+                        MM.throwSourcedError m $ "No Packable instance for" <+> squotes (pretty cv) <> "."
                   Nothing ->
                     MM.throwSourcedError m $
                       "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
@@ -1124,19 +1265,6 @@ makeSerialAST m lang t0 = do
               , typePackerReverse = reverseSource
               }
 
-        -- A parameterless constructor gives selection nothing to discriminate
-        -- on: every instance for it has the same head, so more than one is
-        -- ambiguous by construction.
-        selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-        selectPacker [] =
-          MM.throwSourcedError m $ "No Packable instance for" <+> squotes (pretty cv) <> "."
-        selectPacker [x] = return x
-        selectPacker xs =
-          MM.throwSourcedError m $
-            "Ambiguous Packable instances for" <+> squotes (pretty cv) <> ":"
-              <> "\n" <> indent 2 (vsep [pretty (typePackerUnpacked tp) | (tp, _) <- xs])
-              <> "\nA type with no parameters admits only one instance; these"
-              <+> "differ only in the form they serialize to."
     -- A function value crossing a pool boundary is defunctionalized: it travels
     -- as a closure datum (home language, manifold id, captured argument packets).
     -- The argument and result schemas shape only the native callable on each
@@ -1165,7 +1293,7 @@ makeSerialAST m lang t0 = do
     -- is already lowering. @T7 (T7 Int)@ is NOT that: it is two types that
     -- share a name, and each gets its own expansion.
     makeSerialAST' gscope typepackers anc ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
-      | Set.member ft anc = return $ SerialRec fv ts0
+      | Set.member ft anc = return (SerialRec fv ts0)
       | otherwise = dispatchAppF
       where
         -- Add the outer type to the ancestor set for the scope of the body
@@ -1179,10 +1307,22 @@ makeSerialAST m lang t0 = do
         -- A handle's storage schema comes from the general type, so a pool
         -- that only passes a handle on needs no native form of its elements.
         generalStorage = case (typeOf . fst . unweaveTypeF) ft of
-          AppT _ [a] -> handleStorage m Set.empty generalTypeName a
+          AppT _ [TyA a] -> handleStorage m Set.empty generalTypeName a
           t -> MM.throwSourcedError m $ "malformed stream handle type:" <+> pretty t
 
         dispatchAppF
+          -- Typed `Table n r`: a ground row surfaces as a SerialObject
+          -- NamTable carrying the column schema. The wire encoder emits
+          -- @T:K<entries>@ (or bare @T@ for a polymorphic row); @T@ is itself
+          -- the dispatch token to the Arrow C Data Interface path. Before the
+          -- test for type arguments, since a table has none.
+          | BT.isTableVar generalTypeName = case [cols | KiA (RowK cols) <- ts0] of
+              [recRs] -> do
+                colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
+                checkTableColumns m colASTs
+                return $ SerialObject NamTable fv [] colASTs
+              _ ->
+                return $ SerialObject NamTable fv [] []
           | null runtimeTs = makeSerialAST' gscope typepackers anc (VarF fv)
           -- An applied `data` type that arrived unresolved. A record's field
           -- types come out of the pure weave, which cannot expand a `data`
@@ -1202,19 +1342,6 @@ makeSerialAST m lang t0 = do
           | generalTypeName == BT.ifileVar = SerialIFile fv <$> generalStorage
           | generalTypeName == BT.ostreamVar = SerialOStream fv <$> generalStorage
           | generalTypeName == BT.istreamVar = SerialIStream fv <$> generalStorage
-          -- Typed `Table n r`: when the Rec arg lowered to a ground record
-          -- (NamF NamRecord ...), surface it as a SerialObject NamTable
-          -- carrying the column schema. The wire encoder emits @T:K<entries>@
-          -- (or bare @T@ for empty / polymorphic-row); no concrete-type hint
-          -- is needed because @T@ is itself the dispatch token to the Arrow
-          -- C Data Interface path.
-          | BT.isTableVar generalTypeName = case runtimeTs of
-              [NamF _ _ _ recRs] -> do
-                colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
-                checkTableColumns m colASTs
-                return $ SerialObject NamTable fv [] colASTs
-              _ ->
-                return $ SerialObject NamTable fv [] []
           | otherwise = case aliasShape of
               -- Outer alias body is list-shaped (`type Deque a = List a`,
               -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
@@ -1245,9 +1372,9 @@ makeSerialAST m lang t0 = do
                 -- the head; one without it is its parent natively, and the
                 -- parent's own name is the right one to report.
                 (cscope, _) <- getScope lang
-                let ast' = if Map.member generalTypeName cscope
-                             then setSerialHead fv ast
-                             else ast
+                ast' <- if Map.member generalTypeName cscope
+                          then return (setSerialHead fv ts0 ast)
+                          else return ast
                 return $ applyDimsToList dim ast'
 
               -- No outer aliasing: the type is its own head. Dispatch on it
@@ -1335,12 +1462,20 @@ makeSerialAST m lang t0 = do
         -- SerialPack, or raise a helpful error if no instance is registered.
         packableFallback = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
-            -- Carry each instance's general packed type alongside the
-            -- resolved packer. Selection ranks instances by that head, and
-            -- 'resolvePacker' has already rewritten it to the concrete form.
-            (rejected, matches) <- partitionEithers <$> mapM resolveWithHead ps
-            selection <- selectPacker rejected matches
-            return $ SerialPack fv selection
+            selected <- selectPackerInstance m (const True) generalType ps
+            resolved <- maybe (return (Left "no instance head covers it")) (resolvePacker lang m ft) selected
+            case resolved of
+              Right packer -> do
+                ast <- makeSerialAST' gscope typepackers anc (typePackerUnpacked packer)
+                return $ SerialPack fv (packer, ast)
+              Left reason -> do
+                let (gt, ct) = unweaveTypeF ft
+                MM.throwSourcedError m $
+                  "No Packable instance covers" <+> squotes (pretty gt)
+                    <> " (concrete:" <+> pretty ct <> ")."
+                    <> "\nInstances declared for" <+> pretty generalTypeName <> ":"
+                    <> "\n" <> indent 2 (vsep (map (pretty . piHead) ps))
+                    <> "\n" <> reason
           Nothing ->
             let (gt, ct) = unweaveTypeF ft
             in MM.throwSourcedError m $
@@ -1351,32 +1486,21 @@ makeSerialAST m lang t0 = do
                    <> "\nor map" <+> pretty generalTypeName
                    <+> "to a primitive list / tuple / sourced type."
 
-        -- Resolve one instance against the use site, keeping its general
-        -- packed type so the candidates can be ordered by specificity.
-        resolveWithHead ::
-          PackerInstance ->
-          MorlocMonad (Either (TypeU, MDoc) (TypeU, TypePacker))
-        resolveWithHead pin = do
-          resolved <- resolvePacker lang m ft pin
-          return $ case resolved of
-            (Right packer) -> Right (piHead pin, packer)
-            (Left reason) -> Left (piHead pin, reason)
-
         -- A Nat is a length only as Vector's first parameter (DIM-8): it
-        -- annotates the list Vector is, including NatLitF 0 (a real empty
-        -- dimension) and NatVoidF (no check). Any other type's Nats are
-        -- phantoms, or reach a Vector through its representation, which
-        -- carries them itself.
-        dim :: Maybe TypeF
+        -- annotates the list Vector is, including a literal 0 (a real empty
+        -- dimension) and the erased placeholder (no check). Any other type's
+        -- Nats are phantoms, or reach a Vector through its representation,
+        -- which carries them itself.
+        dim :: Maybe KArgF
         dim
-          | generalTypeName == BT.vector = listToMaybe [t | t <- ts0, kindOfF t == Just KindNat]
+          | generalTypeName == BT.vector = listToMaybe [k | KiA k <- ts0, kindOfK k == KindNat]
           | otherwise = Nothing
 
-        applyDimsToList :: Maybe TypeF -> SerialAST -> SerialAST
+        applyDimsToList :: Maybe KArgF -> SerialAST -> SerialAST
         applyDimsToList d@(Just _) (SerialList v _ inner) = SerialList v d inner
         applyDimsToList _ ast = ast
 
-        runtimeTs = filter (isNothing . kindOfF) ts0
+        runtimeTs = tyArgs ts0
 
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
@@ -1447,50 +1571,17 @@ makeSerialAST m lang t0 = do
 
         finalVar = basevar $ maybe generalType id evaluatedType
 
-        -- Choose among the instances that match this use site. Instance
-        -- heads are ordered by subsumption, so a well-formed instance set
-        -- gives the matches a unique greatest element: the most specific
-        -- instance, which is the one to apply. Several incomparable maxima
-        -- mean the heads overlap without either specializing the other, and
-        -- no choice between them is defensible.
-        selectPacker ::
-          [(TypeU, MDoc)] ->
-          [(TypeU, TypePacker)] ->
-          MorlocMonad (TypePacker, SerialAST)
-        selectPacker rejected [] =
-          let (gt, ct) = unweaveTypeF ft
-           in MM.throwSourcedError m $
-                "No Packable instance covers" <+> squotes (pretty gt)
-                  <> " (concrete:" <+> pretty ct <> ")."
-                  <> "\nInstances declared for" <+> pretty generalTypeName
-                  <> ", and why each was rejected:"
-                  <> "\n" <> indent 2 (vsep [pretty h <> "\n  " <> reason | (h, reason) <- rejected])
-        selectPacker _ matches =
-          let maxima = mostSpecific (map fst matches)
-           in case [packer | (h, packer) <- matches, any (equivalent h) maxima] of
-                [packer] -> do
-                  ast <- makeSerialAST' gscope typepackers anc (typePackerUnpacked packer)
-                  return (packer, ast)
-                _ ->
-                  MM.throwSourcedError m $
-                    "Ambiguous Packable instances for"
-                      <+> squotes (pretty (fst (unweaveTypeF ft))) <> ":"
-                      <> "\n" <> indent 2 (vsep (map pretty maxima))
-                      <> "\nEach matches, and none is more specific than the others."
-                      <> "\nDeclare an instance for their common specialization to"
-                      <+> "disambiguate, or remove one of them."
     -- Cycle detection at the NamF entry. If we are already lowering this
     -- record on the path above us, emit a back-ref; otherwise add it to the
-    -- ancestor set and recurse on the fields. A record's genuine
-    -- self-reference arrives as a bare name and is caught by the VarF
-    -- branch; what arrives here as a whole record is a distinct type even
-    -- when it shares a name, as the inner @P Int@ of a @P (P Int)@ does.
+    -- ancestor set and recurse on the fields. A record's reference to
+    -- itself arrives tied ('RecF'); what arrives here as a whole record is
+    -- a distinct type even when it shares a name, as the inner @P Int@ of
+    -- a @P (P Int)@ does.
     makeSerialAST' gscope typepackers anc t@(NamF o n ps rs)
-      | Set.member t anc = return $ SerialRec n ps
+      | onPath t anc = return (SerialRec n ps)
       | otherwise = do
           anc' <- descend t anc
-          ts <- mapM (makeSerialAST' gscope typepackers anc' . snd) rs
-          let entries = zip (map fst rs) ts
+          entries <- mapM (traverse (makeSerialAST' gscope typepackers anc')) rs
           return $ SerialObject o n ps entries
     makeSerialAST' gscope typepackers anc (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers anc t
@@ -1524,15 +1615,16 @@ handleStorage i anc v a = do
   case danglingRefs [] s of
     [] -> return s
     (n : _) -> MM.throwSourcedError i $
-      "The element type of" <+> pretty (AppT (VarT v) [a])
+      "The element type of" <+> pretty (AppT (VarT v) [TyA a])
         <+> "refers back to the enclosing type" <+> squotes (pretty n)
         <> "; a stream handle cannot hold the type that holds it"
-  where
-    danglingRefs :: [TVar] -> SerialAST -> [TVar]
-    danglingRefs declared node = case node of
-      SerialRec (FV n _) _ -> [n | n `notElem` declared]
-      SerialVariant (FV n _) _ [] -> [n | n `notElem` declared]
-      _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterName node))) (serialKids node)
+
+-- | The names of back-references that match no enclosing node
+-- ('backRefMatches'): in a schema, a reference to nothing.
+danglingRefs :: [(TVar, [ArgF])] -> SerialAST -> [TVar]
+danglingRefs declared node = case node of
+  SerialRec (FV n _) ps -> [n | not (any (\d -> backRefMatches d n ps) declared)]
+  _ -> concatMap (danglingRefs (maybe declared (: declared) (serialOuterKey node))) (serialKids node)
 
 -- | The general name at a type's head, when it has one. Used to match the
 -- one occurrence of a recursive type that carries a name rather than a
@@ -1544,14 +1636,14 @@ typeFHead (AppF (VarF (FV gv _)) _) = Just gv
 typeFHead (NamF _ (FV gv _) _ _) = Just gv
 typeFHead (VariantF (FV gv _) _ _) = Just gv
 typeFHead (EnumF (FV gv _) _ _) = Just gv
-typeFHead (RecF (FV gv _)) = Just gv
+typeFHead (RecF (FV gv _) _) = Just gv
 typeFHead _ = Nothing
 
 -- | The pack/unpack pair a language implements an instance with.
 --
 -- The table is filtered to the language before use, so a miss here means the
 -- filter and this lookup have gone out of step.
-packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Source, Source)
+packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Indexed Source, Indexed Source)
 packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
   (Just srcs) -> return srcs
   Nothing ->
@@ -1561,36 +1653,41 @@ packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
 
 -- | The @pack@ source of the most specific instance whose head covers @t@
 -- and that implements @pack@ in @lang@, or Nothing when none does.
-findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe Source)
+findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe (Indexed Source))
 findCoveringPacker lang m0 t = do
   instances <- findPackerInstances
-  gscope <- MM.getGeneralScope
   let useT = type2typeu t
-      -- Coverage is a property of the general types: a head covers the
-      -- use site when it specializes to it, any of its variables (a
-      -- dimension included) standing for anything.
-      generic h =
-        let (vs, body) = unqualify h
-         in qualify (List.nub (vs <> occurrences body)) body
-      occurrences (VarU v@(TV n)) = [v | Just (c, _) <- [DT.uncons n], C.isLower c]
-      occurrences (KVarU (v, _)) = [v]
-      occurrences x = concatMap occurrences (typeUChildren x)
-      covers pin = isSubtypeOf2 gscope (generic (piHead pin)) useT
-      matches =
-        [ pin
-        | pin <- instances
-        , extractKey (piHead pin) == extractKey useT
-        , Map.member lang (piPacks pin)
-        , covers pin
-        ]
-  let maxima = mostSpecific (map piHead matches)
-  case [pin | pin <- matches, any (equivalent (piHead pin)) maxima] of
-    [] -> return Nothing
-    [pin] -> return (Map.lookup lang (piPacks pin))
-    pins ->
-      MM.throwSourcedError m0 $
-        "Ambiguous Packable instances for" <+> squotes (pretty t) <> ":"
-          <> "\n" <> indent 2 (vsep (map (pretty . piHead) pins))
+  selected <- selectPackerInstance m0 (Map.member lang . piPacks) useT instances
+  return $ case selected of
+    Just pin | extractKey (piHead pin) == extractKey useT -> Map.lookup lang (piPacks pin)
+    _ -> Nothing
+
+-- | The Packable instance that serves a type where no use site exists, among
+-- those that can run: a value of the type is converted in this pool. The same
+-- rule as any use selects it (CLS-16), but over the instances the pool can
+-- call, since an instance another language gives converts nothing here and
+-- all of them agree on the wire form (CLS-20). Only a type no head matches has
+-- none; any other failure to select is an error.
+selectPackerInstance ::
+  Int -> (PackerInstance -> Bool) -> TypeU -> [PackerInstance] -> MorlocMonad (Maybe PackerInstance)
+selectPackerInstance m usable t instances = do
+  scope <- MM.getGeneralScope
+  env <- MM.gets stateInstances
+  let candidates = filter usable instances
+      keep d = any (samePacker (idKey d)) candidates
+      env' = env {ieByClass = Map.adjust (filter keep) FI.packableClass (ieByClass env)}
+  case FI.resolvePackable scope env' t of
+    Right (EvInstance key _ _, _) -> return (listToMaybe (filter (samePacker key) candidates))
+    Right _ -> return Nothing
+    Left (FI.NoInstance _ _) -> return Nothing
+    Left e ->
+      MM.throwSourcedError m $
+        "Cannot select a Packable instance for" <+> squotes (pretty t) <> ":"
+          <+> FI.explainResolveError prettyConstraint e
+  where
+    samePacker key pin = case FI.keyPackedHead key of
+      Just h -> generalizes True h (piHead pin) && generalizes True (piHead pin) h
+      Nothing -> False
 
 resolvePacker ::
   Lang ->
@@ -1611,6 +1708,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
   unpackedConcreteType <- inferConcreteTypeU lang (Idx m0 unpackedGeneralType)
   maybeUnpackedType <-
     resolveP
+      gscope
       resolvedType
       packedConcreteType
       unpackedConcreteType
@@ -1651,16 +1749,18 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
     -- the types for each generic variable. The context can be applied to
     -- y_u to get the final desired y_r.
     resolveP ::
+      Scope ->
       TypeF -> -- resolved packed type (e.g., "dict" "str" "int")
       TypeU -> -- unresolved packed type (e.g., "dict" a b)
       TypeU -> -- unresolved unpacked type (e.g., "list" ("list" a b))
       (TypeU, TypeU) -> -- The general unresolved packed and unpacked types
       MorlocMonad (Either MDoc TypeF) -- the resolved unpacked type, or why this instance does not apply
-    resolveP a b c generalTypes = do
+    resolveP gscope a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      -- Both steps are match tests, not assertions. An instance whose head does
-      -- not cover this use site is simply not a candidate here; only the caller
-      -- knows whether some other instance matched, so neither step may abort.
+      -- The two subtype steps are match tests, not assertions. An instance whose
+      -- head does not cover this use site is simply not a candidate here; only
+      -- the caller knows whether some other instance matched, so neither may
+      -- abort. Pairing the forms of an instance that matched may.
       case subtype Map.empty b ca emptyGamma of
         (Left typeErr) ->
           return . Left $
@@ -1671,13 +1771,18 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
           -- gc is the unresolved general unpacked type
           case generalTypes of
             (u, gc) ->
-              case subtype Map.empty u ga emptyGamma of
+              case subtype gscope u ga emptyGamma of
                 (Left typeErr) ->
                   return . Left $
                     "its general form" <+> pretty u <+> "does not cover" <+> pretty ga <> ":" <+> typeErr
-                (Right g2) ->
-                  return . Right $
-                    weaveTypeF (apply g2 (existential gc)) unpackedConcreteType
+                (Right g2) -> do
+                 erased <- erasureIn lang
+                 case weave gscope erased Map.empty (apply g2 (existential gc)) unpackedConcreteType of
+                    Right t -> return (Right t)
+                    Left e ->
+                      MM.throwSourcedError m0 $
+                        "The unpacked form of a matching Packable instance cannot be paired with its"
+                          <+> pretty lang <+> "form:" <+> e
 
     -- Replaces each generic term with an existential term of the same name
     existential :: TypeU -> TypeU
@@ -1688,9 +1793,6 @@ resolvePacker _ m0 _ _ = MM.throwSourcedError m0 $ "No packer found for this typ
 cv2tv :: CVar -> TVar
 cv2tv (CV x) = TV x
 
-tv2cv :: TVar -> CVar
-tv2cv (TV x) = CV x
-
 unweaveTypeF :: TypeF -> (TypeU, TypeU)
 unweaveTypeF (UnkF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (VarF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
@@ -1700,117 +1802,30 @@ unweaveTypeF (FunF ts t) =
    in (FunU gts gt, FunU cts ct)
 unweaveTypeF (AppF t ts) =
   let (gt, ct) = unweaveTypeF t
-      (gts, cts) = unzip $ map unweaveTypeF ts
+      (gts, cts) = unzip $ map unweaveArg ts
    in (AppU gt gts, AppU ct cts)
 unweaveTypeF (NamF n (FV gv cv) ps rs) =
-  let (psg, psc) = unzip $ map unweaveTypeF ps
-      keys = map fst rs
-      (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
-   in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
+  let (psg, psc) = unzip $ map unweaveArg ps
+      fields = map (second unweaveTypeF) rs
+   in (NamU n gv psg [(k, g) | (k, (g, _)) <- fields], NamU n (cv2tv cv) psc [(k, c) | (k, (_, c)) <- fields])
 unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
 
--- A back-reference unweaves into a bare VarU for each side; the
--- referenced NamF appears elsewhere in the surrounding TypeU/TypeF
--- and supplies the structural identity.
-unweaveTypeF (RecF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
+-- A reference to a record unweaves to the record named at its arguments.
+unweaveTypeF (RecF (FV gv cv) []) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF (RecF (FV gv cv) ps) =
+  let (gs, cs) = unzip (map unweaveArg ps)
+   in (AppU (VarU gv) gs, AppU (VarU (cv2tv cv)) cs)
 unweaveTypeF (EnumF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 
--- Nat / Str types have no concrete/general distinction; duplicate as-is
-unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
-unweaveTypeF (VoidF k) = let u = type2typeu (VoidT k) in (u, u)
-unweaveTypeF (StrLitF s) = (StrLitU s, StrLitU s)
 
-weaveTypeF :: TypeU -> TypeU -> TypeF
-weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
-weaveTypeF (FunU tsg tg) (FunU tsc tc) = FunF (zipWith weaveTypeF tsg tsc) (weaveTypeF tg tc)
--- AppU arg-list weaving is arity-aware: the concrete side may be
--- shorter than the general side when @pairEval@ expanded a newtype
--- body whose body has a smaller arity than the outer (e.g.
--- @newtype Vector n a = List a@ where Vector has 2 params but the
--- expanded body has 1). Each general kind arg consumes a concrete
--- kind arg if present, otherwise produces an erased sentinel without
--- advancing the concrete cursor. Mirrors @Infer.weaveArgs@ at the
--- Serial.hs entry point.
-weaveTypeF (AppU tg tsg) (AppU tc tsc) = AppF (weaveTypeF tg tc) (weaveTypeFArgs tsg tsc)
-weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
-  NamF
-    n
-    (FV gv (tv2cv cv))
-    (zipWith weaveTypeF psg psc)
-    ( zip
-        (map fst rsg)
-        (zipWith weaveTypeF (map snd rsg) (map snd rsc))
-    )
--- A suspension is a closure of no arguments in every pool.
-weaveTypeF (EffectU _ gt) (EffectU _ ct) = FunF [] (weaveTypeF gt ct)
-weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
-weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
-weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
-weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
-weaveTypeF NatVoidU _ = NatVoidF
-weaveTypeF (NatVarU _) _ = NatVoidF  -- Nat vars erased in concrete type
-weaveTypeF (IntVarU _) _ = NatVoidF  -- an Int fills only Nat positions
--- Nat arithmetic: try to reduce to a ground Integer. If every leaf is a
--- NatLit, produce a NatLitF; otherwise produce the NatVoidF sentinel
--- (the dimension is symbolic / unresolvable at this site, not 0).
-weaveTypeF nat@(NatAddU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF nat@(NatMulU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF nat@(NatSubU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF nat@(NatDivU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
-weaveTypeF g _ | Just k <- kindOfU g, k /= KindNat = kindArgF k g
-weaveTypeF (LabeledU _ gt) ct = weaveTypeF gt ct
-weaveTypeF gt (LabeledU _ ct) = weaveTypeF gt ct
-weaveTypeF gt ct = error . show $ (gt, ct)
-
--- | Weave two arg lists, allowing the concrete list to be SHORTER
--- than the general list when the missing positions are kind arguments
--- (the body's per-language form may have dropped them during newtype
--- expansion). Each general kind argument consumes a concrete head of the
--- same kind if there is one.
-weaveTypeFArgs :: [TypeU] -> [TypeU] -> [TypeF]
-weaveTypeFArgs [] _ = []
-weaveTypeFArgs (NatLitU n : gs) cs = NatLitF n : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (NatVoidU : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (NatVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (IntVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatAddU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatMulU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatSubU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (nat@(NatDivU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
-weaveTypeFArgs (g : gs) cs
-  | Just k <- kindOfU g = kindArgF k g : weaveTypeFArgs gs (dropKindHeadU k cs)
-weaveTypeFArgs (g : gs) (c : cs) = weaveTypeF g c : weaveTypeFArgs gs cs
-weaveTypeFArgs gs [] =
-  error $ "weaveTypeFArgs: concrete arg list exhausted with non-kind general args remaining: " <> show gs
-
--- | Drop a leading concrete argument of kind @k@, if there is one.
-dropKindHeadU :: Kind -> [TypeU] -> [TypeU]
-dropKindHeadU k (c : cs) | kindOfU c == Just k || k == KindNat && maybe False fillsNat (kindOfU c) = cs
-dropKindHeadU _ cs = cs
-
--- | The concrete form of a general kind argument that has no reducible
--- value of its own.
-kindArgF :: Kind -> TypeU -> TypeF
-kindArgF k g = maybe (VoidF k) StrLitF (groundStr g)
-
--- | The value of a ground Str expression.
-groundStr :: TypeU -> Maybe DT.Text
-groundStr (StrLitU s) = Just s
-groundStr (StrConcatU a b) = (<>) <$> groundStr a <*> groundStr b
-groundStr (LabeledU _ t) = groundStr t
-groundStr _ = Nothing
-
--- The value of a ground Nat expression; Nothing for one with an unresolved
--- leaf, which callers turn into the NatVoidF sentinel rather than a fake 0.
-reduceNat :: TypeU -> Maybe Integer
-reduceNat t = typeUToNatExpr t >>= NS.evalNat Map.empty
+-- | A kind argument has no concrete/general distinction; it is duplicated.
+unweaveArg :: ArgF -> (TypeU, TypeU)
+unweaveArg (TyA t) = unweaveTypeF t
+unweaveArg (KiA (RowK cols)) = unweaveTypeF (NamF NamRecord (FV anonRecordVar (CV "@REC")) [] cols)
+unweaveArg (KiA k) = let u = ktermU (kargType k) in (u, u)
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first
@@ -1827,6 +1842,7 @@ chooseSerializationCycle (x : _) = Just x
 will need to be further reduced.
 -}
 isSerializable :: SerialAST -> Bool
+isSerializable s | generatedObject s = True
 isSerializable (SerialPack _ _) = False
 isSerializable (SerialList _ _ x) = isSerializable x
 isSerializable (SerialTuple _ xs) = all isSerializable xs
@@ -1859,7 +1875,7 @@ isSerializable (SerialOptional _ x) = isSerializable x
 -- would have been introduced. Return True.
 isSerializable (SerialRec _ _) = True
 isSerializable (SerialEnum _ _ _) = True
-isSerializable (SerialVariant _ _ as) = all (all isSerializable . snd) as
+isSerializable (SerialVariant _ _ c as) = c || all (all isSerializable . snd) as
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -1871,7 +1887,7 @@ prettySerialOne (SerialObject r _ _ rs) =
     vsep (map (\(k, v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
 prettySerialOne (SerialEnum v _ ns) =
   "SerialEnum" <> angles (pretty v) <> tupled (map pretty ns)
-prettySerialOne (SerialVariant v _ as) =
+prettySerialOne (SerialVariant v _ _ as) =
   "SerialVariant" <> angles (pretty v) <> tupled [pretty n | (n, _) <- as]
 prettySerialOne (SerialReal _) = "SerialReal"
 prettySerialOne (SerialFloat32 _) = "SerialFloat32"
@@ -1968,7 +1984,7 @@ generalTypeToSerialAST' i anc (VarT v)
                    arms' <- mapM
                      (\(n, ts) -> (,) n <$> mapM (generalTypeToSerialAST' i anc' . typeOf) ts)
                      arms
-                   return $ SerialVariant (FV v (CV "")) [] arms'
+                   return $ SerialVariant (FV v (CV "")) [] False arms'
        Nothing
          | Just unfolded <- aliasOfData scope (VarT v) -> generalTypeToSerialAST' i anc unfolded
        Nothing -> case Map.lookup v scope of
@@ -1989,31 +2005,31 @@ generalTypeToSerialAST' i anc (VarT v)
         x -> MM.throwSourcedError i $
           "cannot serialize type" <+> pretty v
             <+> "-- unexpected scope shape" <+> pretty (show x)
-generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyTypeF t]
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) [TyA t])
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyArgF (TyA t)]
   | v == BT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
   | v == BT.ifileVar   = SerialIFile   (FV v (CV "")) <$> handleStorage i anc v t
   | v == BT.ostreamVar = SerialOStream (FV v (CV "")) <$> handleStorage i anc v t
   | v == BT.istreamVar = SerialIStream (FV v (CV "")) <$> handleStorage i anc v t
-  | otherwise = appliedTypeToSerialAST i anc t0 v [t]
+  | otherwise = appliedTypeToSerialAST i anc t0 v [TyA t]
 -- A Vector's literal length annotates the list it lowers to (DIM-8).
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) [n, a])
   | v == BT.vector, not (Set.member t0 anc) = do
       ast <- appliedTypeToSerialAST i anc t0 v [n, a]
-      return $ case (reduceNat (type2typeu n), ast) of
-        (Just k, SerialList x _ inner) -> SerialList x (Just (NatLitF k)) inner
+      return $ case (kindArgOf (argU n), ast) of
+        (Just k@(NatLitK _), SerialList x _ inner) -> SerialList x (Just k) inner
         _ -> ast
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ts)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyArgF ts)
   | v == (BT.tuple (length ts)) =
-      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
+      SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) (tyArgs ts)
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
   -- @T@ wire token (or @T:K<entries>@ when the row is concrete), which
   -- is itself the dispatch signal for the Arrow-SHM path; no
   -- concrete-type hint is attached.
   | BT.isTableVar v = do
       let cols = case ts of
-            [_, NamT _ _ _ rs] -> rs
+            [_, TyA (NamT _ _ _ rs)] -> rs
             _                  -> []
       colASTs <- mapM (secondM (generalTypeToSerialAST' i anc)) cols
       checkTableColumns i colASTs
@@ -2023,7 +2039,7 @@ generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
 generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
-  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ps)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyArgF ps)
   | otherwise = do
       -- Add the record to the ancestor set before recursing into its
       -- fields: a recursive record (e.g. @record Tree where children ::
@@ -2033,7 +2049,7 @@ generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
       -- they ride along so a back-reference can name this instantiation
       -- apart from another of the same record.
       anc' <- descendT i t0 anc
-      SerialObject o (FV v (CV "")) (map keyTypeF ps)
+      SerialObject o (FV v (CV "")) (map keyArgF ps)
         <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
 generalTypeToSerialAST' i _ t@(FunT _ _) = MM.throwSourcedError i $
   "A command evaluated without a language pool cannot hold a function value (here of type"
@@ -2046,24 +2062,20 @@ generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
 -- Used only to key a serial AST node's instantiation so a back-reference
 -- can be matched to the node it cuts against; two occurrences of one
 -- type map to equal keys, which is all the matching needs.
+-- A kind argument keys as a pool sees it: a length that is not ground
+-- carries none (DIM-8), so it changes no wire form.
+keyArgF :: ArgT -> ArgF
+keyArgF (KiA k) = KiA (groundK k)
+keyArgF (TyA t) = TyA (keyTypeF t)
+
 keyTypeF :: Type -> TypeF
 keyTypeF (UnkT v) = UnkF (FV v (CV ""))
 keyTypeF (VarT v) = VarF (FV v (CV ""))
 keyTypeF (FunT ts t) = FunF (map keyTypeF ts) (keyTypeF t)
-keyTypeF (AppT t ts) = AppF (keyTypeF t) (map keyTypeF ts)
-keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyTypeF ps) [(k, keyTypeF t) | (k, t) <- rs]
+keyTypeF (AppT t ts) = AppF (keyTypeF t) (map keyArgF ts)
+keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyArgF ps) [(k, keyTypeF t) | (k, t) <- rs]
 keyTypeF (EffectT _ t) = keyTypeF t
 keyTypeF (OptionalT t) = OptionalF (keyTypeF t)
-keyTypeF (NatLitT n) = NatLitF n
-keyTypeF (VoidT k) = VoidF k
-keyTypeF (StrLitT t) = StrLitF t
--- Unevaluated kind arithmetic has no codegen form; it never reaches a
--- serializable type, and as a key any fixed value keeps equal types equal.
-keyTypeF t@NatAddT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatMulT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatSubT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@NatDivT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
-keyTypeF t@StrConcatT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
 
 -- | The general name at a type's head, when it has one.
 typeHeadT :: Type -> Maybe TVar
@@ -2096,7 +2108,7 @@ descendT i t anc
 -- is that the declaration's parameters must first be substituted with the
 -- applied arguments, or an arm mentioning a parameter would serialize the
 -- bare variable.
-appliedTypeToSerialAST :: Int -> Set.Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+appliedTypeToSerialAST :: Int -> Set.Set Type -> Type -> TVar -> [ArgT] -> MorlocMonad SerialAST
 appliedTypeToSerialAST i anc t0 v ts = do
   scope <- MM.gets stateGeneralTypedefs
   case dataCtorsOfName scope v of
@@ -2104,20 +2116,21 @@ appliedTypeToSerialAST i anc t0 v ts = do
       | all (null . snd) ctors -> return $ SerialEnum (FV v (CV "")) [] (map fst ctors)
     Just arms -> do
                 let params = maybe [] fst (dataDeclOfName scope v)
-                    inst = instantiateParams (zip params ts)
+                    -- each argument against its parameter, then the types
+                    inst = instantiateParams [(p, t) | (p, TyA t) <- zipSame params ts]
                 anc' <- descendT i t0 anc
                 arms' <- mapM
                   (\(n, fts) ->
                      (,) n <$> mapM (generalTypeToSerialAST' i anc' . inst . typeOf) fts)
                   arms
-                return $ SerialVariant (FV v (CV "")) (map keyTypeF ts) arms'
+                return $ SerialVariant (FV v (CV "")) (map keyArgF ts) False arms'
     Nothing -> resolveAliasApp i anc t0 v ts
 
 -- The self-recursion cut for an applied alias is made by the caller, which
 -- tests the whole applied type against the ancestor set: a @^name@
 -- back-reference is emitted for an instantiation already being expanded,
 -- and the runtime resolves it against the enclosing @&name@.
-resolveAliasApp :: Int -> Set.Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp :: Int -> Set.Set Type -> Type -> TVar -> [ArgT] -> MorlocMonad SerialAST
 resolveAliasApp i anc t0 v ts = do
       scope <- MM.gets stateGeneralTypedefs
       case Map.lookup v scope of
@@ -2125,8 +2138,7 @@ resolveAliasApp i anc t0 v ts = do
         (Just [(params, body, _, False, _)]) -> do
           -- Substituted before erasure, so that a Nat argument reaches the
           -- Vector it sizes (DIM-8); the erased body has none left to fill.
-          let tvars = [tv | Left (tv, _) <- params]
-              resolved = typeOf (foldl (\acc (tv, arg) -> substituteTVar tv (type2typeu arg) acc) body (zip tvars ts))
+          let resolved = typeOf (instantiateParams [(tv, argU arg) | (tv, arg) <- paramPairs params ts] body)
           anc' <- descendT i t0 anc
           inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's
@@ -2155,10 +2167,10 @@ retagOuterName :: TVar -> SerialAST -> SerialAST
 retagOuterName v' s = case s of
   SerialList     (FV _ cv) d inner -> SerialList     (FV v' cv) d inner
   SerialTuple    (FV _ cv) xs      -> SerialTuple    (FV v' cv) xs
-  SerialObject o (FV _ cv) ps rs   -> SerialObject o (FV v' cv) ps rs
+  SerialObject o (FV _ cv) ps rs -> SerialObject o (FV v' cv) ps rs
   SerialOptional (FV _ cv) inner   -> SerialOptional (FV v' cv) inner
   SerialEnum     (FV _ cv) ps ns   -> SerialEnum     (FV v' cv) ps ns
-  SerialVariant  (FV _ cv) ps as   -> SerialVariant  (FV v' cv) ps as
+  SerialVariant  (FV _ cv) ps c as -> SerialVariant  (FV v' cv) ps c as
   _ -> s
 
 -- | The unfolding of an alias whose head-normal form is a `data` type. The

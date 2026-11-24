@@ -21,6 +21,7 @@ module Morloc.Frontend.PatternCheck
   , missingKeyError
   ) where
 
+import Morloc.Data.Zip (indexed, zipExact, zipSame, zipWithSame)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
@@ -73,7 +74,7 @@ checkPatterns trees = do
       LamS vs _ ->
         let ts = argTypes t
          in [ (k, take (siteWidth site) (drop i ts))
-            | (i, v) <- zip [0 ..] vs
+            | (i, v) <- indexed vs
             , let k = base v
             , Just site <- [Map.lookup k sites]
             ]
@@ -92,10 +93,10 @@ checkPatterns trees = do
 -- | Check one match at one receiver type, returning its unreachable
 -- clauses.
 checkSite :: Scope -> [TypeU] -> MatchSite -> MorlocMonad [Int]
-checkSite scope ts (MatchSite i rows total)
-  | any ((/= length ts) . length . snd) rows = return []
-  | otherwise = do
-      let converted = [(ri, [(pi', toPat scope t p) | (t, (pi', p)) <- zip ts ps]) | (ri, ps) <- rows]
+checkSite scope ts (MatchSite i rows total) = case mapM (traverse (zipExact ts)) rows of
+  Nothing -> return []
+  Just paired -> do
+      let converted = [(ri, [(pi', toPat scope t p) | (t, (pi', p)) <- tps]) | (ri, tps) <- paired]
       sequence_ [problem pi' q | (_, cols) <- converted, (pi', Left q) <- cols]
       case mapM (\(ri, cols) -> (,) ri <$> combine (map snd cols)) converted of
         Left _ -> return []
@@ -109,7 +110,7 @@ checkSite scope ts (MatchSite i rows total)
                     "These clauses do not match every value; not matched:"
                       <+> hsep (punctuate ";" (map (pretty . showRow) ws))
               let dead = U.redundant signature [(False, r) | (_, r) <- matrix]
-              return [ri | (k, (ri, _)) <- zip [0 :: Int ..] matrix, k `elem` dead]
+              return [ri | (k, (ri, _)) <- indexed matrix, k `elem` dead]
   where
     problem :: Int -> Problem -> MorlocMonad ()
     problem at (TupleWidth given wanted) = tupleWidthError at given (pretty wanted)
@@ -176,13 +177,13 @@ toPat' scope t p = case p of
     AppU (VarU v) fs
       | v == BT.tuple (length fs) ->
           if length fs == length ps
-            then U.Con (HTuple (length ps)) <$> combine (zipWith (toPat scope) fs ps)
+            then U.Con (HTuple (length ps)) <$> combine (zipWithSame (toPat scope) fs ps)
             else Left (TupleWidth (length ps) (length fs))
     _ -> Left Unknown
   SitePatCon c ps -> case TE.dataCtorsAt scope (TE.whnf scope t) of
     Just cs
       | Just fs <- lookup c cs, length fs == length ps ->
-          U.Con (HCon c [(n, length xs) | (n, xs) <- cs]) <$> combine (zipWith (toPat scope) fs ps)
+          U.Con (HCon c [(n, length xs) | (n, xs) <- cs]) <$> combine (zipWithSame (toPat scope) fs ps)
     _ -> Left Unknown
   SitePatRecord kps -> case rowFields shape of
     Just (fs, closed) -> case [k | (k, _) <- kps, k `notElem` map fst fs] of
@@ -220,7 +221,7 @@ showWitness nested w = case w of
   U.WCon (HCon c _) xs -> paren (unwords (DT.unpack c : map (showWitness True) xs))
   U.WCon (HTuple _) xs -> "(" <> intercalate ", " (map (showWitness False) xs) <> ")"
   U.WCon (HRecord ks) xs ->
-    "{" <> intercalate ", " [DT.unpack (unKey k) <> " = " <> showWitness False x | (k, x) <- zip ks xs] <> "}"
+    "{" <> intercalate ", " [DT.unpack (unKey k) <> " = " <> showWitness False x | (k, x) <- zipSame ks xs] <> "}"
   U.WCon (HList _) xs -> "[" <> intercalate ", " (map (showWitness False) xs) <> "]"
   U.WCon h _ -> showHead h
   where

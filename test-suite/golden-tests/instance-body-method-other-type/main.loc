@@ -1,0 +1,24 @@
+-- Spec CLS-2 (#160): inside an instance body, a use of the class's own
+-- method at another type selects the instance for that type, not the
+-- instance being defined. The operands are typed by an annotation and by
+-- a signature; an untyped literal is rejected (REC-4).
+module main (eqLit, eqSigned)
+
+import root-py
+
+record Q where
+  num :: Int
+  den :: Int
+
+instance Eq Q where
+  (==) a b = .num a * .den b == .num b * .den a
+  (!=) a b = not (.num a * .den b == .num b * .den a)
+
+mkq :: Int -> Int -> Q
+mkq n d = {num = n, den = d}
+
+eqLit :: Int -> Bool
+eqLit n = ({num = n, den = 2} :: Q) == ({num = 2 * n, den = 4} :: Q)
+
+eqSigned :: Int -> Bool
+eqSigned n = mkq n 2 == mkq (2 * n) 5

@@ -7,15 +7,23 @@
 # Every name the pool defines lives in .__morloc, the one global name it
 # reserves besides the manifolds' .__mm_<id>, so a user source can neither
 # replace one nor be shadowed by one (.morloc.source, .morloc.pooldir and
-# .morloc.libdir are also bound globally, for user files). Its parent is the
-# base environment: pool code finds base R and its own names, never a
-# user's. Generated manifolds are global, where R compiles them, so their
+# .morloc.libdir are also bound globally, for user files, and the loader
+# binds .morloc.poolfile). Its parent is the base environment: pool code
+# finds base R and its own names, never a user's. Generated manifolds are global, where R compiles them, so their
 # calls of sourced functions resolve as in user code; they refer to pool
 # names through .__morloc, which is bound inside the environment too. A
 # source that defines, replaces or removes a reserved name fails to load.
 .__morloc <- new.env(parent = baseenv())
 assign(".__morloc", .__morloc, envir = .__morloc)
 lockBinding(".__morloc", globalenv())
+
+# FORK-17
+.__mlc_checked <- function(x) {
+  g <- .Call("morloc_mlc_fork_generation")
+  on.exit(.Call("morloc_mlc_exit_if_forked_since", g))
+  x
+}
+lockBinding(".__mlc_checked", globalenv())
 
 local({
 
@@ -28,6 +36,13 @@ mlc_closure_codec <- function(tuple_schema, arg_codecs, res_codec) {
             class = "mlc_closure_codec")
 }
 
+# A value whose type has a packer: its schema and the functions that turn a
+# native value into its wire form and back.
+mlc_wire_codec <- function(schema, to_wire, from_wire) {
+  structure(list(schema = schema, to_wire = to_wire, from_wire = from_wire),
+            class = "mlc_wire_codec")
+}
+
 mlc_closure_table <- list()
 
 # A generated manifold's function, by id.
@@ -35,12 +50,13 @@ mlc_manifold <- function(mid) {
   get(paste0(MLC_MANIFOLD_PREFIX, as.character(as.integer(mid))), envir = globalenv(), inherits = FALSE)
 }
 
-# The global names the pool reserves: the manifolds and .__morloc itself.
+# The global names the pool reserves: the manifolds, .__morloc and
+# .__mlc_checked.
 # Their bindings are locked, so a source can only add or remove one.
 mlc_reserved_globals <- function() {
   manifolds <- paste0("^", gsub(".", "\\.", MLC_MANIFOLD_PREFIX, fixed = TRUE), "[0-9]")
   names <- ls(globalenv(), all.names = TRUE)
-  names[grepl(manifolds, names) | names == ".__morloc"]
+  names[grepl(manifolds, names) | names %in% c(".__morloc", ".__mlc_checked")]
 }
 
 # AUTO include preamble start
@@ -120,12 +136,24 @@ morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }
 morloc_mlc_unlink_tmp                <- function(...){ .Call("morloc_mlc_unlink_tmp",                ...) }
 morloc_mlc_tell                      <- function(...){ .Call("morloc_mlc_tell",                      ...) }
-morloc_mlc_cell_new                  <- function(...){ .Call("morloc_mlc_cell_new",                  ...) }
-morloc_mlc_cell_get                  <- function(...){ .Call("morloc_mlc_cell_get",                  ...) }
-morloc_mlc_cell_put                  <- function(...){ .Call("morloc_mlc_cell_put",                  ...) }
-morloc_mlc_cell_count                <- function(...){ .Call("morloc_mlc_cell_count",                ...) }
-morloc_mlc_cell_slot                 <- function(...){ .Call("morloc_mlc_cell_slot",                 ...) }
-morloc_mlc_cell_free                 <- function(...){ .Call("morloc_mlc_cell_free",                 ...) }
+morloc_mlc_side_put                  <- function(...){ .Call("morloc_mlc_side_put",                  ...) }
+morloc_mlc_fold_new                  <- function(...){ .Call("morloc_mlc_fold_new",                  ...) }
+morloc_mlc_fold_checkout             <- function(...){ .Call("morloc_mlc_fold_checkout",             ...) }
+morloc_mlc_fold_store                <- function(...){ .Call("morloc_mlc_fold_store",                ...) }
+morloc_mlc_fold_failed               <- function(...){ .Call("morloc_mlc_fold_failed",               ...) }
+morloc_mlc_sink_failed               <- function(...){ .Call("morloc_mlc_sink_failed",               ...) }
+morloc_mlc_fork_generation           <- function(...){ .Call("morloc_mlc_fork_generation",           ...) }
+morloc_mlc_exit_if_forked_since      <- function(...){ .Call("morloc_mlc_exit_if_forked_since",      ...) }
+
+# FORK-17: `g` is forced before `r`.
+mlc_fork_checked <- function(g, r) {
+  g
+  on.exit(morloc_mlc_exit_if_forked_since(g))
+  r
+}
+morloc_mlc_fold_drop                 <- function(...){ .Call("morloc_mlc_fold_drop",                 ...) }
+morloc_mlc_fold_take                 <- function(...){ .Call("morloc_mlc_fold_take",                 ...) }
+morloc_mlc_side_next                 <- function(...){ .Call("morloc_mlc_side_next",                 ...) }
 morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
 morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
@@ -145,29 +173,97 @@ morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",
 morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
 morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
 morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
-# Every accumulator of a cell, in its wire form; with morloc_mlc_reduce_list
-# it runs @cellreduce.
-morloc_mlc_cell_slots <- function(schema, handle) {
-  on.exit(try(morloc_mlc_cell_free(handle), silent = TRUE), add = TRUE)
-  n <- morloc_mlc_cell_count(handle)
-  if (n < 1) stop("@fold: the accumulator holds nothing to merge")
-  lapply(seq_len(n) - 1, function(i) morloc_mlc_cell_slot(handle, i, schema))
-}
-
-# A non-empty list folded with `combine`.
-morloc_mlc_reduce_list <- function(combine, xs) {
-  Reduce(combine, xs)
-}
-
 # @replay: call `fn` on every frame (sub-packet) of the stream, in order,
 # each as the list it holds. Only the end of the stream (NULL) stops it.
 morloc_mlc_replay <- function(schema, handle, fn) {
   repeat {
     frame <- morloc_mlc_next_frame(schema, handle)
     if (is.null(frame)) break
-    fn(frame)
+    mlc_fork_checked(morloc_mlc_fork_generation(), fn(frame))
   }
   NULL
+}
+
+# @gather through a temp-file stream: the handle is the stream, and the
+# result is what @load gives (NATIVE-9).
+mlc_gather <- function(schema, f) {
+  path <- morloc_mlc_tmpfile()
+  o <- morloc_mlc_open_ostream(schema, path)
+  mlc_fork_checked(morloc_mlc_fork_generation(), f(o))
+  morloc_mlc_close(o)
+  xs <- morloc_mlc_load(schema, path)
+  morloc_mlc_unlink_tmp(path)
+  xs
+}
+
+# FOLD-6: a deep copy, so an environment or R6 init is never shared.
+mlc_fold_copy <- function(x) unserialize(serialize(x, NULL))
+
+# fold.md: the slots, and forked children's batches stepped from a copy of
+# init (FOLD-3), combined; an empty fold is a copy of its init.
+mlc_fold <- function(schema, init, step, combine, f) {
+  h <- morloc_mlc_fold_new(init)
+  taken <- FALSE
+  on.exit(if (!taken) morloc_mlc_fold_drop(h), add = TRUE)
+  mlc_fork_checked(morloc_mlc_fork_generation(), f(h))
+  taken <- TRUE
+  t <- morloc_mlc_fold_take(h, schema)
+  values <- t[[1L]]
+  side <- NULL
+  while (length(b <- morloc_mlc_side_next(t[[2L]])) == 1L) {
+    if (is.null(side)) side <- list(mlc_fold_copy(init))
+    side[[1L]] <- mlc_fork_checked(morloc_mlc_fork_generation(), step(side[[1L]], b[[1L]]))
+  }
+  values <- c(values, side)
+  if (length(values) == 0L) mlc_fold_copy(init) else Reduce(function(a, b) mlc_fork_checked(morloc_mlc_fork_generation(), combine(a, b)), values)
+}
+
+# FOLD-9: the handle is a stream; its batches are stepped once the
+# producer returns.
+mlc_fold_file <- function(schema, init, step, combine, f) {
+  path <- morloc_mlc_tmpfile()
+  o <- morloc_mlc_open_ostream(schema, path)
+  tryCatch(mlc_fork_checked(morloc_mlc_fork_generation(), f(o)), finally = morloc_mlc_close(o))
+  acc <- mlc_fold_copy(init)
+  i <- morloc_mlc_open_istream(schema, path)
+  on.exit({
+    morloc_mlc_close(i)
+    morloc_mlc_unlink_tmp(path)
+  }, add = TRUE)
+  morloc_mlc_replay(schema, i, function(b) acc <<- mlc_fork_checked(morloc_mlc_fork_generation(), step(acc, b)))
+  acc
+}
+
+# SIDE-12, SLOT-35: a sink's write that does not finish fails its stream.
+mlc_sink_write <- function(schema, level, batch, h) {
+  put <- FALSE
+  on.exit(if (!put) morloc_mlc_sink_failed(h), add = TRUE)
+  morloc_mlc_write(schema, level, batch, h)
+  put <- TRUE
+  invisible(NULL)
+}
+
+# FOLD-1, FOLD-9. SIDE-12: a put that does not finish fails its sink.
+mlc_fold_put <- function(schema, step, h, batch) {
+  put <- FALSE
+  on.exit(if (!put) morloc_mlc_sink_failed(h), add = TRUE)
+  co <- morloc_mlc_fold_checkout(h)
+  if (co[[1L]] == 2L) {
+    morloc_mlc_write(schema, 0L, batch, h)
+    morloc_mlc_flush(h)
+  } else if (co[[1L]] == 0L) {
+    morloc_mlc_side_put(h, schema, batch)
+  } else {
+    stepped <- FALSE
+    on.exit(if (!stepped) morloc_mlc_fold_failed(h), add = TRUE)
+    v <- co[[2L]]
+    if (co[[3L]]) v <- mlc_fold_copy(v)
+    v <- mlc_fork_checked(morloc_mlc_fork_generation(), step(v, batch))
+    stepped <- TRUE
+    morloc_mlc_fold_store(h, v)
+  }
+  put <- TRUE
+  invisible(NULL)
 }
 
 # @throw: raise a classed condition.
@@ -198,11 +294,16 @@ morloc_mlc_pipe_closed <- function() {
 morloc_mlc_try <- function(body, ok, err) {
   n0 <- sys.nframe()
   trace <- NULL
+  g <- morloc_mlc_fork_generation()
   tryCatch(
     withCallingHandlers(ok(body()), error = function(e) {
       if (is.null(trace)) trace <<- .mlc_trace_below(n0)
     }),
-    error = function(e) err(paste0(.mlc_message(e), trace))
+    error = function(e) {
+      # FORK-17
+      morloc_mlc_exit_if_forked_since(g)
+      err(paste0(.mlc_message(e), trace))
+    }
   )
 }
 
@@ -309,6 +410,8 @@ mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 mlc_encode <- function(value, codec, self_contained = FALSE) {
   if (mlc_is_closure_codec(codec)) {
     morloc_put_value(mlc_reify(value, MLC_HOME_LANG), codec$tuple_schema, self_contained)
+  } else if (inherits(codec, "mlc_wire_codec")) {
+    morloc_put_value(codec$to_wire(value), codec$schema, self_contained)
   } else {
     morloc_put_value(value, codec, self_contained)
   }
@@ -319,6 +422,8 @@ mlc_encode <- function(value, codec, self_contained = FALSE) {
 mlc_decode <- function(pkt, codec) {
   if (mlc_is_closure_codec(codec)) {
     mlc_reflect_from_tuple(morloc_get_value(pkt, codec$tuple_schema), codec$arg_codecs, codec$res_codec)
+  } else if (inherits(codec, "mlc_wire_codec")) {
+    codec$from_wire(morloc_get_value(pkt, codec$schema))
   } else {
     morloc_get_value(pkt, codec)
   }
@@ -526,7 +631,7 @@ main <- function(socket_path, tmpdir, shm_basename) {
 # The script: the pool serves calls until it is told to stop. A function, so
 # its variables are its own and the environment can be locked first.
 mlc_start <- function() {
-  args <- commandArgs(trailingOnly = TRUE)
+  args <- commandArgs(trailingOnly = TRUE)[-1]
 
   # Health check: confirm sources loaded and print version
   if (length(args) == 1 && args[1] == "--health") {
@@ -542,7 +647,7 @@ mlc_start <- function() {
   }
 
   if (length(args) != 3) {
-    cat("Usage: Rscript pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
+    cat("Usage: pool.R <socket_path> <tmpdir> <shm_basename>\n", file=stderr())
     quit(status = 1)
   }
 

@@ -1,3 +1,255 @@
+0.113.0 [2026-11-24]
+--------------------
+
+Breaking changes
+ * A streaming command returns `Collect a` instead of `()`: write its
+   signature as `<IO> (Collect T)`. `@stdout` is now a bracket,
+   `(OStream a -> <IO,e> b) -> <IO,e> (Collect a)`, and each path of a
+   streaming command ends in exactly one stdout source; several `@collect`
+   sites on one path, or streaming and then returning a value, are build
+   errors
+ * Installed modules are namespaced by library: `import x` names module `x`
+   of the standard library, `import l/x` names module `x` of library `l`,
+   and each resolves to one path with no fallback search. A module's
+   library and name come from its package.yaml. Libraries `std` and `bio`
+   ship with every environment; others are registered by their first
+   install or by `morloc library add`, and a morloc-deps entry may name an
+   exact `source`
+ * The package.yaml `dependencies` field is removed and refused, even when
+   empty: link names move onto the cpp-deps entry that provides them
+   (`libs`), tool executables onto tool-deps (`bin`)
+ * Python `data` values are generated classes: an enumeration is an
+   `enum.Enum` whose values are the wire tags, and each constructor of
+   another `data` type is a frozen dataclass, built as `Shape.Circle(r)` and
+   matched with `case Shape.Circle(r):`
+ * A user-written Rust enum mapped to a `data` type holds one field per
+   morloc field in each tuple variant (in a Box or an Arc where it
+   recurses), not one Box of a tuple of the fields; `rustmorloc::RecBox`
+   is removed
+ * A generated recursive C++ or Rust record is a handle to shared fields:
+   C++ reads them with `->` and builds one as `R{{...}}`, Rust reads them
+   through Deref. A generated Rust `data` arm is named `D_C`
+ * A Python or R record or object form written as `"struct"` is an error
+ * Python environments require pydantic v2
+ * The schema text of some recursive types changed, so files written with
+   them by an older build no longer load
+
+New features
+ * A record needs no per-language form: C++ and Rust get generated types
+   named after their declaring module, which sourced code can name.
+   Parameterized records and `data` types are templates or generics, named
+   at their arguments (`Container<int>`, `Choice<i64>`)
+ * `record Py => R = dataclass` or `= pydantic` makes a Python record a
+   frozen generated class; `dict` remains the default
+ * `morloc types FILE.loc -o DIR [--lang L]` writes a program's generated
+   types for outside programs: a C++ header tree, a Python package and a
+   Rust crate
+ * cpp-deps and rust-deps entries take `namespace` and `import` keys, so a
+   generated type may hold a dependency's types
+ * `morloc-nexus file --repair` closes an unfinished stream file with a
+   REPAIRED footer that readers accept and `@concat` carries forward
+ * A sourced Rust function may take each argument as `T`, `&T`, `&str` or
+   `&[A]`; an argument at its last use is moved in
+ * A sourced C++ function may take an argument at its last use by rvalue
+   (`T&&`), and `mlc::give` hands a function value a batch the caller will
+   not read again
+ * A streamed `@render` handler may return `[Str]` or `[[U8]]`
+ * Python 3.14 is supported
+ * A program can be started through a symbolic link to its launcher
+
+Changed
+ * A Str is valid UTF-8. Invalid bytes built in C++ or R, or Python bytes
+   given for a Str, fail the call, naming the language and the byte, where
+   output used to print an empty body and exit 0; R converts latin1 and
+   other locale strings to UTF-8. Data from outside is checked as it is
+   decoded
+ * Raw stdout (`-f raw`) writes a program's text without scanning it
+   again; each language checks a Str when it is built, which is where an
+   invalid byte is now reported
+ * A stream file whose writer failed is refused by readers. A failed run
+   ends its packet stdout with a FAILED footer, as does a run whose stdout
+   stream did not finish, which now fails; `-o` replaces its file only when
+   the run succeeds
+ * A `@write` batch that fails before any of it is delivered writes
+   nothing; one that fails later fails the stream, which refuses further
+   writes with the cause
+ * Python and C++ exceptions keep their own type through morloc calls and
+   closures, so code that catches them around a callback works
+ * `@form list` input is one value per line and one per cell, with one
+   delimiter chosen for the whole file; a type error is reported naming the
+   line, field and expected type instead of trying another reading
+ * R values with no morloc form are refused: NA in a Str or Bool, an empty
+   vector where one value is expected, a record missing a field (a missing
+   optional field is written as null)
+ * A missing IFile is refused before the command runs wherever the argument
+   holds it (list, optional, record field); an open that fails names the
+   path
+ * A program started while `morloc init` replaces the runtime exits 75
+   asking to be run again, instead of crashing
+ * Native builds in a managed environment add its include and library
+   directories and a run path themselves, so any compiler, macOS included,
+   finds provisioned packages; a declared header or tool that does not
+   resolve is refused by dependency name before compiling
+ * An exception escaping a thread that user C++ code started ends the pool
+   with the internal error status instead of SIGABRT and a core dump
+ * A Python record literal is a dict, not an OrderedDict
+ * A command starts only the language pools it calls, not every pool in
+   its program
+ * A failed send to a pool names its reason (OS error, peer ended, or
+   stalled)
+
+Typing
+ * Eq and Ord carry all six comparisons as methods, and a type with no
+   instance gets derived ones where it is compared; comparing values that
+   hold a function, handle, stream or table is a compile-time error
+ * Each use of a class method selects exactly one instance. A class
+   argument left an unsolved type variable is an error at the use, so
+   adding an instance elsewhere never changes what a module means
+ * Every signed definition and instance method of every module is checked
+   against its signature, used or not; an unsigned top-level definition is
+   checked where it is defined
+ * An unsigned top-level definition is generalized, Haskell 98 style with
+   no monomorphism restriction. Integer literals are any Integral type and
+   real literals any Numeric type, defaulting to Int and Real
+ * A constraint on a variable its signature's type never mentions is an
+   error; a literal at a constrained variable of an export is no longer
+   defaulted to Int
+ * A signature's row and string variables are held rigid in its body
+ * Whether the caller or the function chooses a length is decided by
+   polarity: any argument occurrence makes it the caller's, so a callback
+   may be handed a length the callee chooses
+ * `a -> (b -> c)` is `a -> b -> c` everywhere, through aliases too, so the
+   lengths of such arguments are checked on the command line
+ * A top-level name that collides with a class method in scope is refused
+   instead of silently bypassing the method
+ * A recursive type whose nesting grows (`Nest [a]`, `Perfect (a, a)`) is
+   refused instead of exhausting memory; a recursive type holding packed
+   values is refused where its packer would run only at the top level
+   (Python, R, user-mapped records), while generated C++ and Rust records
+   holding them now cross between languages
+ * A native form whose parameter list is out of order or repeats a name,
+   or whose `$N` names nothing, is refused where it is declared
+ * A per-language form declared for specialized arguments
+   (`type R => (Map Str b) = ...`) holds only at those arguments
+ * `Tuple<k>` names are reserved and must be applied to k types; a user
+   type whose name starts with "Tuple" is no longer taken for a tuple
+ * An intrinsic given extra arguments applies its result to them, giving a
+   located type error instead of an internal error
+ * A where-binding used twice is one value to the length checks: the row
+   count its call chooses is the same at every use
+ * A program's own source of a term shadows an imported module's source of
+   it in the same language, instead of being ambiguous
+ * A length a call chooses at run time that a body cannot rely on is
+   reported as such (DIM-10), not as a signature failure naming `?n`
+
+Performance
+ * Typechecking is linear in a definition's method uses, checks a
+   polymorphic definition once instead of at every use, and no longer
+   realizes generic exports: installing a library of generic functions
+   took over 2.8 GB
+ * Long let chains compile in linear time
+ * R pools start by parsing the whole file: a 16,600-line pool started in
+   12.6 s and now takes 0.4 s. Long `&&` and `||` chains no longer stall an
+   R function's first call
+ * Calls into Python and R keep their connections open, and schemas are
+   parsed once per process
+ * Python and R calls passing values of tens of KiB are 13-24% faster
+   (fork-pool workers keep heap headroom; `MORLOC_FORK_HEAP_PAD` sets it)
+ * C++ parallel maps run on a persistent worker pool, so small maps no
+   longer pay thread startup
+ * Short runs end about 20 ms sooner, and runs with output streams up to
+   100 ms sooner
+ * Generated C++ and Rust copy far less: values move at their last use, a
+   packed value is unpacked once rather than once per field (a C++ packed
+   list was unpacked twice per element), and a fold step takes its
+   accumulator rather than a copy, which was quadratic in the batch count
+ * `@fold` keeps its accumulator native in the pool running the step, and
+   a whole-list `@collect` gathers in memory when its handler is in the
+   same pool
+ * `@write` batches are encoded straight into the output buffer in every
+   language; `@save`, voidstar output and IFile slices avoid whole copies
+ * Reading a compressed stream uses about a quarter less CPU: decoding
+   ahead of the reader runs on at most two threads instead of every frame
+   worker, with the same wall time
+ * A Python `@load` of a whole list decodes the file where it lies, about
+   14% faster
+ * Shared-memory volumes are sized to the request, and on Linux a large
+   block's pages are given back when it is freed
+
+Fixes
+ * Long guard chains and `&&`/`||` chains no longer exceed the nesting
+   limits of R (about 60 guards), Python (100) or the nexus manifest (128)
+ * Several threads may write one stdout or stderr stream, and forked
+   producers (multiprocessing, mclapply) may stream to stdout; batches were
+   dropped while the command exited 0
+ * A sequential fold keeps its order, a failed sink put fails the command,
+   and C++ threads folding through a Python pool work
+ * A reused connection to a pool no longer fails a call as the pool's
+   death (on macOS as "Socket is not connected")
+ * A forked C++ or R child ends at the call it was forked in instead of
+   running on into later calls
+ * Fix a C++ memory leak in programs that pass function values (141 MiB
+   over 4000 calls)
+ * A stale shared-memory reference is refused instead of read or freed
+ * Decoding a record whose last field is a unit through JSON or msgpack no
+   longer corrupts a string or leaks a block
+ * An out-of-range enum tag in data read from outside is refused instead
+   of dropped or passed on
+ * A malformed packet stream on stdin is an input error instead of an
+   abort
+ * The HTTP server no longer routes a long command or binding name by its
+   first 255 bytes
+ * Function values over packed types cross between languages
+ * A value passes through a pool that has no native form for it
+ * A user instance over a list is called instead of being bypassed by the
+   nexus's native list handling
+ * Sourced Python files differing only in `-`/`_` or case get separate
+   bindings, and files with uppercase names or in dotted directories load;
+   a Python source with no file reaches only a real builtin
+ * A sourced function may share a name with a generated local
+ * One foreign function may implement several terms
+ * An instance at a function type receives converted callbacks
+ * A specialized type form or alias binds each variable to its own
+   argument (`P Int Real` printed 2 for a stored 2.75)
+ * A function called with one variable for two parameters builds
+ * Generated code no longer reuses a variable name
+ * IFile field walks over files of several sub-packets return complete,
+   correct results
+ * Records and `data` types with Nat parameters, phantom parameters, fields
+   through an alias, packed arms, or nesting at their own arguments build
+   in C++ and Rust
+ * A generated record with a field of alias type builds as a record
+   literal in C++ and Rust; generated Rust records derive Debug, PartialEq
+   and Default where their fields allow it, and generated C++ records
+   compare with ==
+ * A sourced file may name any generated type of a module it is compiled
+   with, used by the program or not
+ * Rust: operators on borrowed operands, generic optional and tuple
+   arguments, `.[i]` and `.[i].field` on an IFile, binds over non-Clone
+   payloads, and user records written by intrinsics build; a runtime panic
+   is no longer taken for a user panic, or the reverse
+ * C++: Bool streams on macOS, patterns returning function values, and
+   newtype forms over records build; a Str newtype held as a byte vector is
+   checked for UTF-8
+ * Python writes -2^63 and similar integers in their shortest form, and an
+   integer too large for a Real field is an error, not -1.0
+ * Under `MORLOC_SKIP_UTF8_CHECK`, raw stdout and render actions on a
+   streamed command write the exact bytes the program built instead of
+   failing them as "data read from outside"
+ * `morloc install` refuses a module that fails to typecheck, naming it,
+   instead of installing it with no exports
+ * A refused or malformed package.yaml is reported as an error naming the
+   file, not as a Haskell exception
+ * An error at an export of a `(*)` module names the module instead of
+   reading as a compiler bug
+ * A docstring error such as a reserved `@render` long name is reported
+   alone, without a misleading hint about where parsing stopped
+ * A Python `@load` of a list whose elements hold an enum no longer crashes
+   the pool, and a single enum value saved with `@save` loads back with
+   `@load`
+ * Two builds sourcing the same Python file no longer fail on its stale
+   bytecode
+
 0.112.0 [2026-11-01]
 --------------------
 

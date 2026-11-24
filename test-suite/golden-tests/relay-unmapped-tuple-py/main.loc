@@ -1,0 +1,36 @@
+-- A value of a type a pool cannot hold (Python has no form for a 4-tuple
+-- here: no root-py) passes through that pool as its packet when the pool
+-- only relays it. `xs` is made in C++, carried through the Python-run
+-- do-block and read in C++: 3+3 = 6, also when the Python side passes it
+-- on under another name or through a lambda parameter.
+module main (go, viaNames)
+
+import root-cpp
+
+type Py => Int = "int"
+type Py => (List a) = "list" a
+
+source Cpp from "c.hpp" ("mk4", "sum4", "cppio")
+
+mk4 :: Int -> [(Int, Int, Int, Int)]
+sum4 :: [(Int, Int, Int, Int)] -> Int
+cppio :: Int -> <IO> Int
+
+source Py from "p.py" ("pyio")
+
+pyio :: Int -> <IO> Int
+
+go :: Int -> <IO> Int
+go n = do
+  m <- cppio n
+  let xs = mk4 m
+  c <- pyio (sum4 xs)
+  pyio c
+
+viaNames :: Int -> <IO> Int
+viaNames n = do
+  m <- cppio n
+  let xs = mk4 m
+  let ys = xs
+  c <- pyio ((\zs -> sum4 zs) ys)
+  pyio c

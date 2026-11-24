@@ -1,0 +1,4 @@
+module local (h)
+
+h :: Int
+h = 4

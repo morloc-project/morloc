@@ -21,9 +21,11 @@ cp "$BUILD_DIR/rmorloc.c" "$INCLUDE_DIR/"
 # as separate dev packages on the build machine; R-loadable shared objects
 # resolve those symbols through the loaded R interpreter at dlopen time, not
 # at link time.
+# LIFE-6: rmorloc records the build id of the libmorloc it is built against.
+BUILD_ID=$("$MORLOC_HOME/bin/morloc-nexus" --build-id)
 R_CPPFLAGS=$(R CMD config --cppflags)
 R_HOME=$(R RHOME)
-${CC:-gcc} $R_CPPFLAGS -I"$INCLUDE_DIR" $SANITIZE_FLAGS -fpic -O2 \
+${CC:-gcc} $R_CPPFLAGS -I"$INCLUDE_DIR" $SANITIZE_FLAGS -DMORLOC_BINDING_BUILD_ID=0x${BUILD_ID}ULL -fpic -O2 \
     -c "$INCLUDE_DIR/rmorloc.c" -o "$INCLUDE_DIR/rmorloc.o"
 
 # Platform-specific link flags. The R-loadable object keeps the `.so` NAME on
@@ -39,10 +41,16 @@ else
     SHLIB_FLAGS="-shared -Wl,-Bsymbolic-functions -Wl,-z,relro"
     RPATH_ORIGIN='$ORIGIN'
 fi
+# Linked beside its destination and renamed onto it, so an R pool starting
+# meanwhile loads the old library or the new one, never a partial one.
+STAGED="$LIB_DIR/.librmorloc.so.tmp.$$"
+trap 'rm -f "$STAGED"' EXIT
 ${CC:-gcc} $SHLIB_FLAGS $SANITIZE_FLAGS \
-    -o "$LIB_DIR/librmorloc.so" "$INCLUDE_DIR/rmorloc.o" \
+    -o "$STAGED" "$INCLUDE_DIR/rmorloc.o" \
     -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,"$RPATH_ORIGIN" -lmorloc -lpthread \
     -L"$R_HOME/lib" -lR
+
+mv -f "$STAGED" "$LIB_DIR/librmorloc.so"
 
 # Clean up
 rm -f "$INCLUDE_DIR/rmorloc.c" "$INCLUDE_DIR/rmorloc.o"

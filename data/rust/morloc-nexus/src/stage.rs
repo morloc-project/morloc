@@ -51,6 +51,18 @@ pub fn stdout_on() -> bool {
     STAGE.get().map(|s| s.tee).unwrap_or(true)
 }
 
+/// Create a new file in a directory of this run's, writable by no one else
+/// (FMT-10). A file already at `path`, or a link there, is an error.
+pub fn create_private(path: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)
+}
+
 pub fn value_path(dir: &str) -> String {
     format!("{}/value.pkt", dir)
 }
@@ -97,7 +109,7 @@ fn write_packet(
     schema: *const morloc_runtime_types::cschema::CSchema,
 ) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
-    let file = std::fs::File::create(path).map_err(|e| format!("{}: {}", path, e))?;
+    let file = create_private(path).map_err(|e| format!("{}: {}", path, e))?;
     let fd = file.as_raw_fd();
     let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
     let n = if packet.is_empty() {

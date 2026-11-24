@@ -1,0 +1,31 @@
+-- A let bound in a tail loop and only ever called keeps its own name: the
+-- fresh variables the guard's native call needs never reuse its index.
+module main (run)
+
+import root-cpp
+
+type Source a = ([a] -> <IO> ()) -> <IO> ()
+
+source Cpp from "drive.hpp" ("drive", "count")
+drive :: Source Int -> <IO> [Int]
+count :: [a] -> Int
+
+run :: Int -> <IO> [Int]
+run n = drive numbers
+
+numbers :: Source Int
+numbers sink = concatSources [listSource [n0, 2, 3], listSource [4, 5]] sink
+  where
+    n0 = 1
+
+listSource :: [a] -> Source a
+listSource xs sink = sink xs
+
+concatSources :: [Source a] -> Source a
+concatSources srcs sink = do
+  ? count srcs == 0 = do
+      ()
+  : do
+    let src = .[0] srcs
+    src sink
+    concatSources (.[1:] srcs) sink

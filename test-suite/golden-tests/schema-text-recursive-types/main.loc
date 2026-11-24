@@ -12,12 +12,10 @@ import root-py
 record LL where
   head :: Int
   tail :: ?LL
-record Py => LL = "dict"
 
 record Tree where
   value :: Int
   children :: [Tree]
-record Py => Tree = "dict"
 
 data Node = Leaf | Branch Int Node Node
 
@@ -31,7 +29,6 @@ data Seq a = Nil | Cons a (Seq a)
 record T7 a where
   value :: a
   children :: [T7 a]
-record Py => T7 a = "dict"
 
 ll :: LL -> LL
 ll = idpy

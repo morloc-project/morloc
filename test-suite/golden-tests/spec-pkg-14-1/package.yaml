@@ -1,0 +1,5 @@
+name: main
+version: 0.0.0
+cpp-deps:
+  no_such_dep:
+    import: no_such_dep/x.hpp

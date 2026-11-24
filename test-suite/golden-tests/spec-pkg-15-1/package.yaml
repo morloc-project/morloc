@@ -1,0 +1,5 @@
+name: main
+version: 0.0.0
+cxx-flags:
+  - '-DMSG="a b"'
+  - '-DLIT="$HOME"'

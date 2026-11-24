@@ -1,6 +1,9 @@
 #ifndef __IMPL_HPP__
 #define __IMPL_HPP__
 
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -14,13 +17,26 @@ inline std::vector<int> mk(int i) {
     return out;
 }
 
-// Drive the sink from four real threads, one batch each. Each thread folds
-// into its own accumulator, so the merge has four to combine.
+// A step run on a producer thread waits until all four producer threads
+// are stepping, so the four puts overlap and fold into four accumulators.
+inline thread_local bool on_producer_thread = false;
+inline std::mutex rendezvous_lock;
+inline std::condition_variable rendezvous_cv;
+inline int rendezvous_count = 0;
+
+inline void rendezvous() {
+    if (!on_producer_thread) return;
+    std::unique_lock<std::mutex> g(rendezvous_lock);
+    if (++rendezvous_count == 4) rendezvous_cv.notify_all();
+    rendezvous_cv.wait_for(g, std::chrono::seconds(10), [] { return rendezvous_count >= 4; });
+}
+
+// Drive the sink from four real threads, one batch each.
 template <typename F>
 void produceParallel(F sink) {
     std::vector<std::thread> ts;
     for (int i = 0; i < 4; i++) {
-        ts.emplace_back([&sink, i]() { sink(mk(i)); });
+        ts.emplace_back([&sink, i]() { on_producer_thread = true; sink(mk(i)); });
     }
     for (auto& t : ts) { t.join(); }
 }
@@ -32,13 +48,15 @@ void produceParallel(F sink) {
 // identity-respecting -- `mergePAcc` increments it, so the seed is not an
 // identity for it -- because counting the merges is the only way to observe
 // that `combine` ran at all. It stays deterministic because the producer
-// starts exactly four threads, so there are exactly four accumulators.
+// starts exactly four threads whose steps overlap, so there are exactly four
+// accumulators.
 // An ordinary accumulator must be a monoid; this one is an instrument.
 using PAcc = std::tuple<int, int, int>;
 
 inline PAcc zeroPAcc() { return PAcc(0, 0, 0); }
 
 inline PAcc addPBatch(const PAcc& acc, const std::vector<int>& batch) {
+    rendezvous();
     int sum = std::get<0>(acc);
     for (int x : batch) sum += x;
     return PAcc(sum, std::get<1>(acc) + 1, std::get<2>(acc));

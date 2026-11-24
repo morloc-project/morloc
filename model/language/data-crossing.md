@@ -85,3 +85,16 @@ non-finite float is written is open (IFACE-9).
 
 Why: `%.15g` and `%.7g` lost digits, so no JSON interface round tripped,
 and `F64::MAX` was written as a number above it.
+
+### WIRE-10 An enum tag read from outside the program names a constructor
+Intent: proposed
+Tests: spec-wire-10-1
+Code: deviates (../runtime/issues/value-encoding.md)
+
+A value read from a file, a buffer or another process's packet is refused
+when one of its enum tags is past its type's constructors, with an error
+naming the tag and the constructors, whichever language reads it and
+wherever the enum sits (alone, in a list, record, optional or nested
+list). Unlike a `Bool` byte (WIRE-8), such a tag has no value in any
+language: R drops it, and a Rust or C++ enum with it is undefined. Only
+values that hold an enum pay for the check.

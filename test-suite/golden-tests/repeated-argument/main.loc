@@ -1,0 +1,61 @@
+--' One variable passed for two parameters is bound once
+--'
+--' `two xs xs` calls a function of two parameters with one variable; the
+--' generated function the call builds must not bind that variable twice (a
+--' repeated parameter does not load in Python or R and does not compile in
+--' C++).
+module main (goPy, goR, goCpp)
+
+import root-py (Str)
+import root-r
+import root-cpp
+
+source Py from "h.py" ("show2" as show2Py, "tmp" as tmpPy)
+source R from "h.R" ("show2_r" as show2R, "tmp_r" as tmpR)
+source Cpp from "h.hpp" ("show2_cpp" as show2Cpp, "tmp_cpp" as tmpCpp)
+
+show2Py :: [Str] -> [Str] -> <IO> Str
+tmpPy :: Str -> <IO> Str
+show2R :: [Str] -> [Str] -> <IO> Str
+tmpR :: Str -> <IO> Str
+show2Cpp :: [Str] -> [Str] -> <IO> Str
+tmpCpp :: Str -> <IO> Str
+
+twoPy :: [Str] -> [Str] -> <IO> Str
+twoPy a b = do
+  p <- tmpPy "x"
+  x <- show2Py a b
+  y <- show2Py a b
+  p <> x <> y
+
+twoR :: [Str] -> [Str] -> <IO> Str
+twoR a b = do
+  p <- tmpR "x"
+  x <- show2R a b
+  y <- show2R a b
+  p <> x <> y
+
+twoCpp :: [Str] -> [Str] -> <IO> Str
+twoCpp a b = do
+  p <- tmpCpp "x"
+  x <- show2Cpp a b
+  y <- show2Cpp a b
+  p <> x <> y
+
+--' Python, one variable for both parameters
+goPy :: <IO> Str
+goPy = do
+  let xs = ["a", "b"]
+  twoPy xs xs
+
+--' R, one variable for both parameters
+goR :: <IO> Str
+goR = do
+  let xs = ["a", "b"]
+  twoR xs xs
+
+--' C++, one variable for both parameters
+goCpp :: <IO> Str
+goCpp = do
+  let xs = ["a", "b"]
+  twoCpp xs xs

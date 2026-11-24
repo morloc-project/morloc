@@ -1,0 +1,55 @@
+--' A sourced file is identified by its path, and each file gets its own name
+--'
+--' `a-b.py` and `a_b.py` are different files and must not share a binding; a
+--' file whose name has an uppercase letter, and one in a directory with a dot
+--' in its name, must load; a file in a hyphenated package keeps its relative
+--' imports; one file reached by two spellings of its path loads once.
+module main (dash, under, upper, dotted, relative, countA, countB)
+
+import root-py (Str, Int)
+
+source Py from "a-b.py" ("f" as dashF)
+source Py from "a_b.py" ("f" as underF)
+source Py from "Foo.py" ("foo" as upperF)
+source Py from "lib.v2/x.py" ("x" as dottedF)
+source Py from "my-pkg/rel.py" ("rel" as relativeF)
+source Py from "./counted.py" ("load_count" as loadsA)
+source Py from "counted.py" ("load_count" as loadsB)
+
+dashF :: () -> Str
+underF :: () -> Str
+upperF :: () -> Str
+dottedF :: () -> Str
+relativeF :: () -> Str
+
+loadsA :: () -> Int
+loadsB :: () -> Int
+
+--' Loads of counted.py, read through one spelling of its path
+countA :: Int
+countA = loadsA ()
+
+--' Loads of counted.py, read through the other
+countB :: Int
+countB = loadsB ()
+
+--' From a-b.py
+dash :: Str
+dash = dashF ()
+
+--' From a_b.py
+under :: Str
+under = underF ()
+
+--' From Foo.py
+upper :: Str
+upper = upperF ()
+
+
+--' From lib.v2/x.py
+dotted :: Str
+dotted = dottedF ()
+
+--' From my-pkg/rel.py, through its relative import
+relative :: Str
+relative = relativeF ()

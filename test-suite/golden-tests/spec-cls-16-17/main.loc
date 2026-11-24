@@ -1,0 +1,26 @@
+-- Spec CLS-16: a program's own module named like a root module is not the
+-- standard list map; a bracket chain calls its instance.
+module root-py (run, direct)
+import root
+
+type Py => Int = "int"
+type Py => I64 = "int"
+type Py => (List a) = "list" a
+type Py => (Optional a) = "Optional" a
+
+record R where
+  x :: Int
+
+instance Sliceable List where
+  source Py from "h.py" ("h_slice" as __get_slice__)
+instance IndexLike (?I64) where
+  source Py from "h.py" ("h_id" as __to_index__)
+
+instance Functor List where
+  source Py from "h.py" ("h_rev_map" as map)
+
+run :: [R] -> [Int]
+run xs = .[:].x xs
+
+direct :: [R] -> [Int]
+direct xs = map (\r -> .x r) xs

@@ -64,8 +64,6 @@ data Rust => (Rose a) = "MyRose<$1>" a
 
 record Cpp  => (Wrap a) = "MyWrap<$1>" a
 record Rust => (Wrap a) = "MyWrap<$1>" a
-record Py   => (Wrap a) = "dict" a
-record R    => (Wrap a) = "list" a
 
 source Cpp  from "boxes.hpp" ("grow" as cppGrow, "shout" as cppShout, "bump" as cppWrap, "inc" as cppInc, "depth" as cppDepthOf, "rose_size" as cppRoseSize)
 source Rust from "boxes.rs"  ("grow" as rustGrow, "shout" as rustShout, "bump" as rustWrap, "inc" as rustInc, "depth" as rustDepthOf, "rose_size" as rustRoseSize)

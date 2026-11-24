@@ -21,14 +21,15 @@ module Morloc.Namespace.State
   ( -- * Morloc monad
     MorlocMonadGen
   , MorlocMonad
+  , MorlocM
   , MorlocReturn
   , MorlocState (..)
+  , TypeHome (..)
   , ModuleCommands (..)
   , WrapperSpec (..)
   , WrapperMode (..)
   , WrapperFile (..)
   , SignatureSet (..)
-  , Instance (..)
   , TermTypes (..)
   , Specs (..)
 
@@ -41,8 +42,11 @@ module Morloc.Namespace.State
 
     -- * Package metadata
   , PackageMeta (..)
+  , MorlocDep (..)
+  , mdepKey
   , defaultCppVersion
   , DepSpec (..)
+  , DepImport (..)
   , RegDep (..)
   , LocalDep (..)
   , DepSource (..)
@@ -62,6 +66,7 @@ module Morloc.Namespace.State
 
     -- * Typechecking
   , Gamma (..)
+  , Wanted (..)
   , GammaIndex (..)
   , ConstVal (..)
   , NumLitKind (..)
@@ -89,11 +94,16 @@ import Control.Monad.State.Strict (StateT)
 import Control.Monad.Writer.CPS (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as AKM
+import qualified Data.Aeson.Types as AesonTypes
 import Data.Int (Int64)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
+import Data.Char (isAlpha, isAlphaNum)
+import Morloc.Namespace.TypeF (TypeF)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.Data.Doc
@@ -115,7 +125,10 @@ type MorlocMonadGen c e l s a =
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
 -- | The concrete compiler monad used throughout the pipeline
-type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
+type MorlocMonad a = MorlocM a
+
+-- | 'MorlocMonad' as a type constructor.
+type MorlocM = ReaderT Config (ExceptT MorlocError (WriterT [Text] (StateT MorlocState IO)))
 
 ---- State
 
@@ -140,6 +153,16 @@ data WrapperFile = WrapperFile
   }
   deriving (Show, Eq)
 
+-- | Where a type is declared (GEN-4): the declaring module as a path of
+-- identifier components below the generated-type prefix (@["bio_seq",
+-- "align"]@, or @["_local", ...]@ for a module that is not installed), and
+-- the name the module declares the type under.
+data TypeHome = TypeHome
+  { typeHomePath :: [Text]
+  , typeHomeName :: Text
+  }
+  deriving (Show, Eq, Ord)
+
 {- | Mutable compiler state threaded through the entire pipeline.
 Accumulates type signatures, source bindings, typedefs, and metadata
 as modules are parsed, linked, and typechecked.
@@ -155,12 +178,25 @@ data MorlocState = MorlocState
     -- from here, seeded above every index the frontend allotted.
   , stateDepth :: Int
   , stateSignatures :: GMap Int Int SignatureSet
-  , stateTypeclasses :: Map.Map EVar Instance
+  , stateInstances :: InstanceEnv
+  -- ^ One entry per instance, merged across its declarations.
   , stateConcreteTypedefs :: Map Lang Scope
   , stateGeneralTypedefs :: Scope
   , stateNewtypeHeaders :: Map.Map TVar [(TVar, [Int])]
   -- ^ Each newtype's header labels (DIM-9): the parameter and the tuple
   -- fields that reach its integer in the representation.
+  , stateTypeHomes :: Map.Map TVar TypeHome
+  -- ^ For each declared type, by its program-wide name, the module that
+  -- declares it and the name it is declared under (GEN-4).
+  , stateModulePackages :: Map.Map MVar Text
+  -- ^ The package each module of a package belongs to (GEN-4); a module of
+  -- no package is absent.
+  , stateGeneratedClasses :: Map.Map Text (LR.ClassKind, TVar)
+  -- ^ Each generated class (GEN-11), by its qualified name, which is also
+  -- its record's concrete name: the class kind and the record.
+  , stateGeneratedData :: Map.Map Text TVar
+  -- ^ The generated class of each `data` type in a language whose records
+  -- may be classes (GEN-12), by qualified name.
   , stateExportTypes :: Map.Map Int TypeU
   -- ^ Each export's inferred general type, by its index, with its Nat
   -- variables: the contract of an export without a signature (DIM-3).
@@ -188,10 +224,9 @@ data MorlocState = MorlocState
   -- that saves the command's output: their positions (1-based), in the
   -- order of the entry's trailing (flag, path) slots.
   , stateStreamElems :: Map.Map EVar TypeU
-  -- ^ For each command that streams its output through @collect, the batch
-  -- type it writes to standard output. Such a command returns @()@, so the
-  -- signature alone cannot say what a caller receives; see
-  -- 'Morloc.Frontend.Desugar.collectStreamType'.
+  -- ^ For each streaming command, the batch type it writes to standard
+  -- output: @[a]@ for its @Collect a@ result (STRM-7), recorded before the
+  -- result is erased to @()@.
   , stateManifoldConfig :: Map Int ManifoldConfig
   , stateLogTemplate :: Maybe LogTemplate
   -- ^ Program-wide log message template from the main module's YAML
@@ -251,7 +286,6 @@ data MorlocState = MorlocState
   , stateBuildParentDir :: Maybe Path
   -- ^ Parent directory for the @<key>-build@ folder (@--build-dir@).
   -- @Nothing@ = current working directory.
-  , stateClassDefs :: Map ClassName [Constraint]
   , stateEffects :: Map.Map EffectLabel Bool
   -- ^ Declared effects: label -> isEscapable (True = escapable). The
   -- compiler hardcodes none; all entries come from `effect` /
@@ -291,6 +325,9 @@ data MorlocState = MorlocState
   -- concrete, by name: its index and type. A call that needs one reports
   -- its undetermined variables (POLY-6).
   , stateSkippedGeneric :: Map EVar (Int, Type)
+  -- | The names of the root module's definitions that have no signature
+  -- (POLY-9).
+  , stateRootUnsigned :: Set.Set EVar
   -- | Each staged closure value (by the index of its flat entry): its first
   -- stage point and the index of its stage entry.
   , stateStageEntries :: Map Int (Int, Int)
@@ -351,6 +388,12 @@ data MorlocState = MorlocState
   -- on-demand provisioning even when it declares no package dependencies.
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
+  , stateEnvPrefix :: Maybe FilePath
+  -- ^ The prefix of a managed build's environment (PKG-13), Nothing outside one
+  , stateGuestObjects :: [FilePath]
+  -- ^ Objects a guest build produced, linked into the C++ pool
+  , stateGuestLinkFlags :: [Text]
+  -- ^ Link arguments those objects need, one argument each
   , stateAllowLocalModules :: Bool
   -- ^ When False, import resolution ignores local/project-relative
   -- modules and resolves only installed (system) modules. False in
@@ -360,11 +403,11 @@ data MorlocState = MorlocState
   -- during import resolution. Enabled only by `morloc make` (and disabled there
   -- by `--offline`); left False for read-only commands (typecheck, dump) and for
   -- eval/served mode, so those never trigger network installs.
-  , stateSnapshot :: Map.Map Text Text
-  -- ^ Module-pin snapshot: module name -> exact git hash, merged from the env's
-  -- snapshot directory. Consulted AUTHORITATIVELY during on-demand module
-  -- resolution (a snapshot pin overrides package pins). Loaded lazily on the
-  -- make/install path; empty otherwise (read-only commands, no env).
+  , stateSnapshot :: Map.Map Text (Text, Maybe Text)
+  -- ^ The environment's snapshot pins (PKG-7), module key to hash and source.
+  -- Consulted authoritatively during module resolution: a snapshot pin
+  -- overrides package pins. Loaded lazily on the make/install path; empty
+  -- otherwise (read-only commands, no env).
   , stateEvalSandbox :: Maybe (Set.Set MVar)
   -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
   -- sandboxed eval (served): only these modules may be imported at the
@@ -376,6 +419,9 @@ data MorlocState = MorlocState
   -- ^ True when @morloc make --unsafe-skip-null-check@ was given. The
   -- emitted manifest's top-level @unsafe_skip_null_check@ flag is set
   -- from this; the runtime then skips the boundary NUL scan.
+  , stateUnsafeSkipUtf8Check :: Bool
+  -- ^ True when @morloc make --unsafe-skip-utf8-check@ was given; sets the
+  -- manifest's @unsafe_skip_utf8_check@ flag.
   , stateInlineSize :: Maybe Int64
   -- ^ Inline-vs-route threshold, in bytes, from @morloc make
   -- --inline-size@. @Nothing@ = use the libmorloc default; emitted as
@@ -400,6 +446,10 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
+  , stateRecordAncestors :: Map.Map (TVar, [TypeU]) TypeF
+  -- ^ The records, by name and general arguments, whose fields are being
+  -- resolved to a target language: a reference to one of them is tied to
+  -- it (CodeGenerator.Infer 'Knot').
   , stateVariantAncestors :: Set.Set (TVar, [TypeU])
   -- ^ `data` type INSTANTIATIONS whose arms are currently being resolved
   -- to a target language: the type's name paired with its applied type
@@ -440,16 +490,7 @@ data SignatureSet
       ClassName
       EVar
       EType
-      [TermTypes]
   deriving (Show)
-
-data Instance = Instance
-  { className :: ClassName
-  , classVars :: [TVar]
-  , classType :: EType
-  , instanceTerms :: [TermTypes]
-  }
-  deriving (Show, Ord, Eq)
 
 -- | The roots of the shared specializations ('stateSpecs').
 newtype Specs = Specs [AnnoS (Indexed TypeU) Many Int]
@@ -496,13 +537,12 @@ data Config
   -- The split lets a container mount only the state root without shadowing the
   -- image-baked runtime.
   , configState :: !Path
+  -- | The plane's module directory: module @n@ of library @l@ is installed
+  -- at @<configLibrary>/l/n@ (PKG-3, PLANE-1).
   , configLibrary :: !Path
-  , configPlane :: !Path
-  , configPlaneCore :: !Path
   , configTmpDir :: !Path
   , configBuildConfig :: !Path
   , configLangOverrides :: !(Map Text [Text])
-  , configRegistry :: !(Maybe Text)
   }
   deriving (Show, Ord, Eq)
 
@@ -819,9 +859,28 @@ checkPackageDeps pm =
 defaultCppVersion :: Int
 defaultCppVersion = 20
 
+-- | A pinned dependency (PKG-6): module @mdepName@ of library @mdepLibrary@
+-- at commit @mdepHash@, fetched from @mdepSource@ (@host:owner/name@) when
+-- given, else from the library's origin.
+data MorlocDep = MorlocDep
+  { mdepName :: !Text
+  , mdepLibrary :: !Text
+  , mdepSource :: !(Maybe Text)
+  , mdepHash :: !Text
+  }
+  deriving (Show, Eq, Ord)
+
+-- | The dependency's module key: @name@ for stdlib, else @library/name@.
+mdepKey :: MorlocDep -> Text
+mdepKey d
+  | mdepLibrary d == "std" = mdepName d
+  | otherwise = mdepLibrary d <> "/" <> mdepName d
+
 data PackageMeta
   = PackageMeta
   { packageName :: !Text
+  -- | The library the package belongs to (PKG-1); required to install.
+  , packageLibrary :: !(Maybe Text)
   , packageVersion :: !Text
   , packageHomepage :: !Text
   , packageSynopsis :: !Text
@@ -836,7 +895,6 @@ data PackageMeta
   -- (20, 23, ...). Defaults to 'defaultCppVersion' whether or not the package
   -- declares one.
   , packageCppVersion :: !Int
-  , packageDependencies :: [Text]
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
   -- -march=native, -DXYZ). Propagates transitively through dependencies.
   , packageCxxFlags :: [Text]
@@ -850,8 +908,7 @@ data PackageMeta
   , packagePyDeps :: Map Text DepSpec
   -- | External R packages (name -> 'DepSpec') needed by the R pool.
   , packageRDeps :: Map Text DepSpec
-  -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool; the
-  -- structured, version-managed successor to 'packageDependencies'.
+  -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool.
   , packageCppDeps :: Map Text DepSpec
   -- | Conda packages (name -> 'DepSpec') whose executables the module runs as
   -- programs, whatever its pools' languages. Propagates transitively.
@@ -870,27 +927,40 @@ data PackageMeta
   -- ">=0.98, <0.99" (an interval), "0.98" (the 0.98.x series), or "*". 'Nothing'
   -- means unconstrained. Checked at install and make.
   , packageMorlocVersion :: !(Maybe Text)
-  -- | Pinned morloc module dependencies (name, git commit hash). Optional;
-  -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
-  , packageMorlocDependencies :: [(Text, Text)]
+  -- | Pinned morloc module dependencies (PKG-6). Optional; empty = unpinned,
+  -- install latest. Closer-to-install-root wins.
+  , packageMorlocDependencies :: [MorlocDep]
   -- | Optional path (relative to the module root) to a shell script that
   -- runs once during `morloc install`, after the source is on disk and
   -- after morloc deps are installed. Non-zero exit fails the install.
   , packageSetup :: !(Maybe FilePath)
   -- | Per-language lists of paths (relative to module root, glob patterns
-  -- allowed) to copy on install into per-language well-known dirs under
-  -- $MORLOC_HOME so downstream foreign code can reference them by a
-  -- stable, module-namespaced path.
+  -- allowed) to copy on install.
   , packageExpose :: !ExposeSet
+  -- | The namespaces of the module's dependencies, by language name and
+  -- dependency name (GEN-7): a generated file naming a type under one
+  -- imports what it lists.
+  , packageDepImports :: Map Text (Map Text DepImport)
+  -- | The link names of each cpp-deps entry (PKG-12): each becomes
+  -- @-l<name>@ on a C++ pool's link line.
+  , packageCppLibs :: Map Text [Text]
+  -- | The executables of each tool-deps entry (PKG-16), checked at build.
+  , packageToolBins :: Map Text [Text]
+  }
+  deriving (Show, Ord, Eq)
+
+-- | A dependency's namespace root (@Eigen@, @numpy@, @ndarray@), if it has
+-- one, and the files it imports: headers in C++ (checked by PKG-14, and
+-- imported by a generated file naming a type under the namespace), nothing
+-- in Rust, whose crates are dependencies of the crate.
+data DepImport = DepImport
+  { diNamespace :: !(Maybe Text)
+  , diImports :: ![Text]
   }
   deriving (Show, Ord, Eq)
 
 -- | Per-language exposure lists. Each list holds paths or glob patterns
--- relative to the module root. The install pipeline copies the matched
--- files (preserving subtree under the module root) into
--- $MORLOC_HOME/include/<module>/        (cpp)
--- $MORLOC_HOME/lib/python/<py_module>/  (py, hyphens in module name -> _)
--- $MORLOC_HOME/lib/R/<module>/          (r)
+-- relative to the module root.
 data ExposeSet
   = ExposeSet
   { exposeCpp :: ![Text]
@@ -916,6 +986,16 @@ data GammaIndex
   | SrcG Source
   deriving (Ord, Eq, Show)
 
+-- | A class constraint a use owes, at the term it arose at.
+data Wanted = Wanted
+  { wSite :: Int
+  , wPred :: Constraint
+  , wIntrinsic :: Bool
+  -- ^ owed by a bracket chain's map, which the intrinsic map serves where no
+  -- instance does (CLS-16)
+  }
+  deriving (Show, Eq, Ord)
+
 {- | Typechecking context using IntMap for O(log N) operations.
 Entries are keyed by monotonically increasing slot numbers (higher = newer).
 Side-indexes provide O(log N) lookup of ExistG entries by TVar.
@@ -928,6 +1008,9 @@ data Gamma = Gamma
   , gammaContext :: IntMap.IntMap GammaIndex
   -- | Index: ExistG TVar -> slot number (for O(log N) access1)
   , gammaExist :: Map TVar Int
+  -- | Index: AnnG EVar -> its slots, newest first. A slot is checked
+  -- against the context before it is used (see 'lookupE').
+  , gammaAnn :: Map EVar [Int]
   -- | Cache of solved existential types
   , gammaSolved :: Map TVar TypeU
   -- | Nat constraints that could not be solved (deferred)
@@ -952,6 +1035,12 @@ data Gamma = Gamma
   -- typeclass mechanism uses; primitive forms have CMember / CSubset /
   -- CDisjoint constructors.
   , gammaConstraints :: [Constraint]
+  -- | The class constraints the body's uses owe, newest first, each at the
+  -- term it arose at.
+  , gammaWanteds :: [Wanted]
+  -- | For each nested signed definition checked against its signature, each
+  -- variable of that check with the variable of the definition's use.
+  , gammaNestedUses :: [(TypeU, TypeU)]
   -- | Constraints declared on the *current* function's signature, taken as
   -- assumptions during this function's body typecheck. A deferred
   -- obligation in @gammaConstraints@ that cannot be decided at end-of-
@@ -998,8 +1087,9 @@ data Gamma = Gamma
   -- | The Nat and Int variables of the signatures being checked as
   -- contracts, at every depth (POLY-7).
   , gammaRigidNats :: Set.Set TVar
-  -- | The row variables of those signatures; a size over them is rigid.
-  , gammaRigidRows :: Set.Set TVar
+  -- | The Str, Rec and List variables of those signatures, which their
+  -- bodies may not fix (POLY-1); a size over such rows is rigid.
+  , gammaRigidSlots :: Set.Set TVar
   -- | The Nat positions of those signatures, whose non-negativity their
   -- bodies may assume (KIND-4).
   , gammaRigidDomain :: [(Int, TypeU)]
@@ -1010,6 +1100,9 @@ data Gamma = Gamma
   -- known before run time (DIM-3): never solved by an equation, and every
   -- condition over one must hold for each of its values.
   , gammaObserved :: Set.Set TVar
+  -- | The definition whose own lambda comes next: it runs once per call of
+  -- the definition, so its type may hold lengths its body observes (DIM-10).
+  , gammaDefinitionLambda :: Maybe EVar
   -- | The type variables of the signatures being checked around this point,
   -- by the name the signature wrote to the name the check gave it. An
   -- annotation writing one of these names means that variable; a local
@@ -1099,10 +1192,14 @@ instance Defaultable MorlocState where
       , stateManifoldCounter = 0
       , stateDepth = 0
       , stateSignatures = GMap Map.empty Map.empty
-      , stateTypeclasses = Map.empty
+      , stateInstances = defaultValue
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
       , stateNewtypeHeaders = Map.empty
+      , stateTypeHomes = Map.empty
+      , stateGeneratedClasses = Map.empty
+      , stateGeneratedData = Map.empty
+      , stateModulePackages = Map.empty
       , stateExportTypes = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty
@@ -1134,7 +1231,6 @@ instance Defaultable MorlocState where
       , stateWrapperSpecs = Nothing
       , stateRebuild = Nothing
       , stateBuildParentDir = Nothing
-      , stateClassDefs = Map.empty
       , stateEffects = Map.empty
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
@@ -1147,6 +1243,7 @@ instance Defaultable MorlocState where
       , stateHoldCache = Map.empty
       , stateUndeterminedSites = Map.empty
       , stateSkippedGeneric = Map.empty
+      , stateRootUnsigned = Set.empty
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty
@@ -1165,17 +1262,22 @@ instance Defaultable MorlocState where
       , stateProjectRoot = Nothing
       , stateEnvSpecLangs = []
       , stateEvalMode = False
+      , stateEnvPrefix = Nothing
+      , stateGuestObjects = []
+      , stateGuestLinkFlags = []
       , stateAllowLocalModules = True
       , stateAutoInstall = False
       , stateSnapshot = Map.empty
       , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
+      , stateUnsafeSkipUtf8Check = False
       , stateInlineSize = Nothing
       , stateNoShm = False
       , stateTmpdir = Nothing
       , stateDebugTrace = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
+      , stateRecordAncestors = Map.empty
       , stateVariantAncestors = Set.empty
       , stateVariantArgsResolving = Set.empty
       }
@@ -1184,6 +1286,7 @@ instance Defaultable PackageMeta where
   defaultValue =
     PackageMeta
       { packageName = ""
+      , packageLibrary = Nothing
       , packageVersion = ""
       , packageHomepage = ""
       , packageSynopsis = ""
@@ -1195,7 +1298,6 @@ instance Defaultable PackageMeta where
       , packageGithub = ""
       , packageBugReports = ""
       , packageCppVersion = defaultCppVersion
-      , packageDependencies = []
       , packageCxxFlags = []
       , packageRustDeps = Map.empty
       , packagePyDeps = Map.empty
@@ -1209,6 +1311,9 @@ instance Defaultable PackageMeta where
       , packageMorlocDependencies = []
       , packageSetup = Nothing
       , packageExpose = defaultValue
+      , packageDepImports = Map.empty
+      , packageCppLibs = Map.empty
+      , packageToolBins = Map.empty
       }
 
 instance Defaultable ExposeSet where
@@ -1219,15 +1324,12 @@ instance FromJSON Config where
     Aeson.withObject "object" $ \o -> do
       home' <- o .:? "home" .!= "~/.local/share/morloc"
       source' <- o .:? "source" .!= "~/.local/share/morloc/src/morloc"
-      plane' <- o .:? "plane" .!= "default"
-      planeCore' <- o .:? "plane-core" .!= "morloclib"
       tmpdir' <- o .:? "tmpdir" .!= "~/.local/share/morloc/tmp"
       buildConfig' <- o .:? "build-config" .!= "~/.local/share/morloc/build-config.yaml"
       -- Parse legacy lang_python3/lang_R fields into langOverrides
       pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
       rCmd <- o .:? "lang_R" .!= ("" :: Text)
       overrides <- o .:? "lang_overrides" .!= Map.empty
-      registry' <- o .:? "registry"
       let legacyOverrides =
             Map.fromList $
               filter
@@ -1238,12 +1340,25 @@ instance FromJSON Config where
           allOverrides = Map.union overrides legacyOverrides
       -- configState defaults to home' here; the post-load resolver in
       -- Morloc.Config applies $MORLOC_STATE and re-derives configLibrary from it.
-      return $ Config home' home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
+      return $ Config home' home' source' tmpdir' buildConfig' allOverrides
 
 instance FromJSON PackageMeta where
-  parseJSON = Aeson.withObject "object" $ \o ->
+  parseJSON = Aeson.withObject "object" $ \o -> do
+    removedDependencies <- o .:? "dependencies" :: AesonTypes.Parser (Maybe Aeson.Value)
+    case removedDependencies of
+      Just _ ->
+        fail
+          "package.yaml key `dependencies` was removed: declare a package under cpp-deps \
+          \(its link names under `libs`), a program under tool-deps, and a library the \
+          \environment does not provide (a system or setup-built one) in cxx-flags"
+      Nothing -> return ()
+    cppEntries <- o .:? "cpp-deps" .!= Map.empty
+    toolEntries <- o .:? "tool-deps" .!= Map.empty
+    cppLibs <- Map.traverseWithKey (entryList "cpp-deps" cppKeys "libs" validLib) cppEntries
+    toolBins <- Map.traverseWithKey (entryList "tool-deps" toolKeys "bin" validBin) toolEntries
     PackageMeta
       <$> o .:? "name" .!= ""
+      <*> o .:? "library"
       <*> o .:? "version" .!= ""
       <*> o .:? "homepage" .!= ""
       <*> o .:? "synopsis" .!= ""
@@ -1255,7 +1370,6 @@ instance FromJSON PackageMeta where
       <*> o .:? "github" .!= ""
       <*> o .:? "bug-reports" .!= ""
       <*> o .:? "cpp-version" .!= defaultCppVersion
-      <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
       <*> o .:? "rust-deps" .!= Map.empty
       <*> o .:? "py-deps" .!= Map.empty
@@ -1269,9 +1383,82 @@ instance FromJSON PackageMeta where
       <*> parseMorlocDeps o
       <*> o .:? "setup"
       <*> o .:? "expose" .!= defaultValue
+      <*> parseDepImports o
+      <*> pure (Map.filter (not . null) cppLibs)
+      <*> pure (Map.filter (not . null) toolBins)
     where
-      parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
-        (,) <$> od Aeson..: "name" <*> (od Aeson..: "git-hash" >>= parseGitHash)
+      cppKeys = ["version", "source", "channel", "namespace", "import", "libs"]
+      toolKeys = ["version", "source", "channel", "bin"]
+      -- The list under `listKey` of one entry (PKG-12, PKG-16), refusing a key
+      -- the group does not know and a value `valid` rejects.
+      entryList :: String -> [Text] -> Aeson.Key -> (Text -> Bool) -> Text -> Aeson.Value -> AesonTypes.Parser [Text]
+      entryList grp known listKey valid name v = case v of
+        Aeson.Object d -> do
+          case [k | k <- map AK.toText (AKM.keys d), k `notElem` known] of
+            [] -> return ()
+            ks ->
+              fail ("the " <> grp <> " entry " <> T.unpack name <> " has unknown key " <> T.unpack (T.intercalate ", " ks) <> "; known keys: " <> T.unpack (T.intercalate ", " known))
+          xs <- d .:? listKey .!= []
+          case filter (not . valid) xs of
+            [] -> return xs
+            bad : _ ->
+              fail ("the " <> grp <> " entry " <> T.unpack name <> " lists " <> show bad <> " under " <> T.unpack (AK.toText listKey) <> ", which is not a bare name")
+        _ -> return []
+      validLib l =
+        not (T.null l)
+          && not ("-" `T.isPrefixOf` l)
+          && not ("lib" `T.isPrefixOf` l)
+          && not (any (`T.isSuffixOf` l) [".so", ".a", ".dylib"])
+          && not (".so." `T.isInfixOf` l)
+          && T.all (\c -> c > ' ' && c < '\DEL') l
+      validBin b = not (T.null b) && T.all (\c -> c > ' ' && c < '\DEL' && c /= '/') b
+      validHeader h = not (T.null h) && T.all (\c -> c > ' ' && c < '\DEL' && c `notElem` ("<>\"" :: String)) h
+      -- A dependency's `namespace` and `import` (GEN-7, PKG-14). A C++
+      -- dependency's namespace needs at least one header, and its headers may
+      -- stand alone; a Rust crate's namespace defaults to its name with `-` as
+      -- `_`, and it imports nothing (the crate is a dependency of the crate).
+      parseDepImports o' =
+        Map.fromList
+          <$> mapM
+            (\(lang, key) -> (,) lang . Map.mapMaybe id <$> (traverse (uncurry (depImport lang)) . Map.mapWithKey (,) =<< (o' .:? key .!= Map.empty)))
+            [("cpp", "cpp-deps"), ("rust", "rust-deps")]
+      depImport :: Text -> Text -> Aeson.Value -> AesonTypes.Parser (Maybe DepImport)
+      depImport lang name v = do
+        (ns, imp) <- case v of
+          Aeson.Object d -> (,) <$> d .:? "namespace" <*> (d .:? "import" >>= traverse importList)
+          _ -> return (Nothing, Nothing)
+        let checked n is
+              | not (isRoot n) =
+                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " has namespace " <> show n <> ", which is not one identifier")
+              | Set.member n reservedRoots =
+                  fail ("the " <> T.unpack lang <> "-deps entry " <> T.unpack name <> " claims the namespace " <> T.unpack n <> ", which the language or morloc owns")
+              | otherwise = return (Just (DepImport (Just n) is))
+            headers is = case filter (not . validHeader) is of
+              [] -> return is
+              bad : _ -> fail ("the cpp-deps entry " <> T.unpack name <> " imports " <> show bad <> ", which is not a header path")
+        case lang of
+          "cpp" -> case (ns, imp) of
+            (Just n, Just is@(_ : _)) -> headers is >>= checked n
+            (Nothing, Just is@(_ : _)) -> Just . DepImport Nothing <$> headers is
+            (Nothing, Nothing) -> return Nothing
+            (Nothing, Just []) -> fail ("the cpp-deps entry " <> T.unpack name <> " has an empty import list")
+            (Just _, _) -> fail ("the cpp-deps entry " <> T.unpack name <> " has a namespace but no import header")
+          _ -> checked (fromMaybe (T.replace "-" "_" name) ns) []
+      isRoot n = case T.uncons n of
+        Just (c, _) -> (isAlpha c || c == '_') && T.all (\x -> isAlphaNum x || x == '_') n
+        Nothing -> False
+      reservedRoots = Set.fromList ["std", "core", "alloc", "crate", "self", "super", "mlc", "rustmorloc"]
+      importList (Aeson.String i) = return [i]
+      importList x = Aeson.parseJSON x
+      parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od -> do
+        name <- od Aeson..: "name"
+        library <- od Aeson..:? "library"
+        source <- od Aeson..:? "source"
+        hash <- od Aeson..: "git-hash" >>= parseGitHash
+        case (library, source) of
+          (Nothing, Just _) ->
+            fail $ "morloc-deps entry '" <> T.unpack name <> "' gives a source but no library"
+          _ -> return (MorlocDep name (fromMaybe "std" library) source hash)
       -- A git-hash must be a quoted string. An unquoted, all-numeric hash is
       -- read by YAML as a number; coercing it back to text would silently drop
       -- leading zeros, so we reject it with an actionable message instead.
@@ -1298,24 +1485,13 @@ instance FromJSON ExposeSet where
 
 ----- Pretty instances -------------------------------------------------------
 
-instance Pretty Instance where
-  pretty (Instance cls vs et ts) =
-    "Instance"
-      <+> pretty cls
-      <+> pretty vs
-      <+> parens (pretty (etype et))
-      <+> list (map pretty ts)
-
 instance Pretty TermTypes where
   pretty (TermTypes (Just t) cs es) = "TermTypes" <+> (align . vsep $ (parens (pretty t) : map pretty cs <> map pretty es))
   pretty (TermTypes Nothing cs es) = "TermTypes" <+> "?" <> (align . vsep $ (map pretty cs <> map pretty es))
 
 instance Pretty SignatureSet where
   pretty (Monomorphic t) = pretty t
-  pretty (Polymorphic cls v t ts) =
-    "class"
-      <+> pretty cls
-      <+> (align . vsep $ (pretty v <+> "::" <+> parens (pretty t)) : map pretty ts)
+  pretty (Polymorphic cls v t) = "class" <+> pretty cls <+> pretty v <+> "::" <+> parens (pretty t)
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv

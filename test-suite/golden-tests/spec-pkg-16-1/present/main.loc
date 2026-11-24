@@ -1,0 +1,12 @@
+-- PKG-16: a tool-deps entry's `bin` executables must resolve at build. Outside
+-- a managed environment they are looked up on PATH: `no_such_tool_q` is not
+-- there and the build is refused naming the dependency and executable; `sh`
+-- is, and the build goes on. missing/ and present/ differ only in their
+-- package.yaml.
+module main (one)
+
+import root-py
+
+source Py from "f.py" ("one")
+
+one :: Int -> Int

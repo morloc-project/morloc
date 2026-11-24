@@ -1,0 +1,35 @@
+-- GEN-9: a parameterized record that refers to itself is generated as a
+-- generic handle to its fields; a source names it at its arguments
+-- (`Container<int>`). The Rust twin is main-rust.loc.
+module main (foo, depth, deep, trip, strTrip)
+
+import root-cpp
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+source Cpp from "c.hpp" ("depthOf", "same")
+depthOf :: Container Int -> Int
+same :: a -> a
+
+foo :: Int -> Container Int
+foo n ? n > 0 = {val = n, sub = foo (n - 1)}
+      : {val = 0, sub = Null}
+
+depth :: Int -> Int
+depth n = depthOf (foo n)
+
+trip :: Container Int -> Container Int
+trip x = same x
+
+strTrip :: Container Str -> Container Str
+strTrip x = same x
+
+build :: Int -> ?(Container Int) -> ?(Container Int)
+build n acc ? n == 0 = acc
+            : build (n - 1) {val = n, sub = acc}
+
+--' A million levels, built and released
+deep :: Int -> Int
+deep n = depthOf {val = 0, sub = build n Null}

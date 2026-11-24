@@ -184,8 +184,6 @@ record RecOpts where
   --' @default "/dev/null"
   pathr :: Str
 
-record Py => RecOpts = "dict"
-
 --' Return the number of Str elements in the unrolled record field
 --' `--xs`. `form: list` on the record entry means `--xs FILE` reads
 --' one Str per line from FILE.

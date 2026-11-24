@@ -360,17 +360,28 @@ fn parse_field_name(p: &mut Parser<'_>) -> String {
     std::str::from_utf8(&p.src[start..p.pos]).unwrap().to_string()
 }
 
+// Spaces may surround a group's members, as in morloc source.
+fn skip_spaces(p: &mut Parser<'_>) {
+    while p.peek() == Some(b' ') {
+        p.pos += 1;
+    }
+}
+
 fn parse_group_body(p: &mut Parser<'_>) -> Result<Vec<Path>, ParseError> {
     p.eat(b'(', "group opening `(`")?;
     let mut children = Vec::new();
+    skip_spaces(p);
     children.push(parse_path_inner(p)?);
-    // Accept both `,` (morloc source syntax, e.g. `.(.a,.b)` in a
+    skip_spaces(p);
+    // Accept both `,` (morloc source syntax, e.g. `.(.a, .b)` in a
     // `.loc` file) and `;` (the runtime walker's placeholder syntax,
     // e.g. the encoded form in `walkStepsToPath`). Same semantic;
     // users shouldn't have to remember which context they're in.
     while matches!(p.peek(), Some(b';') | Some(b',')) {
         p.pos += 1;
+        skip_spaces(p);
         children.push(parse_path_inner(p)?);
+        skip_spaces(p);
     }
     p.eat(b')', "group closing `)`")?;
     Ok(children)
@@ -549,12 +560,11 @@ fn walk_step(schema: &Schema, step: &LinearStep) -> Result<Schema, WalkError> {
                     Ok(reroot_under(schema, &schema.parameters[0]))
                 }
             }
-            SerialType::String => Ok(schema.clone()),
-            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedIndexable { got: other }),
+            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedIndexable { got: other }),
         },
         LinearStep::BracketSlice { .. } => match schema.serial_type {
-            SerialType::Array | SerialType::String => Ok(schema.clone()),
-            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedSliceable { got: other }),
+            SerialType::Array => Ok(schema.clone()),
+            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedSliceable { got: other }),
         },
     }
 }

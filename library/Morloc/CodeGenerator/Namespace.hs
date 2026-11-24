@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -25,7 +26,15 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Types used in final translations
   , TypeM (..)
-  , TypeF (.., NatVoidF, StrVoidF)
+  , TypeF (..)
+  , declaredKey
+  , typeFKey
+  , argFKey
+  , mapChildren
+  , childrenOf
+  , KArgF (..)
+  , ArgF
+  , kargType
   , TypeS (..)
   , FVar (..)
 
@@ -33,7 +42,7 @@ module Morloc.CodeGenerator.Namespace
     --
     -- The @$N@ index in a per-language form counts Type-kinded arguments
     -- only.
-  , kindOfF
+  , kindOfK
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -55,6 +64,9 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Manifold data types
   , ExecutableExpressionPool (..)
+  , SrcOrigin (..)
+  , srcOriginIndex
+  , builtSrcCall
   , RemoteForm (..)
   , PolyHead (..)
   , PolyExpr (..)
@@ -72,9 +84,11 @@ module Morloc.CodeGenerator.Namespace
   , NativeExpr (..)
   , VarRead (..)
   , LoopBody (..)
+  , loopBodyBreaks
   , trimap
   , trimapM
   , firstContinue
+  , renameSlot
   , loopBodyLeaves
   -- unrecursive types
   , FoldManifoldM (..)
@@ -154,6 +168,8 @@ module Morloc.CodeGenerator.Namespace
   , renderSrcLocForDebug
   ) where
 
+import Morloc.CodeGenerator.Nominal
+import Data.Foldable (toList)
 import Control.Monad.Identity (runIdentity)
 import qualified Data.Char as Char
 import Data.Text (Text)
@@ -163,67 +179,60 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
+import Morloc.Namespace.TypeF
 
--- The final types used in code generation. The language annotation is removed,
--- since the language for all types within a pool are the same.
---
--- The general type annotation will be used for documentation only
-data FVar = FV TVar CVar
-  deriving (Show, Ord, Eq)
-
--- The most minimal type that contains both general and concrete types
-data TypeF
-  = UnkF FVar -- this should be parameterized by `Type`, since the general type should be known
-  | VarF FVar
-  | FunF [TypeF] TypeF
-  | AppF TypeF [TypeF]
-  | NamF NamType FVar [TypeF] [(Key, TypeF)]
-  -- | Back-reference to a record whose definition appears as a NamF
-  -- somewhere on the enclosing TypeF path. Introduced by guarded
-  -- self-recursive records (e.g. @record Tree where children :: [Tree]@):
-  -- when @makeSerialAST'@ descends into the @[Tree]@ field, it would
-  -- otherwise re-expand the @Tree@ record forever. RecF cuts the cycle.
-  -- The FVar's TVar is always the morloc-side identity of the alias
-  -- being back-referenced. The FVar's CVar slot is unreliable -- it
-  -- carries whatever bnd-protected text @weave@ produced (often the
-  -- morloc TVar text itself, since pairEval leaves bnd-bound positions
-  -- untouched). Consumers that need the language-side concrete name
-  -- (e.g. C++ rendering) must look it up in cscope using the TVar,
-  -- not read the CVar directly.
-  | RecF FVar
-  -- | A `data` type whose constructors take no arguments: the type's
-  -- name, the type arguments it is applied to, and its constructor names
-  -- in declaration order. Position in that list is the wire tag, so the
-  -- order is part of the type's wire contract.
-  --
-  -- The arguments are carried for the same reason 'NamF' carries its
-  -- parameters: a user's per-language form may be a template, and the
-  -- template is instantiated with them. A type the compiler generates
-  -- has a monomorphic name per instantiation and leaves them unread.
-  | EnumF FVar [TypeF] [T.Text]
-  -- | A `data` type with at least one payload-bearing constructor: the
-  -- type's name, its type arguments, and each arm's name with its field
-  -- types. Position in the list is the wire tag.
-  | VariantF FVar [TypeF] [(T.Text, [TypeF])]
-  | OptionalF TypeF
-  | NatLitF Integer
-  | VoidF Kind -- ^ An erased placeholder of a non-Type kind
-  | StrLitF Text
-  deriving (Show, Ord, Eq)
-
-pattern NatVoidF :: TypeF
-pattern NatVoidF = VoidF KindNat
-
-pattern StrVoidF :: TypeF
-pattern StrVoidF = VoidF KindStr
-
--- | 'kindOfT' for a concrete type.
-kindOfF :: TypeF -> Maybe Kind
-kindOfF t = case t of
-  NatLitF _ -> Just KindNat
-  StrLitF _ -> Just KindStr
-  VoidF k -> Just k
+-- | The key of an expanded or tied occurrence of a declared type (NOM-1):
+-- its name and the arguments it carries, which are its native ones on both
+-- sides of a crossing: a node that converts its own fields is unpacked as
+-- its native type, and a record rebuilt field by field crosses as a tuple.
+-- An anonymous record is not a declared type, and a declared type referred
+-- to by name alone (an opaque 'VarF' or 'AppF') is not read as one.
+declaredKey :: TypeF -> Maybe NomKey
+declaredKey t = case typeFKey t of
+  KNom k -> Just k
   _ -> Nothing
+
+-- | A type as a key argument: morloc names, every expanded or tied
+-- declared type its key, an anonymous record its fields.
+typeFKey :: TypeF -> KeyType
+typeFKey t = case t of
+  UnkF (FV v _) -> KUnk v
+  VarF (FV v _) -> KVar v
+  FunF as r -> KFun (map typeFKey as) (typeFKey r)
+  AppF h as -> KApp (typeFKey h) (map argFKey as)
+  OptionalF x -> KOpt (typeFKey x)
+  NamF o (FV v _) ps rs
+    | v == anonRecordVar -> KAnon o [(k, typeFKey x) | (k, x) <- rs]
+    | otherwise -> key v ps
+  RecF (FV v _) ps -> key v ps
+  EnumF (FV v _) ps _ -> key v ps
+  VariantF (FV v _) ps _ -> key v ps
+  where
+    key v ps = KNom (NomKey v (map argFKey ps))
+
+-- | An argument as a key argument.
+argFKey :: ArgF -> KeyArg
+argFKey (TyA t) = KTy (typeFKey t)
+argFKey (KiA k) = KKind $ case k of
+  NatLitK n -> KNat n
+  StrLitK x -> KStr x
+  VoidK x -> KVoid x
+  RowK cols -> KRow [(c, typeFKey x) | (c, x) <- cols]
+
+-- | A kind argument as a type-level term; a row erases to its kind.
+kargType :: KArgF -> KTerm
+kargType k = case k of
+  NatLitK n -> NatLitT n
+  VoidK x -> VoidT x
+  StrLitK x -> StrLitT x
+  RowK _ -> VoidT KindRec
+
+kindOfK :: KArgF -> Kind
+kindOfK k = case k of
+  NatLitK _ -> KindNat
+  StrLitK _ -> KindStr
+  VoidK x -> x
+  RowK _ -> KindRec
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
     Passthrough
@@ -246,21 +255,19 @@ data TypeS
 data SerialAST
   = -- | use an (un)pack function to simplify an object
     SerialPack FVar (TypePacker, SerialAST)
-  -- The (Maybe TypeF) dim slot distinguishes three cases that all map to a
-  -- list at the wire level but to different C++/Py macro arities:
-  --   Nothing            -- no Nat slot (plain List a)
-  --   Just (NatLitF n)   -- Nat slot with known value (Vector 10 a)
-  --   Just NatVoidF      -- Nat slot, value unknown at this site (Vector n a)
-  -- Both Just forms keep the slot count aligned with the concrete macro
-  -- template's positional `$N` indices; only Nothing emits a single-arg AppF.
-  | SerialList FVar (Maybe TypeF) SerialAST
+  -- The dim slot distinguishes three cases that all map to a list at the
+  -- wire level but to different C++/Py macro arities:
+  --   Nothing             -- no Nat slot (plain List a)
+  --   Just (NatLitK n)    -- Nat slot with known value (Vector 10 a)
+  --   Just NatVoidK       -- Nat slot, value unknown at this site (Vector n a)
+  | SerialList FVar (Maybe KArgF) SerialAST
   | SerialTuple FVar [SerialAST]
   | -- | Make a record, table, or object. The parameters indicate
     --   1) NamType - record/table/object
     --   2) FVar - telling the name of the object (e.g., "Person")
-    --   3) [TypeF] - the types of the parameters (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
+    --   3) [ArgF] - the arguments (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
     --   4) [(FVar, SerialAST)] - entries with keys for concrete and general cases
-    SerialObject NamType FVar [TypeF] [(Key, SerialAST)]
+    SerialObject NamType FVar [ArgF] [(Key, SerialAST)]
   | SerialReal FVar
   | SerialFloat32 FVar
   | SerialFloat64 FVar
@@ -301,29 +308,25 @@ data SerialAST
     -- meant when several nest on the path (an @L Int@ inside an @L Str@
     -- may refer back to either); they are the arguments the ancestor was
     -- built with, and a bare name carries none.
-    SerialRec FVar [TypeF]
+    SerialRec FVar [ArgF]
   | -- | A `data` type with argument-free constructors: one byte on the
     -- wire, tagged by the constructor's position in this list. The names
     -- travel in the schema so JSON renders the constructor rather than
     -- the ordinal and the runtime can reject an out-of-range tag.
-    SerialEnum FVar [TypeF] [T.Text]
+    SerialEnum FVar [ArgF] [T.Text]
   | -- | A `data` type with payload-bearing arms. Sixteen bytes on the
     -- wire -- a tag and a pointer -- with each arm's fields serialized
     -- as the tuple the pointer leads to. The type arguments ride along
     -- as they do on 'SerialObject', so the native type this lowers to
-    -- can instantiate a user's template.
-    --
-    -- With no arms it is a back-reference to an ancestor instantiation of
-    -- the same type, as 'SerialRec' is for a record: a `data` type has at
-    -- least one constructor, so nothing else has that shape. It keeps the
-    -- arguments because a renderer that declares the type by name needs
-    -- them to spell the instantiation.
-    SerialVariant FVar [TypeF] [(T.Text, [SerialAST])]
+    -- can instantiate a user's template. The flag says the value is
+    -- marshalled by its own node, which converts the arms' fields (GEN-14).
+    SerialVariant FVar [ArgF] Bool [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
     SerialUnknown FVar
   deriving (Ord, Eq, Show)
+
 
 instance Pretty SerialAST where
   pretty (SerialPack v (packer, s)) =
@@ -331,7 +334,7 @@ instance Pretty SerialAST where
       "SerialPack"
         <+> pretty v
         <+> braces (vsep [pretty packer, pretty s])
-  pretty (SerialList _ dim ef) = parens $ "SerialList" <+> viaShow dim <+> pretty ef
+  pretty (SerialList _ dim ef) = parens $ "SerialList" <+> maybe "-" pretty dim <+> pretty ef
   pretty (SerialTuple _ efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
   pretty (SerialObject o _ vs rs) =
     parens $
@@ -362,16 +365,27 @@ instance Pretty SerialAST where
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v _) = parens ("SerialRec" <+> pretty v)
   pretty (SerialEnum v _ ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
-  pretty (SerialVariant v _ as) =
+  pretty (SerialVariant v _ _ as) =
     parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
+-- | Where a call of a sourced function comes from, with the index of the
+-- source it calls: the index a user term links it from, or, for a call the
+-- compiler builds, the index of the implementation it calls (an instance
+-- method's entry), so the source's signature can always be found.
+data SrcOrigin = Written Int | Built Int
+  deriving (Show, Ord, Eq)
+
+srcOriginIndex :: SrcOrigin -> Int
+srcOriginIndex (Written i) = i
+srcOriginIndex (Built i) = i
+
+-- | The executor of a call the compiler builds of an implementation.
+builtSrcCall :: Indexed Source -> ExecutableExpressionPool
+builtSrcCall (Idx i src) = SrcCallP (Built i) src
+
 data ExecutableExpressionPool
-  = SrcCallP (Maybe Int) Source
-  -- ^ A call of a sourced function, with the index of the source expression
-  -- it was linked from when a user term makes it; a call the compiler builds
-  -- itself has none.
-  | PatCallP Pattern -- pattern function
+  = SrcCallP SrcOrigin Source
   | LocalCallP Int -- a locally defined function
   | PapplyP Int
   -- ^ A partial application of a local function value: applying it to
@@ -383,7 +397,6 @@ data ExecutableExpressionPool
 
 instance Pretty ExecutableExpressionPool where
   pretty (SrcCallP _ src) = pretty src
-  pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
   pretty (PapplyP i) = "papply_x" <> pretty i
   pretty (RecCallP i Nothing) = "rec_m" <> pretty i
@@ -392,8 +405,8 @@ instance Pretty ExecutableExpressionPool where
 data TypePacker = TypePacker
   { typePackerPacked :: TypeF
   , typePackerUnpacked :: TypeF
-  , typePackerForward :: Source
-  , typePackerReverse :: Source
+  , typePackerForward :: Indexed Source
+  , typePackerReverse :: Indexed Source
   }
   deriving (Show, Ord, Eq)
 
@@ -580,6 +593,8 @@ data PolyExpr
   | PolyLet Int PolyExpr PolyExpr
   | PolyReturn PolyExpr
   | PolyApp PolyExpr [PolyExpr]
+  | -- | A pattern applied to its arguments, typed as a function of them.
+    PolyPat (Indexed Type) (PatApp PolyExpr)
   | PolyCacheBody Text Int [Arg None] PolyExpr
     -- ^ Memoization wrap inserted around a labeled manifold's body
     -- by the 'Express.addCacheWraps' post-pass when the enclosing
@@ -619,9 +634,9 @@ data PolyExpr
     -- code generators. Use 'partitionKindArgs' to split into type-args
     -- and kind-arg count when feeding macro substitution; the wire-side
     -- @applyDimsToList@ consumes the kind positions directly.
-    PolyList (Indexed TVar) [Indexed Type] [PolyExpr]
+    PolyList (Indexed TVar) [Indexed ArgT] [PolyExpr]
   | PolyTuple (Indexed TVar) [(Indexed Type, PolyExpr)]
-  | PolyRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, PolyExpr))]
+  | PolyRecord NamType (Indexed TVar) [Indexed ArgT] [(Key, (Indexed Type, PolyExpr))]
   | PolyLog (Indexed TVar) Bool
   | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
@@ -688,11 +703,12 @@ data MonoExpr
     -- 'DebugWrapS'.
   | -- terms that map 1:1 versus SAnno; have defined types in one language
     MonoExe (Indexed Type) ExecutableExpressionPool
+  | MonoPat (Indexed Type) (PatApp MonoExpr)
   | MonoBndVar (Three None Type (Indexed Type)) Int -- (Three Lang Type (Indexed Type)) Int  -- (Maybe (Indexed Type))
   -- data types
-  | MonoRecord NamType (Indexed TVar) [Indexed Type] [(Key, (Indexed Type, MonoExpr))]
-  -- See PolyList above for the meaning of the [Indexed Type] arg list.
-  | MonoList (Indexed TVar) [Indexed Type] [MonoExpr]
+  | MonoRecord NamType (Indexed TVar) [Indexed ArgT] [(Key, (Indexed Type, MonoExpr))]
+  -- See PolyList above for the meaning of the argument list.
+  | MonoList (Indexed TVar) [Indexed ArgT] [MonoExpr]
   | MonoTuple (Indexed TVar) [(Indexed Type, MonoExpr)]
   | MonoLog (Indexed TVar) Bool
   | MonoReal (Indexed TVar) RealLit
@@ -800,6 +816,7 @@ data VarRead = KeptRead | LastRead
 data NativeExpr
   = ManN NativeManifold
   | AppExeN TypeF ExecutableExpressionPool [NativeArg]
+  | PatN TypeF (PatApp NativeArg)
   | ReturnN NativeExpr
   | SerialLetN Int SerialExpr NativeExpr
   | NativeLetN Int NativeExpr NativeExpr
@@ -808,12 +825,12 @@ data NativeExpr
   | DeserializeN TypeF SerialAST SerialExpr
   | ExeN TypeF ExecutableExpressionPool
   | -- data types
-    -- See PolyList in PolyExpr above. The [TypeF] is the FULL applied
-    -- type args (including NatLitF for phantom Nat dims). 'typeFof'
+    -- See PolyList in PolyExpr above. The arguments are the FULL applied
+    -- arguments (including a phantom Nat dim). 'typeFof'
     -- reconstructs `AppF (VarF v) args` from these.
-    ListN FVar [TypeF] [NativeExpr]
+    ListN FVar [ArgF] [NativeExpr]
   | TupleN FVar [NativeExpr]
-  | RecordN NamType FVar [TypeF] [(Key, NativeExpr)]
+  | RecordN NamType FVar [ArgF] [(Key, NativeExpr)]
   | LogN FVar Bool
   | RealN FVar RealLit
   | IntN FVar Integer
@@ -885,10 +902,18 @@ data LoopBody ne se b
   | LoopBase b
     -- ^ a base-case leaf: assign this value as the result and break (a
     -- serial value in a 'LoopS', a native one in a 'LoopN')
-  | LoopContinue [ne]
-    -- ^ a tail back-edge leaf: the new loop-carried values (positional with the
-    -- enclosing 'LoopS' ids), reassigned before the next iteration
+  | LoopContinue [(Int, ne)]
+    -- ^ a tail back-edge leaf: each loop-carried slot with its new value,
+    -- reassigned before the next iteration
   deriving (Show)
+
+-- | Whether every path through a loop body leaves the loop at a base leaf.
+loopBodyBreaks :: LoopBody ne se b -> Bool
+loopBodyBreaks (LoopIf _ a b) = loopBodyBreaks a && loopBodyBreaks b
+loopBodyBreaks (LoopNLet _ _ b) = loopBodyBreaks b
+loopBodyBreaks (LoopSLet _ _ b) = loopBodyBreaks b
+loopBodyBreaks (LoopBase _) = True
+loopBodyBreaks (LoopContinue _) = False
 
 -- | Rewrite a 'LoopBody's native, serial and base leaves. The single source of
 -- truth for descending a 'LoopBody'; the rename/map/fold sites derive from
@@ -906,14 +931,23 @@ trimapM fne fse fb = go
     go (LoopNLet i ne b) = LoopNLet i <$> fne ne <*> go b
     go (LoopSLet i se b) = LoopSLet i <$> fse se <*> go b
     go (LoopBase x) = LoopBase <$> fb x
-    go (LoopContinue nes) = LoopContinue <$> mapM fne nes
+    go (LoopContinue nes) = LoopContinue <$> mapM (traverse fne) nes
 
 trimap :: (ne -> ne') -> (se -> se') -> (b -> b') -> LoopBody ne se b -> LoopBody ne' se' b'
 trimap fne fse fb = runIdentity . trimapM (pure . fne) (pure . fse) (pure . fb)
 
+-- | Rename a loop-carried slot in every continue of a body.
+renameSlot :: Int -> Int -> LoopBody ne se b -> LoopBody ne se b
+renameSlot i i' body = case body of
+  LoopIf ne t e -> LoopIf ne (renameSlot i i' t) (renameSlot i i' e)
+  LoopNLet j ne b -> LoopNLet j ne (renameSlot i i' b)
+  LoopSLet j se b -> LoopSLet j se (renameSlot i i' b)
+  LoopBase x -> LoopBase x
+  LoopContinue xs -> LoopContinue [(if j == i then i' else j, x) | (j, x) <- xs]
+
 -- | First 'LoopContinue' leaf on the body spine (the back-edge reachable
 -- without descending into a base).
-firstContinue :: LoopBody ne se b -> Maybe [ne]
+firstContinue :: LoopBody ne se b -> Maybe [(Int, ne)]
 firstContinue (LoopContinue nes) = Just nes
 firstContinue (LoopIf _ a b) = case firstContinue a of
   (Just x) -> Just x
@@ -929,7 +963,7 @@ loopBodyLeaves (LoopIf ne t e) = ne : loopBodyLeaves t ++ loopBodyLeaves e
 loopBodyLeaves (LoopNLet _ ne b) = ne : loopBodyLeaves b
 loopBodyLeaves (LoopSLet _ se b) = se : loopBodyLeaves b
 loopBodyLeaves (LoopBase se) = [se]
-loopBodyLeaves (LoopContinue nes) = nes
+loopBodyLeaves (LoopContinue nes) = map snd nes
 
 foldlSM :: (b -> a -> b) -> b -> SerialManifold_ a -> b
 foldlSM f b (SerialManifold_ _ _ _ _ se) = f b se
@@ -962,6 +996,7 @@ foldlSE f b (LoopS_ _ _ body) = foldl f b (loopBodyLeaves body)
 
 foldlNE :: (b -> a -> b) -> b -> NativeExpr_ a a a a a -> b
 foldlNE f b (AppExeN_ _ _ xs) = foldl f b xs
+foldlNE f b (PatN_ _ app) = foldl f b app
 foldlNE f b (ManN_ x) = f b x
 foldlNE f b (ReturnN_ x) = f b x
 foldlNE f b (SerialLetN_ _ x1 x2) = foldl f b [x1, x2]
@@ -1003,6 +1038,7 @@ mapPolySubExprs f e = case e of
   PolyLet i a b -> PolyLet i (f a) (f b)
   PolyReturn x -> PolyReturn (f x)
   PolyApp h xs -> PolyApp (f h) (map f xs)
+  PolyPat g app -> PolyPat g (fmap f app)
   PolyCacheBody lbl m as x -> PolyCacheBody lbl m as (f x)
   PolyDebugWrap m as x -> PolyDebugWrap m as (f x)
   PolyList v ts xs -> PolyList v ts (map f xs)
@@ -1024,6 +1060,7 @@ polySubExprs (PolyRemoteInterface _ _ _ _ e) = [e]
 polySubExprs (PolyLet _ a b) = [a, b]
 polySubExprs (PolyReturn e) = [e]
 polySubExprs (PolyApp h xs) = h : xs
+polySubExprs (PolyPat _ app) = toList app
 polySubExprs (PolyCacheBody _ _ _ e) = [e]
 polySubExprs (PolyDebugWrap _ _ e) = [e]
 polySubExprs (PolyList _ _ xs) = xs
@@ -1093,6 +1130,7 @@ makeMonoidFoldDefault mempty' mappend' =
 
     monoidNativeExpr' (ManN_ (req, nm)) = return (req, ManN nm)
     monoidNativeExpr' (AppExeN_ t exe (unzip -> (reqs, es))) = return (foldl mappend' mempty' reqs, AppExeN t exe es)
+    monoidNativeExpr' (PatN_ t app) = return (foldl mappend' mempty' (fmap fst app), PatN t (fmap snd app))
     monoidNativeExpr' (ReturnN_ (req, ne)) = return (req, ReturnN ne)
     monoidNativeExpr' (SerialLetN_ i (req1, se) (req2, ne)) = return (mappend' req1 req2, SerialLetN i se ne)
     monoidNativeExpr' (NativeLetN_ i (req1, ne1) (req2, ne2)) = return (mappend' req1 req2, NativeLetN i ne1 ne2)
@@ -1252,6 +1290,7 @@ data SerialExpr_ sm se ne sr nr
 
 data NativeExpr_ nm se ne sr nr
   = AppExeN_ TypeF ExecutableExpressionPool [nr]
+  | PatN_ TypeF (PatApp nr)
   | ManN_ nm
   | ReturnN_ ne
   | SerialLetN_ Int se ne
@@ -1261,9 +1300,9 @@ data NativeExpr_ nm se ne sr nr
   | DeserializeN_ TypeF SerialAST se
   | ExeN_ TypeF ExecutableExpressionPool
   | -- data types
-    ListN_ FVar [TypeF] [ne]
+    ListN_ FVar [ArgF] [ne]
   | TupleN_ FVar [ne]
-  | RecordN_ NamType FVar [TypeF] [(Key, ne)]
+  | RecordN_ NamType FVar [ArgF] [(Key, ne)]
   | LogN_ FVar Bool
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
@@ -1442,6 +1481,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(AppExeN t exe nativeArgs) = do
       nativeArgs' <- mapM (surroundFoldNativeArgM sfm fm) nativeArgs
       opFoldWithNativeExprM fm full $ AppExeN_ t exe nativeArgs'
+    f full@(PatN t app) = do
+      app' <- mapM (surroundFoldNativeArgM sfm fm) app
+      opFoldWithNativeExprM fm full $ PatN_ t app'
     f full@(ManN nativeManifold) = do
       nativeManifold' <- surroundFoldNativeManifoldM sfm fm nativeManifold
       opFoldWithNativeExprM fm full $ ManN_ nativeManifold'
@@ -1523,6 +1565,7 @@ instance HasTypeF TypeF where
 instance HasTypeF NativeExpr where
   typeFof (ManN nm) = typeFof nm
   typeFof (AppExeN t _ _) = t
+  typeFof (PatN t _) = t
   typeFof (ReturnN e) = typeFof e
   typeFof (SerialLetN _ _ e) = typeFof e
   typeFof (NativeLetN _ _ e) = typeFof e
@@ -1531,7 +1574,7 @@ instance HasTypeF NativeExpr where
   typeFof (DeserializeN t _ _) = t
   typeFof (ExeN t _) = t
   typeFof (ListN v args _) = AppF (VarF v) args
-  typeFof (TupleN v (map typeFof -> ps)) = AppF (VarF v) ps
+  typeFof (TupleN v (map typeFof -> ps)) = AppF (VarF v) (map TyA ps)
   typeFof (RecordN o n ps (map (second typeFof) -> rs)) = NamF o n ps rs
   typeFof (LogN v _) = VarF v
   typeFof (RealN v _) = VarF v
@@ -1739,6 +1782,7 @@ instance MFunctor NativeExpr where
   mgatedMap g f ne0
     | gateNativeExpr g ne0 = case ne0 of
         (AppExeN t exe nativeArgs) -> mapNativeExpr f $ AppExeN t exe (map (mgatedMap g f) nativeArgs)
+        (PatN t app) -> mapNativeExpr f $ PatN t (fmap (mgatedMap g f) app)
         (ManN nm) -> mapNativeExpr f $ ManN (mgatedMap g f nm)
         (ReturnN ne) -> mapNativeExpr f $ ReturnN (mgatedMap g f ne)
         (SerialLetN i se ne) -> mapNativeExpr f $ SerialLetN i (mgatedMap g f se) (mgatedMap g f ne)
@@ -1775,20 +1819,24 @@ instance Pretty TypeF where
   pretty (UnkF v) = "*" <> pretty v
   pretty (VarF v) = pretty v
   pretty (FunF ts t) = parens (hsep (punctuate " ->" (map pretty (ts <> [t]))))
-  pretty (AppF t ts) = parens (hsep (map pretty (t : ts)))
+  pretty (AppF t ts) = parens (hsep (pretty t : map pretty ts))
   pretty (NamF _ v _ rs) =
     pretty v
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
-  pretty (RecF v) = "^" <> pretty v
+  pretty (RecF v []) = "^" <> pretty v
+  pretty (RecF v ps) = "^" <> pretty v <> angles (hsep (map pretty ps))
   pretty (EnumF v ps ns) =
     pretty v <+> hsep (map pretty ps) <+> encloseSep "{" "}" " | " (map pretty ns)
   pretty (VariantF v ps as) =
     pretty v <+> hsep (map pretty ps)
       <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (OptionalF t) = "?" <> pretty t
-  pretty (NatLitF n) = pretty n
-  pretty (VoidF _) = "_"
-  pretty (StrLitF s) = dquotes (pretty s)
+
+instance Pretty KArgF where
+  pretty (NatLitK n) = pretty n
+  pretty (VoidK _) = "_"
+  pretty (StrLitK s) = dquotes (pretty s)
+  pretty (RowK cols) = encloseSep "{" "}" ", " [pretty k <+> "=" <+> pretty t | (k, t) <- cols]
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"
@@ -1812,6 +1860,7 @@ instance Pretty PolyExpr where
   pretty (PolyLet i e1 e2) = "PolyLet<" <> pretty i <> ">" <+> list [pretty e1, pretty e2]
   pretty (PolyReturn e) = "PolyReturn" <+> parens (pretty e)
   pretty (PolyApp e es) = "PolyApp" <+> list (map pretty (e : es))
+  pretty (PolyPat _ app) = "PolyPat" <+> pretty (patAppPattern app) <+> list (map pretty (toList app))
   pretty (PolyCacheBody lbl m _ e) =
     "PolyCacheBody<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
   pretty (PolyDebugWrap m _ e) =
@@ -1819,7 +1868,6 @@ instance Pretty PolyExpr where
   pretty (PolyBndVar _ _) = "PolyBndVar"
   pretty (PolyLetVar _ _) = "PolyLetVar"
   pretty (PolyExe _ (SrcCallP _ src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
-  pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
   pretty (PolyExe _ (PapplyP _)) = "PolyExe<papply>"
   pretty (PolyExe _ (RecCallP i _)) = "PolyExe<rec_m" <> pretty i <> ">"
@@ -1852,6 +1900,7 @@ instance Pretty MonoExpr where
   pretty (MonoLetVar t i) = parens $ "x" <> pretty i <> " :: " <> pretty t
   pretty (MonoReturn e) = "return" <> parens (pretty e)
   pretty (MonoApp e es) = parens (pretty e) <+> hsep (map (parens . pretty) es)
+  pretty (MonoPat _ app) = pretty (patAppPattern app) <+> hsep (map (parens . pretty) (toList app))
   pretty (MonoCacheBody lbl m _ e) =
     "cache<" <> pretty lbl <> ":" <> pretty m <> ">" <+> parens (pretty e)
   pretty (MonoDebugWrap m _ e) =
@@ -2092,3 +2141,27 @@ renderSrcLocForDebug :: SrcLoc -> Maybe Text
 renderSrcLocForDebug (SrcLoc mpath ln col _ _) = case mpath of
   Nothing -> Nothing
   Just p -> Just (T.pack p <> ":" <> T.pack (show ln) <> ":" <> T.pack (show col))
+
+-- | A type with each of its immediate component types mapped.
+mapChildren :: (TypeF -> TypeF) -> TypeF -> TypeF
+mapChildren go t = case t of
+  NamF o v ps rs -> NamF o v (map (fmap go) ps) [(k, go x) | (k, x) <- rs]
+  FunF as r -> FunF (map go as) (go r)
+  AppF h as -> AppF (go h) (map (fmap go) as)
+  OptionalF x -> OptionalF (go x)
+  VariantF v ps as -> VariantF v (map (fmap go) ps) [(c, map go ts) | (c, ts) <- as]
+  EnumF v ps cs -> EnumF v (map (fmap go) ps) cs
+  RecF v ps -> RecF v (map (fmap go) ps)
+  _ -> t
+
+-- | A type's immediate component types, as 'mapChildren' maps them.
+childrenOf :: TypeF -> [TypeF]
+childrenOf t = case t of
+  NamF _ _ ps rs -> tyArgs ps <> map snd rs
+  FunF as r -> as <> [r]
+  AppF h as -> h : tyArgs as
+  OptionalF x -> [x]
+  VariantF _ ps as -> tyArgs ps <> concatMap snd as
+  EnumF _ ps _ -> tyArgs ps
+  RecF _ ps -> tyArgs ps
+  _ -> []

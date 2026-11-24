@@ -1,0 +1,22 @@
+-- GEN-9: a recursive parameterized record nested in itself through an
+-- alias is generated at that argument, as when spelled directly.
+module main (viaCI, viaFoo)
+
+import root-cpp
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+type CI = Container Int
+type Foo a = Container a
+
+source Cpp from "alias.hpp" ("innerCI", "innerFoo")
+innerCI :: Container CI -> Int
+innerFoo :: Foo (Foo Int) -> Int
+
+viaCI :: Container CI -> Int
+viaCI x = innerCI x
+
+viaFoo :: Foo (Foo Int) -> Int
+viaFoo x = innerFoo x

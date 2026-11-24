@@ -1,0 +1,149 @@
+-- FMT-10: raw output writes a Str's bytes without scanning them, so every
+-- path a Str takes to stdout checks it before the nexus sees it. A Str that
+-- is not text fails where it is made, naming the language, and none of it
+-- is printed: C++ written in place and as a copy (a staged stdout, in a
+-- run with two actions), and as a byte vector standing for a Str; Python as
+-- a list in place, as a numpy array copy, as bytes and as a str holding a
+-- lone surrogate; R as a character vector, a list, a raw vector, a string
+-- marked as bytes, as a copy and crossing to Python; and Python and R
+-- renders. An R string marked latin1 arrives translated to UTF-8. With the
+-- encoders' check off a render's bytes are printed as they are, the
+-- renders of a run with two actions included, which read the output the
+-- stage saved as the program's own. A packet holding such a Str, read from
+-- stdin or from a file named as an argument, even one where a stage saves
+-- its output, fails as data read from outside, with the check off too, as
+-- does the saved input of a replay in a directory others may enter or that
+-- is a link; a regular private file where a stage saves it is the
+-- program's own.
+module main (cppBad, cppBlob, pyBad, pyBadArray, pySurrogate, rBadVec, rBadList, rBadRaw, rBytes, rLatin, rToPy, pyRendered, rRendered, stagedCpp, stagedR, stagedValue, fwd, fwdCpp, fwdArg)
+
+import root
+import root-cpp
+import root-py
+import root-r
+
+source Cpp from "strs.hpp" ("bad" as cBad, "blobs", "mk", "cid", "joinStrs")
+source Py from "strs.py" ("pybad", "pybadarray", "pysurrogate", "pyid", "pyrender")
+source R from "strs.R" ("rbadvec", "rbadlist", "rbadraw", "rbytes", "rlatin", "rrender")
+
+--' @mime text/plain
+type Note = Str
+
+--' Text held in C++ as bytes
+newtype Blob = Str
+type Cpp => Blob = "std::vector<uint8_t>"
+
+cBad :: Int -> [Note]
+blobs :: Int -> [Blob]
+mk :: Int -> [Int]
+cid :: [Note] -> [Note]
+--' Every Str of a batch, joined
+joinStrs :: [Str] -> Str
+pyrender :: [Int] -> Str
+rrender :: [Int] -> Str
+pybad :: Int -> [Note]
+pybadarray :: Int -> [Note]
+pysurrogate :: Int -> [Note]
+pyid :: [Note] -> [Note]
+rbadvec :: Int -> [Note]
+rbadlist :: Int -> [Note]
+rbadraw :: Int -> [Note]
+rbytes :: Int -> [Note]
+rlatin :: Int -> [Note]
+
+--' A C++ batch whose second Str is not UTF-8
+cppBad :: Int -> <IO> (Collect Note)
+cppBad n = @stdout (\o -> @write 0 o (cBad n))
+
+--' A C++ batch of byte vectors standing for Str, the second not UTF-8
+cppBlob :: Int -> <IO> (Collect Blob)
+cppBlob n = @stdout (\o -> @write 0 o (blobs n))
+
+--' A Python batch whose second Str holds a lone surrogate
+pySurrogate :: Int -> <IO> (Collect Note)
+pySurrogate n = @stdout (\o -> @write 0 o (pysurrogate n))
+
+--' A Python batch whose second Str is bytes that are not UTF-8
+pyBad :: Int -> <IO> (Collect Note)
+pyBad n = @stdout (\o -> @write 0 o (pybad n))
+
+--' A Python numpy batch whose second Str is bytes that are not UTF-8
+pyBadArray :: Int -> <IO> (Collect Note)
+pyBadArray n = @stdout (\o -> @write 0 o (pybadarray n))
+
+--' An R character vector whose second Str is not UTF-8
+rBadVec :: Int -> <IO> (Collect Note)
+rBadVec n = @stdout (\o -> @write 0 o (rbadvec n))
+
+--' An R list whose second Str is not UTF-8
+rBadList :: Int -> <IO> (Collect Note)
+rBadList n = @stdout (\o -> @write 0 o (rbadlist n))
+
+--' An R list whose second Str is a raw vector that is not UTF-8
+rBadRaw :: Int -> <IO> (Collect Note)
+rBadRaw n = @stdout (\o -> @write 0 o (rbadraw n))
+
+--' An R batch whose second Str is marked as bytes that are not UTF-8
+rBytes :: Int -> <IO> (Collect Note)
+rBytes n = @stdout (\o -> @write 0 o (rbytes n))
+
+--' An R batch whose second Str is marked latin1, translated to UTF-8
+rLatin :: Int -> <IO> (Collect Note)
+rLatin n = @stdout (\o -> @write 0 o (rlatin n))
+
+--' An R batch passed to Python and written there
+rToPy :: Int -> <IO> (Collect Note)
+rToPy n = @stdout (\o -> @write 0 o (pyid (rbadvec n)))
+
+--' Copy one batch of Strs from stdin to stdout
+fwd :: <IO> (Collect Note)
+fwd = @stdout (\o -> do
+  Ok s <- @stdin :: <IO> (Try Str (IStream Note))
+  Ok xs <- @next s
+  @write 0 o xs)
+
+--' Send one batch to a sink
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = sink (mk 1)
+
+--' A batch rendered by Python as bytes that are not UTF-8
+--' @render -t/--text=pyrender @stream @default
+pyRendered :: Int -> <IO> (Collect Int)
+pyRendered n = @collect produce
+
+--' A batch rendered by R as a Str that is not UTF-8
+--' @render -t/--text=rrender @stream @default
+rRendered :: Int -> <IO> (Collect Int)
+rRendered n = @collect produce
+
+--' Copy one batch of Strs from stdin to stdout through C++
+fwdCpp :: <IO> (Collect Note)
+fwdCpp = @stdout (\o -> do
+  Ok s <- @stdin :: <IO> (Try Str (IStream Note))
+  Ok xs <- @next s
+  @write 0 o (cid xs))
+
+--' A C++ batch whose second Str is not UTF-8, for actions
+--' @render -a/--all=joinStrs @stream
+--' @render -b/--both=joinStrs @stream
+--' @render -c/--cat=joinStrs
+stagedCpp :: Int -> <IO> (Collect Str)
+stagedCpp n = @stdout (\o -> @write 0 o (cBad n))
+
+--' An R batch whose second Str is not UTF-8, for actions
+--' @render -a/--all=joinStrs @stream
+--' @render -b/--both=joinStrs @stream
+stagedR :: Int -> <IO> (Collect Str)
+stagedR n = @stdout (\o -> @write 0 o (rbadvec n))
+
+--' A C++ list whose second Str is not UTF-8, for actions
+--' @render -a/--all=joinStrs
+--' @render -b/--both=joinStrs
+stagedValue :: Int -> [Note]
+stagedValue n = cBad n
+
+--' Copy one batch of Strs from a stream file to stdout
+fwdArg :: IStream Note -> <IO> (Collect Note)
+fwdArg s = @stdout (\o -> do
+  Ok xs <- @next s
+  @write 0 o xs)

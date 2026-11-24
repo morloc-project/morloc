@@ -1,0 +1,10 @@
+Strs3
+Tree
+Mixed
+Units
+Chain
+Rose
+Shape
+OptReals
+U8s
+Str

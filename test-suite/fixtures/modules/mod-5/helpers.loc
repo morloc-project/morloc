@@ -1,0 +1,9 @@
+module m (zzz)
+
+zzz :: Int
+zzz = 0
+
+module helpers (g)
+
+g :: Int
+g = 2

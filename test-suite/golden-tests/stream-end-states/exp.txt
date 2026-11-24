@@ -1,0 +1,29 @@
+[1,2,3]
+status=closed
+-o kept its file
+-o made no file
+0
+status=failed
+validate failed.pkt fails
+refused loadAll failed.pkt
+refused first failed.pkt
+refused fileLen failed.pkt
+[1,2,3]
+[1,2]
+refused fileLen nofooter.pkt
+validate nofooter.pkt fails
+nofooter.pkt: repaired: 2 sub-packets, 3 elements
+failed.pkt: repaired: 1 sub-packets, 2 elements
+ok.pkt: nothing to repair: the stream is closed
+[1,2,3]
+[1,2]
+3
+status=repaired
+6
+refused a failed stream
+refused a stream cut in its footer
+refused a stream cut in a sub-packet header
+refused a stream with no footer
+3
+refused view of a failed stream
+refused view of a stream with no footer

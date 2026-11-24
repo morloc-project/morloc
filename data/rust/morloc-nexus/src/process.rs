@@ -341,6 +341,14 @@ fn check_and_recover(n_pools: usize) {
                 generation
             );
         }
+        Err(_) if a_pool_refused_the_build() => {
+            // LIFE-6: respawning cannot succeed until the daemon restarts.
+            eprintln!(
+                "morloc daemon: recovery failed (generation {}): morloc was upgraded; restart the daemon",
+                generation
+            );
+            exit_leaving_threads(morloc_runtime_types::EXIT_BUILD_SKEW);
+        }
         Err(msg) => {
             eprintln!(
                 "morloc daemon: recovery failed (generation {}): {}",
@@ -386,8 +394,10 @@ pub fn mcp_recover_pools_after_failure(n_pools: usize) {
 const POOL_END_WAIT: Duration = Duration::from_millis(200);
 
 // LIFE-2: how often a readiness wait looks at the pool's process and at
-// shutdown, and the longest pause between connects while the socket is absent.
+// shutdown.
 const READY_CHECK: Duration = Duration::from_millis(20);
+// LIFE-2: the longest pause between connects while the socket is absent.
+const CONNECT_PAUSE: Duration = Duration::from_millis(2);
 
 // ── Global state for signal handlers ───────────────────────────────────────
 
@@ -874,12 +884,28 @@ pub fn init_shm() -> (String, String) {
     (tmpdir, shm_basename)
 }
 
-/// Apply the `-o FILE` redirect by `dup2`ing a freshly-opened file
-/// onto STDOUT_FILENO. No-op when `path` is `None`. Exits via
-/// [`clean_exit`] on any open/dup2 failure. Used by both `run` and
-/// `view` so the redirect covers every output writer uniformly
-/// (Rust, libc printf, raw fd writes).
+// SLOT-40: the temporary file `-o` writes and the file it replaces.
+static OUTPUT_FILE: std::sync::OnceLock<(String, std::path::PathBuf)> = std::sync::OnceLock::new();
+
+// SLOT-40
 pub fn redirect_stdout_to(path: Option<&str>) {
+    let Some(path) = path else { return };
+    let target = crate::phase2::resolve_target(path);
+    let open_path = match crate::orchestrate::plan_write(&target) {
+        Ok(crate::orchestrate::Write::Staged { temp, dest }) => {
+            let _ = OUTPUT_FILE.set((temp.clone(), dest));
+            temp
+        }
+        Ok(crate::orchestrate::Write::Direct { path }) => path,
+        Err(e) => {
+            eprintln!("Error: cannot open output file '{}': {}", path, e);
+            clean_exit(1);
+        }
+    };
+    redirect_stdout_in_place(Some(open_path.as_str()));
+}
+
+pub fn redirect_stdout_in_place(path: Option<&str>) {
     let Some(path) = path else { return };
     use std::os::unix::io::AsRawFd;
     match std::fs::File::create(path) {
@@ -964,12 +990,16 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     unsafe { morloc_daemon_remove_endpoints() };
 
     // A successful run completes its streamed stdout (a no-op when the
-    // result printer already did). A failed run leaves it unterminated so
-    // a reader cannot mistake a partial stream for a whole one.
+    // result printer already did); a failed one ends it FAILED (SLOT-40).
     let mut exit_code = exit_code;
     if exit_code == 0 && !BROKEN_PIPE.load(Ordering::Relaxed) {
         crate::custody_finish(false);
-        crate::stdio_server::finish_stdout();
+        if !crate::stdio_server::finish_stdout() {
+            exit_code = 1;
+            EXIT_CODE.store(exit_code, Ordering::SeqCst);
+        }
+    } else if !BROKEN_PIPE.load(Ordering::Relaxed) {
+        crate::stdio_server::fail_stdout();
     }
     // A stage completes the stream it saved even when stdout broke; the
     // run then reports the broken pipe.
@@ -992,8 +1022,30 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     // buffered bytes into a dead pipe.
     if !BROKEN_PIPE.load(Ordering::Relaxed) {
         use std::io::Write;
-        let _ = std::io::stdout().lock().flush();
-        unsafe { libc::fflush(std::ptr::null_mut()) };
+        let flushed = std::io::stdout().lock().flush().is_ok();
+        let c_flushed = unsafe { libc::fflush(std::ptr::null_mut()) } == 0;
+        if exit_code == 0 && OUTPUT_FILE.get().is_some() && !(flushed && c_flushed) {
+            eprintln!("Error: writing the output file failed");
+            exit_code = 1;
+            EXIT_CODE.store(exit_code, Ordering::SeqCst);
+        }
+    }
+    // SLOT-40: `-o` replaces its file only when the run succeeded, and only
+    // once its bytes are on disk; a failed run's temporary file is removed
+    // with the run's registrations.
+    if let Some((temp, dest)) = OUTPUT_FILE.get() {
+        if exit_code == 0 && unsafe { libc::fsync(libc::STDOUT_FILENO) } != 0 {
+            eprintln!("Error: writing the output file failed: {}", std::io::Error::last_os_error());
+            exit_code = 1;
+            EXIT_CODE.store(exit_code, Ordering::SeqCst);
+        }
+        if exit_code == 0 {
+            if let Err(e) = std::fs::rename(temp, dest) {
+                eprintln!("Error: cannot write output file '{}': {}", dest.display(), e);
+                exit_code = 1;
+                EXIT_CODE.store(exit_code, Ordering::SeqCst);
+            }
+        }
     }
 
     // Flush nexus stderr so our error messages are visible even if
@@ -1401,7 +1453,7 @@ fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String>
                 Ok(s) => break s,
                 Err(_) => {
                     std::thread::sleep(pause);
-                    pause = (pause * 2).min(READY_CHECK);
+                    pause = (pause * 2).min(CONNECT_PAUSE);
                 }
             }
         };
@@ -1509,6 +1561,25 @@ pub fn pool_is_alive(pool_index: usize) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+// LIFE-6
+fn a_pool_refused_the_build() -> bool {
+    (0..MAX_DAEMONS).any(|i| {
+        let st = EXIT_STATUSES[i].load(Ordering::Relaxed);
+        PIDS[i].load(Ordering::Relaxed) == -1
+            && libc::WIFEXITED(st)
+            && libc::WEXITSTATUS(st) == morloc_runtime_types::EXIT_BUILD_SKEW
+    })
+}
+
+// LIFE-6
+pub fn exit_after_start_failure(e: &str) -> ! {
+    if a_pool_refused_the_build() {
+        clean_exit(morloc_runtime_types::EXIT_BUILD_SKEW);
+    }
+    eprintln!("Error: {}", e);
+    clean_exit(1)
+}
+
 /// Get the exit status of a reaped pool, returning signal/exit info.
 pub fn pool_death_info(pool_index: usize) -> Option<String> {
     if PIDS[pool_index].load(Ordering::Relaxed) != -1 {
@@ -1522,6 +1593,8 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
         let code = libc::WEXITSTATUS(st);
         if code == morloc_runtime_types::EXIT_SHARED_MEMORY_LOST {
             Some(format!("Pool process lost its shared memory (status {code})"))
+        } else if code == morloc_runtime_types::EXIT_BUILD_SKEW {
+            Some(format!("Pool process refused another build of morloc (status {code})"))
         } else {
             Some(format!("Pool process exited with status {code}"))
         }
@@ -2009,8 +2082,23 @@ mod tests {
         assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1, "the group outlived its pin");
     }
 
+    const REAP_WAITS_PASSED: i32 = 42;
+
+    fn reap_waits_case() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process::tests::reap_waits_scenario", "--test-threads=1"])
+            .env("MORLOC_REAP_WAITS_SCENARIO", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(REAP_WAITS_PASSED), "{status}");
+    }
+
     #[test]
-    fn a_thread_that_reaps_waits_for_a_reap_in_progress() {
+    fn reap_waits_scenario() {
+        if std::env::var_os("MORLOC_REAP_WAITS_SCENARIO").is_none() {
+            return;
+        }
         while REAPING.swap(true, Ordering::SeqCst) {
             std::thread::yield_now();
         }
@@ -2019,6 +2107,22 @@ mod tests {
         assert!(!reaper.is_finished(), "returned before the reap in progress ended");
         REAPING.store(false, Ordering::SeqCst);
         reaper.join().unwrap();
+        std::process::exit(REAP_WAITS_PASSED);
+    }
+
+    #[test]
+    fn a_thread_that_reaps_waits_for_a_reap_in_progress() {
+        reap_waits_case();
+    }
+
+    #[test]
+    fn the_reaper_test_leaves_the_test_process_children_unreaped() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, libc::WEXITED | libc::WNOWAIT) };
+        assert_eq!(rc, 0);
+        reap_waits_case();
+        assert!(child.try_wait().is_ok(), "the reaper test reaped a child of the test process");
     }
 
     #[test]

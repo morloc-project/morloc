@@ -1,4 +1,4 @@
-module main (run, runWrite, runParts)
+module main (run, runWrite, runParts, runSingle)
 
 import root
 import root-cpp
@@ -9,11 +9,11 @@ import root-cpp
 -- allocations per batch is the number of times a batch is built or copied.
 -- The sink also captures a large list, so copying the sink shows up too.
 --
--- Four per batch: the batch is built once, then copied into the sink's
--- by-value parameter, into the suspension the sink returns, and the sink's
--- captured list is copied into that suspension. Taking a parameter used once
--- by value (and moving the caller's last use into it) would remove the two
--- batch copies; holding captures in shared storage would remove the third.
+-- Three per batch: the batch is built once, the sink, which takes it by
+-- reference (OWN-7), copies it into the suspension it returns, and the
+-- sink's captured list is copied into that suspension. Taking a kept
+-- parameter by value in a closure, or holding captures in shared storage,
+-- would remove the copies.
 --
 -- `runWrite` writes each batch to a stream file. `@write` runs as a @try
 -- thunk that `_mlc_try` calls in place, so it reads the batch where it is:
@@ -21,20 +21,26 @@ import root-cpp
 --
 -- `runParts` turns each `Try` into a `(Bool, Str, [Int])` through a match,
 -- as the parallel library's `pullParts` does. The tuple moves out of the
--- match's arms rather than being copied at each; four per batch remain: the
--- batch, the tuple built from the `Try`'s payload (which may be shared, so is
--- copied), and the projection and suspension copies the sink loop above has.
+-- match's arms rather than being copied at each, and the batch moves out of
+-- the tuple (OWN-5), and the `Try`'s payload moves out of its arm, which
+-- nothing else holds (CPP-6); two per batch remain: the batch and the
+-- suspension copy the sink loop above has.
+--
+-- `runSingle` puts each batch, at its last use, into a one-element list.
+-- Two per batch: the batch, and a copy of `extra` taken by the thunk that
+-- runs the effectful `recordBatches` call (codegen-copies.md).
 --
 -- Large allocations per batch, as the difference between runs of N1 and N2
 -- batches (fixed setup cancels). One is the batch being built; every further
 -- one is a copy.
 
-source Cpp from "count.hpp" ("makeBatch", "recordBatch", "bigAllocs", "makeExtra")
+source Cpp from "count.hpp" ("makeBatch", "recordBatch", "bigAllocs", "makeExtra", "recordBatches")
 
 makeBatch :: Int -> <IO> [Int]
 recordBatch :: [Int] -> [Int] -> <IO> ()
 makeExtra :: Int -> [Int]
 bigAllocs :: Int -> <IO> Int
+recordBatches :: [Int] -> [[Int]] -> <IO> ()
 
 drainT :: ([Int] -> <IO> ()) -> Int -> <IO> ()
 drainT sink n = do
@@ -90,4 +96,19 @@ partsDrain extra n = do
 runParts :: Int -> Int -> <IO> Int
 runParts k n = do
   partsDrain (makeExtra k) n
+  bigAllocs n
+
+singleDrain :: [Int] -> Int -> <IO> ()
+singleDrain extra n = do
+  ? n == 0 = do
+      ()
+  : do
+    xs <- makeBatch n
+    recordBatches extra [xs]
+    singleDrain extra (n - 1)
+
+--' Count allocations of batches passed in one-element lists
+runSingle :: Int -> Int -> <IO> Int
+runSingle k n = do
+  singleDrain (makeExtra k) n
   bigAllocs n

@@ -19,5 +19,5 @@ produce sink = do
 -- (untagged) output.
 --' Stream two batches of integers
 --' @with -t/--tagged=tag @stream
-streamNums :: <IO> ()
+streamNums :: <IO> (Collect Int)
 streamNums = @collect produce

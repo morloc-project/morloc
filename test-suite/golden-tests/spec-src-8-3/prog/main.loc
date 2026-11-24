@@ -9,7 +9,7 @@
 module prog (foo)
 
 import root-py
-import bumpmod (bump)
+import spec/bumpmod (bump)
 
 source Py from "own.py" ("own")
 own :: Real -> Real

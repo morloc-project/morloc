@@ -1,0 +1,97 @@
+-- An R value with no morloc form is refused, both written to a stream
+-- (the batch is absent and the stream takes later batches) and returned
+-- from a call: NA in a Str or Bool, an empty vector where one value is
+-- expected, and a record missing a field that is not optional. A record
+-- missing an optional field reads as null (the field was removed in R
+-- with `x$note <- NULL`).
+module main (strs, bools, flags, flagsBack, reals, note, oneNote, notesBack, missing)
+
+import root
+import root-r
+
+record Flag where
+  name :: Str
+  ok :: Bool
+
+record Noted where
+  name :: Str
+  ok :: Bool
+  note :: ?Str
+
+source R from "bad.R" ("na_strs" as naStrs, "na_bools" as naBools, "empty_bool" as emptyBool, "no_field" as noField, "no_note" as noNote, "empty_real" as emptyReal)
+
+naStrs :: Bool -> [Str]
+naBools :: Bool -> [Bool]
+emptyBool :: Bool -> [Flag]
+noField :: Bool -> [Flag]
+noNote :: Int -> Noted
+emptyReal :: Bool -> [Real]
+
+ok :: Try Str () -> Bool
+ok r = match r
+  | (Ok _) = True
+  | (Err _) = False
+
+--' Write good, bad, good Str batches; which succeeded
+strs :: Str -> <IO> [Bool]
+strs path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  a <- @write 0 o (naStrs False)
+  b <- @write 0 o (naStrs True)
+  c <- @write 0 o (naStrs False)
+  @close o
+  [ok a, ok b, ok c]
+
+--' Write good, bad, good Bool batches; which succeeded
+bools :: Str -> <IO> [Bool]
+bools path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Bool))
+  a <- @write 0 o (naBools False)
+  b <- @write 0 o (naBools True)
+  c <- @write 0 o (naBools False)
+  @close o
+  [ok a, ok b, ok c]
+
+--' Write Flag batches with an empty Bool and a missing field; which succeeded
+flags :: Str -> <IO> [Bool]
+flags path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Flag))
+  a <- @write 0 o (emptyBool False)
+  b <- @write 0 o (emptyBool True)
+  c <- @write 0 o (noField True)
+  d <- @write 0 o (noField False)
+  @close o
+  [ok a, ok b, ok c, ok d]
+
+--' The Flags in a written file
+flagsBack :: [Flag] -> [Flag]
+flagsBack xs = xs
+
+--' Write good, bad, good Real batches; which succeeded
+reals :: Str -> <IO> [Bool]
+reals path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  a <- @write 0 o (emptyReal False)
+  b <- @write 0 o (emptyReal True)
+  c <- @write 0 o (emptyReal False)
+  @close o
+  [ok a, ok b, ok c]
+
+--' A record whose optional field was removed
+note :: Int -> Noted
+note i = noNote i
+
+--' Write two such records to a file
+oneNote :: Str -> <IO> ()
+oneNote path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Noted))
+  @write 0 o [noNote 1, noNote 2]
+  @close o
+
+--' The records in a written file
+notesBack :: [Noted] -> [Noted]
+notesBack xs = xs
+
+--' A record missing a field, returned from a call
+missing :: Bool -> [Flag]
+missing bad = noField bad

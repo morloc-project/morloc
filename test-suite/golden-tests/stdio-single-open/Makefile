@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 # Per-case helper: run the export, check that the expected substring
 # appears in the run's stderr, print OK / FAIL on obs.txt. Failing
-# cases (twoStd*, openDev*) exit non-zero; success cases (reopen,
+# cases (twoStdin, twoStderr, openDev*) exit non-zero; success cases (reopen,
 # allThreeAtOnce) exit zero. All stderr is preserved in obs.err for
 # post-mortem.
 define check_err
@@ -29,7 +29,6 @@ all:
 	rm -f *.err obs.txt obs.err
 	morloc make -o nexus main.loc 2> build.err
 	$(call check_err,twoStdin,already open)
-	$(call check_err,twoStdout,already open)
 	$(call check_err,twoStderr,already open)
 	$(call check_ok,reopenAfterClose)
 	$(call check_ok,allThreeAtOnce)

@@ -2,10 +2,6 @@
 
 Changes here touch locks and ownership: model first.
 
-- Spec text behind the code: topology.md says only the nexus unlinks
-  (code: the fork generation that made the primary volume, shm.rs:659-670);
-  topology.md's temp-file route does not apply to tables, which always use
-  shared memory.
 - **C++ trackers on helper threads never flush.** [read] Per-thread
   trackers in the C++ pool (data/lang/cpp/pool.cpp, `thread_local`
   ShmTracker) are flushed at dispatch end or thread exit; a persistent
@@ -25,7 +21,7 @@ Changes here touch locks and ownership: model first.
   twice; each root's release is cleared after its first call, and the
   Arrow C data interface forbids calling it again.
 - Open (eval arena vs call sweep): a stream opened through a stream field
-  (intrinsics.rs `record_slot_if_active`) is also recorded in the eval
+  (intrinsics.rs:1973, eval_arena.rs `record_slot_if_active`) is also recorded in the eval
   arena, which closes it at a failed `@catch` body's rollback and at the
   arena's end; other opens rely on the call sweep alone. Should every open
   be recorded, or none?
@@ -87,11 +83,91 @@ Changes here touch locks and ownership: model first.
   for the run.** [read, 2026-10-21] Violates FORK-15. fork_policy.rs
   `prepare_fork_body` decides whether to stage a lease from
   `arrow_shm::any_views()`, a Relaxed read of VIEW_COUNT (arrow_shm.rs:
-  1379), before it takes BORROWABLE. A view registered (borrow_register,
-  :1383) in that gap leaves `staged == None` with `rels` non-empty: the
+  1506), before it takes BORROWABLE. A view registered (borrow_register,
+  :1510) in that gap leaves `staged == None` with `rels` non-empty: the
   child's references are taken, "could not record a forked child's view
   references" is printed, and they are never released. Reachable where
   user code forks a multithreaded process holding Arrow/NumPy views. Fix
   direction: stage speculatively and discard. tla/Lease.tla does not model
   the pre-check. Status stays `implemented` until fixed, since the Rust
   model check forbids a deviation that names tests.
+
+- **Some header lookups in shm.rs bypass `header_at`.** [read,
+  2026-11-09] `shincref`, `shfree_unlocked` and `incref_held` (shm.rs)
+  find a block header themselves; `shfree_unlocked` has no alignment,
+  volume or wrap check.
+- **An arena entry recorded without a generation is never released.**
+  [read, 2026-11-09] SHM-14. `record` (eval_arena.rs) stores generation 0
+  when the block's header cannot be read; claimed generations skip 0, so
+  release reports the entry as stale and leaks the arena's reference.
+- **A value holding the block magic at an interior offset forges a header.**
+  [read, 2026-11-09] SHM-13. A header is recognised by its magic word
+  (`header_at`, shm.rs); data that happens to hold that word just before
+  an interior address reads as a block there, so the check (and the
+  builder's refusal of interior addresses) can accept an address no
+  block begins at. Distinguishing a real header needs more than the magic
+  (e.g. a check that the header lies on the block chain).
+- **A late release can drop a later tracker entry for the same block.**
+  [read, 2026-11-09] SHM-4. Binding trackers (C++ `_shm_tracker_release_one`,
+  Python and R `shm_tracker_release_one`, rustmorloc `release_tracked`)
+  release by address. A packet released after its dispatch's flush already
+  gave its reference back, whose block another holder kept alive (same
+  generation), passes the SHM-13 check and removes the entry the current
+  dispatch holds for that block, so that reference is dropped early. A
+  generation tells allocations apart, not holders; a late release needs to
+  be told apart from the current entry (an entry per packet, or a dispatch
+  epoch on each entry).
+- **Generations restart in a volume made again under the same name.**
+  [read, 2026-11-09] SHM-13. A volume's first block starts at generation
+  0 whatever the volume held before (shm.rs `init_volume`), so a reference
+  packet that outlived a namespace recovery (DAEMON-1) checks against
+  low, colliding generations. Whether any packet can outlive a recovery
+  is unsettled. A seed is not a cheap fix: a merge keeps the larger
+  generation without regard to wrapping, so a seeded volume can hand a
+  recently used generation out again after a few claims.
+- **A SLURM worker's result block is never released.** [read, 2026-11-09]
+  SHM-4. The worker's return-egress rewrite (morloc-nexus main.rs:1259-1305)
+  frees the pool's reply and sends an inline copy, without releasing the
+  block the pool donated with it; only the process's exit cleans it up.
+- **Persisting a stream-bearing value by reference copies it whole.**
+  [read, 2026-11-09] Cost. To rewrite handles to paths, a reference
+  packet whose type can hold a stream field is flattened in portable form
+  into an inline packet in memory (handle_scan.rs
+  `rewrite_data_packet_for_persistence`) and copied once more by its C
+  wrapper, about three times the value at peak counting the block,
+  where a value without stream fields streams to its file. A portable
+  flatten during the streamed write would bound it.
+- **Every resolve into a large volume takes the runtime's slow path.**
+  [read, 2026-11-10] Cost. SHM-18 publishes a large volume with no size
+  so that a resolve is bounded by the block's committed bytes, which the
+  inline table cannot know; so a C, C++, Python or R pool reading a large
+  value with many nested relptrs (a big list of strings) makes one FFI
+  call per relptr. A per-process cached bound was tried and dropped: the
+  owner's removals and other processes' releases leave it stale. Bounding
+  inline by the block, safely, needs a bound that only the holder's
+  reference keeps valid.
+
+- **A release that lands after its block was claimed again is invisible.**
+  [read, 2026-11-13] SHM-19 ends the process on a release that finds its
+  block free, but a stale release that arrives after the block was claimed
+  again drops the new holder's reference and nothing notices. The
+  generation (SHM-13) and the count are separate words, so no release can
+  check both atomically; eval_arena.rs `release_entry` checks the
+  generation and then releases, and the block can change hands between.
+  Option: count and generation in one 64-bit word, decremented together
+  (a block-header change: rides the cycle's ABI bump); u16 generations
+  wrap, so it is a detector, not a guarantee.
+- **`free_rel` drops a reference that does not resolve.** [read,
+  2026-11-13] stream.rs `free_rel` ignores a `rel2abs` failure. That is
+  right for a namespace a recovery discarded (SHM-10) and wrong for a
+  corrupt reference, which should end the process as SHM-19 does; the two
+  are not told apart.
+- **A borrowed packet release still returns the packet's SHM block.**
+  [read, 2026-11-23] The borrowed form keeps a packet's malloc'd bytes for
+  a closure that captured the packet, but still gives back the shared
+  memory block it points into (data/lang/cpp/pool.cpp:266-271, rustmorloc
+  lib.rs:926-931), so the closure would read a freed block. STATE-3 gives
+  such a packet the enclosing call's lifetime: keep the bytes and the
+  tracker entry until the dispatch-end flush. Reachable only when a closure
+  manifold captures a let-bound packet in serial form (Imperative.hs
+  capturedPackets); no program reaching that was found (8 shapes tried).

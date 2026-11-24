@@ -15,7 +15,7 @@ pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
     AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
     BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER, PRIMARY_VOLUME,
-    OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
+    OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL, VOLUME_GENERAL, VOLUME_LARGE,
 };
 
 /// Cross-platform file pre-allocation, used by the file-backed fallback
@@ -371,7 +371,10 @@ fn published_volume_of(ptr: AbsPtr) -> Option<(usize, *mut u8, usize)> {
         if base.is_null() {
             continue;
         }
-        let size = entry.data_size.load(Ordering::Relaxed);
+        let size = match LARGE_SIZE[idx].load(Ordering::Acquire) {
+            0 => entry.data_size.load(Ordering::Relaxed),
+            large => large,
+        };
         if p >= base as usize && p < base as usize + size {
             return Some((idx, base, size));
         }
@@ -420,10 +423,7 @@ pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(6, VolumeTable {
 // forked child, so a fork never waits for a growth.
 static GROW: crate::fork_policy::Reset<()> = crate::fork_policy::Reset::new(|| ());
 
-/// Reference-count value marking a block whose last reference has been
-/// dropped and whose bytes are being scrubbed. It reads as in-use, so no
-/// allocator can claim the block until the scrub completes and publishes
-/// zero.
+/// SHM-6, SHM-13: the count of a block being released or claimed.
 const TEARING_DOWN: u32 = u32::MAX;
 
 pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
@@ -652,6 +652,8 @@ unsafe fn init_volume(
     label: &str,
     data_size: usize,
 ) -> Result<(), MorlocError> {
+    (*shm).kind.store(VOLUME_GENERAL, Ordering::Relaxed);
+    (*shm).committed.store(0, Ordering::Relaxed);
     let first_size = data_size
         .checked_sub(std::mem::size_of::<BlockHeader>())
         .ok_or_else(|| MorlocError::Shm(format!("a {} byte volume cannot hold a block", data_size)))?;
@@ -668,10 +670,12 @@ unsafe fn init_volume(
         if volume_index == PRIMARY_VOLUME { PRIMARY_VOLUME as u32 + 1 } else { 0 },
         Ordering::Relaxed,
     );
+    // SIDE-11
+    (*shm).next_ordinal.store(1, Ordering::Relaxed);
     let first_block = (shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader;
-    (*first_block).set_magic(BLK_MAGIC);
     (*first_block).reference_count.store(0, Ordering::Relaxed);
     (*first_block).set_size(first_size);
+    (*first_block).set_magic(BLK_MAGIC);
     (*shm).magic.store(SHM_MAGIC, Ordering::Release);
     Ok(())
 }
@@ -702,7 +706,13 @@ fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) -
     let listed = vols.used.iter().any(|&i| i as usize == volume_index);
     vols.slots[volume_index].set(shm, data_size);
     vols.mark_used(volume_index);
-    publish_vol(volume_index, shm, data_size);
+    // SHM-18: a large volume is published with no size, so every resolve
+    // into it takes the path that bounds it by its committed bytes.
+    let large = unsafe { (*shm).kind.load(Ordering::Acquire) } == VOLUME_LARGE;
+    if volume_index < MAX_VOLUME_NUMBER {
+        LARGE_SIZE[volume_index].store(if large { data_size } else { 0 }, Ordering::Release);
+    }
+    publish_vol(volume_index, shm, if large { 0 } else { data_size });
     // SHM-10
     if !listed && volume_index < MAX_VOLUME_NUMBER {
         let n = PUBLISHED_LEN.load(Ordering::Relaxed);
@@ -958,6 +968,23 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
         if slot.is_null() {
             continue;
         }
+        if is_large(slot_idx as usize) {
+            // SAFETY: SHM-18: a mapped large volume's one header lies in its first page.
+            let blk = unsafe { large_block(slot.ptr()) };
+            // SAFETY: SHM-18: the header lies in the volume's committed first page.
+            let n = unsafe { (*blk).reference_count.load(Ordering::Relaxed) };
+            if n != 0 {
+                // SAFETY: SHM-18: as above.
+                let size = unsafe { (*blk).size() };
+                blocks += 1;
+                bytes += size;
+                if !hist.is_empty() {
+                    let cls = (usize::BITS - size.leading_zeros()) as usize;
+                    hist[cls.min(hist.len() - 1)] += 1;
+                }
+            }
+            continue;
+        }
         unsafe {
             let base = (slot.ptr() as *mut u8).add(std::mem::size_of::<ShmHeader>());
             let end = base.add(slot.data_size()) as *const u8;
@@ -1111,7 +1138,7 @@ pub(crate) fn hand_on_references(n: usize) {
 // FORK-15: a reference taken by the fork handler, which holds the volume
 // table; `ptr` names a block some view holds a reference on.
 pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
-    if !ptr_in_volumes(vols, ptr) {
+    if !ptr_in_volumes(vols, ptr) || !heads_only_its_block(ptr) {
         return false;
     }
     let blk = &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader);
@@ -1120,7 +1147,7 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
     }
     loop {
         let cur = blk.reference_count.load(Ordering::Acquire);
-        if cur == 0 || cur == TEARING_DOWN {
+        if cur == 0 || cur >= TEARING_DOWN - 1 {
             return false;
         }
         if blk
@@ -1137,9 +1164,11 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
 // SHM-8: release a block no process counts. No eval arena tracks it, so
 // none is consulted.
 pub(crate) fn free_uncounted(abs: AbsPtr) {
-    take_on_reference();
     if ptr_is_in_any_volume(abs) {
-        let _ = shfree_unlocked(abs);
+        take_on_reference();
+        if shfree_unlocked(abs).is_err() {
+            hand_on_reference();
+        }
     }
 }
 
@@ -1299,6 +1328,9 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
             "Cannot incref a pointer outside every mapped volume".into(),
         ));
     }
+    if !heads_only_its_block(ptr) {
+        return Err(MorlocError::Shm("Corrupted memory - not a block in its large volume".into()));
+    }
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
@@ -1319,8 +1351,11 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
         }
         if cur == TEARING_DOWN {
             return Err(MorlocError::Shm(
-                "Cannot incref a block that is being released".into(),
+                "Cannot incref a block that is being released or claimed".into(),
             ));
+        }
+        if cur == TEARING_DOWN - 1 {
+            return Err(MorlocError::Shm("Cannot incref a block whose reference count is full".into()));
         }
         if blk
             .reference_count
@@ -1333,27 +1368,36 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     }
 }
 
-/// Current reference count of a shared memory block, or `None` when
-/// `ptr` is null or the header magic does not validate. A count of 0
-/// means the block is free and its bytes have been scrubbed.
+/// Current reference count of a shared memory block, or `None` when no
+/// block heads `ptr` (`header_at`). A count of 0 means the block is free
+/// and its bytes have been scrubbed.
 ///
 /// # Safety
 ///
-/// `ptr` must be null or a block returned by the SHM allocator.
+/// `ptr` must be null or point into a mapped volume's data.
 pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
+    header_at(ptr).map(|blk| blk.reference_count.load(Ordering::Acquire))
+}
+
+/// SHM-13: the header of the block `ptr` heads, if one does.
+///
+/// # Safety
+/// `ptr` must be null or point into a mapped volume's data.
+unsafe fn header_at<'a>(ptr: AbsPtr) -> Option<&'a BlockHeader> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: as in `shincref` -- shmalloc places a BlockHeader
-    // immediately before the returned pointer; the magic check
-    // validates that this pointer actually sits at a block start.
-    let blk = unsafe {
-        &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
-    };
-    if blk.magic() != BLK_MAGIC {
+    let header_ptr = ptr.wrapping_sub(std::mem::size_of::<BlockHeader>());
+    if (header_ptr as usize) % std::mem::align_of::<BlockHeader>() != 0 {
         return None;
     }
-    Some(blk.reference_count.load(Ordering::Acquire))
+    match published_volume_of(header_ptr) {
+        None => return None,
+        Some((idx, base, _)) if is_large(idx) && ptr as usize != base as usize + large_data_offset() => return None,
+        Some(_) => {}
+    }
+    let blk = &*(header_ptr as *const BlockHeader);
+    (blk.magic() == BLK_MAGIC).then_some(blk)
 }
 
 /// Return the allocation size of an SHM block, in O(1), reading the
@@ -1374,18 +1418,7 @@ pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
 /// later computed `pledgedSrcSize` from the same `calc_voidstar_size_inner`
 /// that this block was sized from.
 pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
-    if ptr.is_null() {
-        return None;
-    }
-    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
-    if !ptr_is_in_any_volume(header_ptr) {
-        return None;
-    }
-    let header = &*(header_ptr as *const BlockHeader);
-    if header.magic() != BLK_MAGIC {
-        return None;
-    }
-    Some(header.size())
+    header_at(ptr).map(|h| h.size())
 }
 
 /// SHM-13: the generation of the block `ptr` heads, or `None` when no block
@@ -1394,15 +1427,34 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
 /// # Safety
 /// `ptr` must be null or point into a mapped volume's data.
 pub unsafe fn block_generation(ptr: AbsPtr) -> Option<u16> {
-    if ptr.is_null() {
-        return None;
+    header_at(ptr).map(|h| h.generation())
+}
+
+/// SHM-13: what heads `ptr`, read from one header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockState {
+    NoBlock,
+    Unheld,
+    Held(u16),
+}
+
+/// SHM-13: whether a block heads `ptr`, and if a holder holds it, its
+/// generation.
+///
+/// # Safety
+/// `ptr` must be null or point into a mapped volume's data.
+pub unsafe fn block_state(ptr: AbsPtr) -> BlockState {
+    let Some(blk) = header_at(ptr) else {
+        return BlockState::NoBlock;
+    };
+    // SHM-13: count before generation.
+    let n = blk.reference_count.load(Ordering::Acquire);
+    let g = blk.generation();
+    if n == 0 || n == TEARING_DOWN {
+        BlockState::Unheld
+    } else {
+        BlockState::Held(g)
     }
-    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
-    if !ptr_is_in_any_volume(header_ptr) {
-        return None;
-    }
-    let header = &*(header_ptr as *const BlockHeader);
-    (header.magic() == BLK_MAGIC).then(|| header.generation())
 }
 
 /// Convert relative pointer to absolute pointer. O(1) under the
@@ -1442,6 +1494,9 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
     // lock-free table, as the C resolver reads it. No lock is taken.
     let entry = &MORLOC_VOL_TABLE[vol_idx];
     let data_base = entry.data_base.load(Ordering::Acquire);
+    if !data_base.is_null() && LARGE_SIZE[vol_idx].load(Ordering::Acquire) != 0 {
+        return large_region(vol_idx, data_base, offset, extent);
+    }
     if !data_base.is_null() {
         let data_size = entry.data_size.load(Ordering::Relaxed);
         if !region_fits(offset, extent, data_size) {
@@ -1461,6 +1516,11 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
         let vols = VOLUMES.lock();
         vols.slots[vol_idx]
     };
+    if !slot.is_null() && LARGE_SIZE[vol_idx].load(Ordering::Acquire) != 0 {
+        // SAFETY: SHM-10: a mapped slot's data region follows its header.
+        let base = unsafe { (slot.ptr() as *mut u8).add(std::mem::size_of::<ShmHeader>()) };
+        return large_region(vol_idx, base, offset, extent);
+    }
     if !slot.is_null() {
         if !region_fits(offset, extent, slot.data_size()) {
             return Err(MorlocError::Shm(format!(
@@ -1498,6 +1558,11 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
             "rel2abs: shopen_diag claimed success for volume {} but slot is null",
             vol_idx
         )));
+    }
+    if LARGE_SIZE[vol_idx].load(Ordering::Acquire) != 0 {
+        // SAFETY: SHM-10: a mapped slot's data region follows its header.
+        let base = unsafe { (slot.ptr() as *mut u8).add(std::mem::size_of::<ShmHeader>()) };
+        return large_region(vol_idx, base, offset, extent);
     }
     if !region_fits(offset, extent, slot.data_size()) {
         return Err(MorlocError::Shm(format!(
@@ -1605,9 +1670,15 @@ pub fn total_shm_size() -> usize {
         let vols = VOLUMES.lock();
         for &slot_idx in &vols.used {
             let slot = vols.slots[slot_idx as usize];
-            if !slot.is_null() {
-                total += slot.data_size();
+            if slot.is_null() {
+                continue;
             }
+            total += if is_large(slot_idx as usize) {
+                // SAFETY: SHM-18: a mapped volume's header stays mapped.
+                unsafe { (*slot.ptr()).committed.load(Ordering::Acquire) + page_size() }
+            } else {
+                slot.data_size()
+            };
         }
     }
     total + crate::shm_companion::total_companion_bytes()
@@ -1673,11 +1744,16 @@ fn segments_closed() -> MorlocError {
 // DAEMON-5: a segment made as teardown began is removed here; one made
 // before is recorded by then, so the teardown's sweep removes it.
 pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
+    create_segment_with(name, full_size, false)
+}
+
+// DAEMON-5, SHM-18
+fn create_segment_with(name: &str, full_size: usize, sparse: bool) -> Result<Option<Segment>, MorlocError> {
     use std::sync::atomic::Ordering;
     if SEGMENTS_CLOSED.load(Ordering::SeqCst) {
         return Err(segments_closed());
     }
-    let made = make_segment(name, full_size)?;
+    let made = make_segment(name, full_size, sparse)?;
     if let (Some(seg), true) = (&made, SEGMENTS_CLOSED.load(Ordering::SeqCst)) {
         // SAFETY: DAEMON-5: the mapping was made just now and handed to no one.
         unsafe { libc::munmap(seg.ptr as *mut libc::c_void, seg.len) };
@@ -1692,7 +1768,8 @@ pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segm
     Ok(made)
 }
 
-fn make_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
+// SHM-18: a sparse segment is made on tmpfs only, with its first page committed.
+fn make_segment(name: &str, full_size: usize, sparse: bool) -> Result<Option<Segment>, MorlocError> {
     let name_cstr = std::ffi::CString::new(name)
         .map_err(|_| MorlocError::Shm(format!("volume name '{}' contains NUL", name)))?;
     // Record the object before making it, so no object exists unrecorded. A
@@ -1729,6 +1806,9 @@ fn make_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocE
         if let (true, Some(m)) = (own_marker, &marker) {
             unsafe { libc::unlink(m.as_ptr()) };
         }
+        if sparse {
+            return Err(MorlocError::Shm(format!("no tmpfs for a large volume: shm_open: {e}")));
+        }
         return create_file_segment(name, full_size, &format!("shm_open: {e}"));
     }
     let size = libc::off_t::try_from(full_size)
@@ -1738,6 +1818,10 @@ fn make_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocE
         if libc::ftruncate(fd, size) != 0 {
             let why = format!("ftruncate: {}", std::io::Error::last_os_error());
             libc::close(fd);
+            if sparse {
+                unlink_segment(&name_cstr);
+                return Err(MorlocError::Shm(format!("no tmpfs for a large volume: {why}")));
+            }
             return create_file_segment_behind_stub(&name_cstr, name, full_size, &why);
         }
         let ptr = libc::mmap(
@@ -1756,6 +1840,19 @@ fn make_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocE
                 "Failed to mmap shared-memory volume '{}' ({} bytes): {}",
                 name, full_size, e
             )));
+        }
+        if sparse {
+            #[cfg(target_os = "linux")]
+            let first = libc::madvise(ptr, page_size().min(full_size), libc::MADV_POPULATE_WRITE);
+            #[cfg(not(target_os = "linux"))]
+            let first = -1;
+            libc::close(fd);
+            if first != 0 {
+                libc::munmap(ptr, full_size);
+                unlink_segment(&name_cstr);
+                return Err(MorlocError::Shm("tmpfs has no room for a large volume's header".into()));
+            }
+            return Ok(Some(Segment { ptr: ptr as *mut u8, len: full_size, label: name.to_string() }));
         }
         // Reserve every page now, so a tmpfs too small for the volume is
         // found here rather than by a SIGBUS on some later write.
@@ -1896,7 +1993,10 @@ pub(crate) fn set_poison_on_free(on: bool) {
 }
 
 fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
-    let blk = find_free_block(size)?;
+    let blk = match large_alloc(size)? {
+        Some(blk) => blk,
+        None => find_free_block(size)?,
+    };
     // SAFETY: blk is a claimed BlockHeader in mapped SHM; its data starts
     // immediately after the header.
     unsafe {
@@ -1914,11 +2014,14 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     }
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader
     // immediately before the data. Magic check validates correctness.
+    if !heads_only_its_block(ptr) {
+        refuse_free(ptr, "not a block in its large volume");
+    }
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
     if blk.magic() != BLK_MAGIC {
-        return Err(MorlocError::Shm("Corrupted memory".into()));
+        refuse_free(ptr, "no block header");
     }
     // Scrub before publishing, not after. A count of zero is precisely what
     // marks a block available, so a scrub that runs after the count drops
@@ -1936,13 +2039,11 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     loop {
         let cur = blk.reference_count.load(Ordering::Acquire);
         if cur == 0 {
-            return Err(MorlocError::Shm("Reference count already 0".into()));
+            refuse_free(ptr, "the block is already free");
         }
         if cur == TEARING_DOWN {
             // Another party is mid-scrub and owns the transition to zero.
-            return Err(MorlocError::Shm(
-                "Reference count already 0 (block is being released)".into(),
-            ));
+            refuse_free(ptr, "the block is being released or claimed");
         }
         let next = if cur == 1 { TEARING_DOWN } else { cur - 1 };
         if blk
@@ -1959,12 +2060,19 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
             // reads as in-use, so the block cannot be handed to anyone until
             // the store below.
             let scrub = if poison_on_free() { POISON_BYTE } else { 0 };
-            unsafe { scrub_block(ptr, scrub, blk.size()) };
+            if !unsafe { release_large(ptr, scrub, blk.size()) } {
+                unsafe { scrub_block(ptr, scrub, blk.size()) };
+            }
             crate::shm_stats::on_release(blk.size());
             blk.reference_count.store(0, Ordering::Release);
         }
         return Ok(());
     }
+}
+
+// SHM-19
+fn refuse_free(ptr: AbsPtr, reason: &str) -> ! {
+    lose_shared_memory(&format!("refused to free {ptr:p}: {reason}"))
 }
 
 // SHM-6: a fill this large leaves the cache to the next owner either way.
@@ -2013,11 +2121,19 @@ fn published_header(idx: usize) -> Option<*mut ShmHeader> {
     Some(unsafe { base.sub(std::mem::size_of::<ShmHeader>()) } as *mut ShmHeader)
 }
 
+// SIDE-11
+pub(crate) fn draw_ordinal() -> Result<u64, MorlocError> {
+    let h = published_header(PRIMARY_VOLUME)
+        .ok_or_else(|| MorlocError::Shm("no shared memory to number this process in".into()))?;
+    // SAFETY: SHM-10: a published header stays mapped.
+    Ok(unsafe { (*h).next_ordinal.fetch_add(1, Ordering::Relaxed) })
+}
+
 // SHM-11: try the published volumes, the hinted one first, holding no
 // process lock while each volume's own lock is awaited.
 fn find_in_published(size: usize) -> Result<Option<*mut BlockHeader>, MorlocError> {
     let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
-    if let Some(shm) = published_header(cv) {
+    if let Some(shm) = published_header(cv).filter(|_| !is_large(cv)) {
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
             return Ok(Some(blk));
         }
@@ -2025,7 +2141,7 @@ fn find_in_published(size: usize) -> Result<Option<*mut BlockHeader>, MorlocErro
     let n = PUBLISHED_LEN.load(Ordering::Acquire);
     for slot in &PUBLISHED[..n] {
         let i = slot.load(Ordering::Relaxed) as usize;
-        if i == cv {
+        if i == cv || is_large(i) {
             continue;
         }
         let Some(shm) = published_header(i) else { continue };
@@ -2035,6 +2151,362 @@ fn find_in_published(size: usize) -> Result<Option<*mut BlockHeader>, MorlocErro
         }
     }
     Ok(None)
+}
+
+// SHM-18
+pub(crate) const LARGE_BOUND: usize = 16 << 20;
+// SHM-18
+const LARGE_KEEP_BUDGET: usize = 256 << 20;
+
+// SHM-18: the data size of each large volume this process maps, 0 for others.
+static LARGE_SIZE: [std::sync::atomic::AtomicUsize; MAX_VOLUME_NUMBER] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; MAX_VOLUME_NUMBER];
+
+// SHM-18: a test that needs the general path takes it.
+#[cfg(test)]
+pub(crate) static LARGE_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// SHM-18: a test of the remove path sets the budget to nothing.
+#[cfg(test)]
+pub(crate) static LARGE_NO_KEEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn is_large(idx: usize) -> bool {
+    idx < MAX_VOLUME_NUMBER && LARGE_SIZE[idx].load(Ordering::Acquire) != 0
+}
+
+// SHM-18: where a large volume's block data starts in its data region: one
+// page from the volume's start, after a header that ends the first page.
+fn large_data_offset() -> usize {
+    page_size() - std::mem::size_of::<ShmHeader>()
+}
+
+// SHM-18: whether a request may take a large volume here.
+fn large_capable() -> bool {
+    #[cfg(test)]
+    if LARGE_OFF.load(Ordering::Relaxed) {
+        return false;
+    }
+    static CAPABLE: morloc_runtime_types::publish_once::PublishOnce<bool> =
+        morloc_runtime_types::publish_once::PublishOnce::new();
+    *CAPABLE.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            if std::mem::size_of::<ShmHeader>() + std::mem::size_of::<BlockHeader>() > page_size() {
+                return false;
+            }
+            // SAFETY: SHM-18: a private anonymous page, mapped and unmapped here.
+            unsafe {
+                let p = libc::mmap(
+                    std::ptr::null_mut(),
+                    page_size(),
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                );
+                if p == libc::MAP_FAILED {
+                    return false;
+                }
+                let ok = libc::madvise(p, page_size(), libc::MADV_POPULATE_WRITE) == 0;
+                libc::munmap(p, page_size());
+                ok
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    })
+}
+
+// SHM-18: the block of the large volume whose header is `shm`.
+unsafe fn large_block(shm: *mut ShmHeader) -> *mut BlockHeader {
+    (shm as *mut u8)
+        .add(std::mem::size_of::<ShmHeader>() + large_data_offset() - std::mem::size_of::<BlockHeader>())
+        as *mut BlockHeader
+}
+
+// SHM-13, SHM-18: in a large volume only its block's own data address heads a block.
+fn heads_only_its_block(ptr: AbsPtr) -> bool {
+    match published_volume_of(ptr) {
+        Some((idx, base, _)) if is_large(idx) => ptr as usize == base as usize + large_data_offset(),
+        _ => true,
+    }
+}
+
+// SHM-18: a region of a large volume is readable only within its block's
+// committed bytes.
+fn large_region(idx: usize, base: *mut u8, offset: usize, extent: usize) -> Result<AbsPtr, MorlocError> {
+    let start = large_data_offset();
+    // SAFETY: SHM-10: a mapped volume's header precedes its data region.
+    let committed = unsafe { (*(base.sub(std::mem::size_of::<ShmHeader>()) as *const ShmHeader)).committed.load(Ordering::Acquire) };
+    if offset < start || !region_fits(offset - start, extent, committed) {
+        return Err(MorlocError::Shm(format!(
+            "rel2abs offset {} is outside the {} committed bytes of large volume {}",
+            offset, committed, idx
+        )));
+    }
+    // SAFETY: SHM-18: the region lies in the block's committed data.
+    Ok(unsafe { base.add(offset) })
+}
+
+// SHM-6, SHM-18: give the pages of `len` bytes at `data` back; false when
+// the file system refused, and they still hold their bytes.
+unsafe fn remove_pages(data: *mut u8, len: usize) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        libc::madvise(data as *mut libc::c_void, len, libc::MADV_REMOVE) == 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (data, len);
+        false
+    }
+}
+
+// SHM-18: the block of a large volume for `size` bytes, or `None` when the
+// general path must serve the request.
+fn large_alloc(size: usize) -> Result<Option<*mut BlockHeader>, MorlocError> {
+    if size < LARGE_BOUND || !large_capable() {
+        return Ok(None);
+    }
+    for attempt in 0..2 {
+        let reserved = match reserve_large(size) {
+            Some(r) => Some(r),
+            None => grow_large(size)?,
+        };
+        let Some((shm, blk)) = reserved else { return Ok(None) };
+        // SAFETY: SHM-18: the block is reserved for this call.
+        if unsafe { commit_large(shm, blk, size) } {
+            // SAFETY: SHM-13: tla:ShmClaim; the reserved block is published.
+            unsafe {
+                (*blk).set_size(size);
+                (*blk).bump_generation();
+                (*blk).reference_count.store(1, Ordering::Release);
+            }
+            crate::shm_stats::on_claim(size);
+            return Ok(Some(blk));
+        }
+        if attempt == 0 {
+            remove_free_large();
+        }
+    }
+    Ok(None)
+}
+
+// SHM-18: reserve a free large volume's block that can hold `size` bytes,
+// one already committed for it first.
+fn reserve_large(size: usize) -> Option<(*mut ShmHeader, *mut BlockHeader)> {
+    let n = PUBLISHED_LEN.load(Ordering::Acquire);
+    for committed_first in [true, false] {
+        for slot in &PUBLISHED[..n] {
+            let i = slot.load(Ordering::Relaxed) as usize;
+            let cap = LARGE_SIZE[i].load(Ordering::Acquire);
+            if cap == 0 || cap - large_data_offset() < size {
+                continue;
+            }
+            let Some(shm) = published_header(i) else { continue };
+            // SAFETY: SHM-10: a published volume stays mapped.
+            unsafe {
+                if committed_first && (*shm).committed.load(Ordering::Acquire) < size {
+                    continue;
+                }
+                let blk = large_block(shm);
+                if (*blk)
+                    .reference_count
+                    .compare_exchange(0, TEARING_DOWN, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return Some((shm, blk));
+                }
+            }
+        }
+    }
+    None
+}
+
+// SHM-11, SHM-12, SHM-18: make a large volume for `size` bytes and reserve
+// its block, or `None` when tmpfs cannot hold one.
+fn grow_large(size: usize) -> Result<Option<(*mut ShmHeader, *mut BlockHeader)>, MorlocError> {
+    let _grow = GROW.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(r) = reserve_large(size) {
+        return Ok(Some(r));
+    }
+    let basename = get_common_basename();
+    let Some(primary) = published_header(PRIMARY_VOLUME).filter(|_| !basename.is_empty()) else {
+        return Ok(None);
+    };
+    map_numbered(&basename, primary);
+    if let Some(r) = reserve_large(size) {
+        return Ok(Some(r));
+    }
+    // SAFETY: SHM-10: the primary volume stays mapped.
+    let header = unsafe { &*primary };
+    let Ok(_ns) = header.grow_lock.lock() else { return Ok(None) };
+    map_numbered(&basename, primary);
+    if let Some(r) = reserve_large(size) {
+        return Ok(Some(r));
+    }
+    let page = page_size();
+    let Some(data_size) = size
+        .checked_add(page)
+        .and_then(|n| n.checked_add(large_data_offset()))
+        .and_then(usize::checked_next_power_of_two)
+        .filter(|n| n.checked_add(std::mem::size_of::<ShmHeader>()).is_some_and(|f| f <= isize::MAX as usize))
+    else {
+        return Ok(None);
+    };
+    loop {
+        let idx = header.next_index.load(Ordering::Acquire) as usize;
+        if idx >= MAX_VOLUME_NUMBER {
+            return Ok(None);
+        }
+        let name = volume_name(&basename, idx);
+        let full_size = data_size + std::mem::size_of::<ShmHeader>();
+        let shm = match create_segment_with(&name, full_size, true) {
+            Ok(Some(seg)) => {
+                let shm = seg.ptr as *mut ShmHeader;
+                // SAFETY: SHM-18: a fresh mapping no process can have used.
+                if unsafe { init_large_volume(shm, idx, &seg.label, data_size) }.is_err() {
+                    // SAFETY: SHM-18: mapped just above and handed to no one.
+                    unsafe { libc::munmap(seg.ptr as *mut libc::c_void, seg.len) };
+                    if let Ok(c) = std::ffi::CString::new(name.as_str()) {
+                        unlink_segment(&c);
+                    }
+                    return Ok(None);
+                }
+                Some(register_volume(idx, shm, data_size))
+            }
+            Ok(None) => open_and_register(&name, idx).ok().and_then(|r| r.ok()),
+            Err(_) => return Ok(None),
+        };
+        header.next_index.store(idx as u32 + 1, Ordering::Release);
+        if let Some(shm) = shm.filter(|_| is_large(idx)) {
+            // SAFETY: SHM-10: the volume was mapped just above.
+            let blk = unsafe { large_block(shm) };
+            // SAFETY: SHM-13, SHM-18: the reservation of a mapped volume's block.
+            let free = unsafe { (*blk).reference_count.compare_exchange(0, TEARING_DOWN, Ordering::AcqRel, Ordering::Relaxed) };
+            if free.is_ok() && LARGE_SIZE[idx].load(Ordering::Acquire) - large_data_offset() >= size {
+                return Ok(Some((shm, blk)));
+            }
+            if free.is_ok() {
+                // SAFETY: SHM-18: a block too small for the request is freed again.
+                unsafe { (*blk).reference_count.store(0, Ordering::Release) };
+            }
+        }
+    }
+}
+
+// SHM-13, SHM-18
+unsafe fn init_large_volume(shm: *mut ShmHeader, volume_index: usize, label: &str, data_size: usize) -> Result<(), MorlocError> {
+    let mut name_buf = [0u8; MAX_FILENAME_SIZE];
+    set_cstr(&mut name_buf, label);
+    (*shm).volume_name = name_buf;
+    (*shm).volume_index = volume_index as i32;
+    (*shm).poison = poison_on_free() as usize;
+    (*shm).volume_size = data_size;
+    ShmLock::init(std::ptr::addr_of_mut!((*shm).lock))?;
+    (*shm).cursor = VOLNULL;
+    (*shm).next_index.store(0, Ordering::Relaxed);
+    (*shm).kind.store(VOLUME_LARGE, Ordering::Relaxed);
+    (*shm).next_ordinal.store(0, Ordering::Relaxed);
+    (*shm).committed.store(0, Ordering::Relaxed);
+    let blk = large_block(shm);
+    (*blk).reference_count.store(0, Ordering::Relaxed);
+    (*blk).set_size(data_size - large_data_offset());
+    (*blk).set_magic(BLK_MAGIC);
+    (*shm).magic.store(SHM_MAGIC, Ordering::Release);
+    Ok(())
+}
+
+// SHM-18: commit the reserved block's first `size` bytes; on failure give
+// back every page of its data and free the block.
+unsafe fn commit_large(shm: *mut ShmHeader, blk: *mut BlockHeader, size: usize) -> bool {
+    let data = (blk as *mut u8).add(std::mem::size_of::<BlockHeader>());
+    let cap = (*shm).volume_size - large_data_offset();
+    let need = align_up(size, page_size()).min(cap);
+    let have = (*shm).committed.load(Ordering::Acquire);
+    if have > need && have - need >= LARGE_BOUND {
+        if remove_pages(data.add(need), have - need) {
+            (*shm).committed.store(need, Ordering::Release);
+        }
+    } else if have < need {
+        #[cfg(target_os = "linux")]
+        let failed = parallel_madvise_populate_write(data.add(have), need - have) != 0;
+        #[cfg(not(target_os = "linux"))]
+        let failed = true;
+        if failed {
+            if remove_pages(data, cap) {
+                (*shm).committed.store(0, Ordering::Release);
+            }
+            (*blk).reference_count.store(0, Ordering::Release);
+            return false;
+        }
+        (*shm).committed.store(need, Ordering::Release);
+    }
+    true
+}
+
+// SHM-18: give back the pages of every free large volume.
+fn remove_free_large() {
+    let n = PUBLISHED_LEN.load(Ordering::Acquire);
+    for slot in &PUBLISHED[..n] {
+        let i = slot.load(Ordering::Relaxed) as usize;
+        if !is_large(i) {
+            continue;
+        }
+        let Some(shm) = published_header(i) else { continue };
+        // SAFETY: SHM-10, SHM-18: a free block reserved here is emptied and freed again.
+        unsafe {
+            let blk = large_block(shm);
+            if (*blk).reference_count.compare_exchange(0, TEARING_DOWN, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                let data = (blk as *mut u8).add(std::mem::size_of::<BlockHeader>());
+                if remove_pages(data, (*shm).volume_size - large_data_offset()) {
+                    (*shm).committed.store(0, Ordering::Release);
+                }
+                (*blk).reference_count.store(0, Ordering::Release);
+            }
+        }
+    }
+}
+
+// SHM-6, SHM-18: empty a released large block, keeping it committed while
+// the committed bytes of free large volumes stay within the budget; false
+// when `ptr` is not a large block.
+unsafe fn release_large(ptr: AbsPtr, scrub: u8, size: usize) -> bool {
+    if size < LARGE_BOUND {
+        return false;
+    }
+    let Some((idx, base, _)) = published_volume_of(ptr) else { return false };
+    if !is_large(idx) || ptr as usize != base as usize + large_data_offset() {
+        return false;
+    }
+    let shm = base.sub(std::mem::size_of::<ShmHeader>()) as *mut ShmHeader;
+    let mine = (*shm).committed.load(Ordering::Acquire);
+    let kept: usize = {
+        let n = PUBLISHED_LEN.load(Ordering::Acquire);
+        PUBLISHED[..n]
+            .iter()
+            .map(|s| s.load(Ordering::Relaxed) as usize)
+            .filter(|&i| i != idx && is_large(i))
+            .filter_map(published_header)
+            .filter(|&h| (*large_block(h)).reference_count.load(Ordering::Acquire) == 0)
+            .map(|h| (*h).committed.load(Ordering::Acquire))
+            .sum()
+    };
+    #[cfg(test)]
+    let budget = if LARGE_NO_KEEP.load(Ordering::Relaxed) { 0 } else { LARGE_KEEP_BUDGET };
+    #[cfg(not(test))]
+    let budget = LARGE_KEEP_BUDGET;
+    if scrub != 0 || kept + mine > budget && remove_pages(ptr, (*shm).volume_size - large_data_offset()) {
+        if scrub != 0 {
+            scrub_block(ptr, scrub, size);
+        } else {
+            (*shm).committed.store(0, Ordering::Release);
+        }
+    } else {
+        scrub_block(ptr, 0, size);
+    }
+    true
 }
 
 fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
@@ -2069,18 +2541,20 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     if let Some(blk) = find_in_published(size)? {
         return Ok(blk);
     }
-    let largest = {
+    let (largest, total) = {
         let n = PUBLISHED_LEN.load(Ordering::Acquire);
-        PUBLISHED[..n]
+        let sizes = PUBLISHED[..n]
             .iter()
-            .map(|i| MORLOC_VOL_TABLE[i.load(Ordering::Relaxed) as usize].data_size.load(Ordering::Relaxed))
-            .max()
-            .unwrap_or(0xffff)
+            .map(|i| i.load(Ordering::Relaxed) as usize)
+            .filter(|&i| !is_large(i))
+            .map(|i| MORLOC_VOL_TABLE[i].data_size.load(Ordering::Relaxed));
+        sizes.fold((0usize, 0usize), |(m, t), z| (m.max(z), t.saturating_add(z)))
     };
-    let new_size = std::cmp::max(
-        size.saturating_add(std::mem::size_of::<BlockHeader>()),
-        largest.saturating_mul(2),
-    );
+    let largest = if largest == 0 { 0xffff } else { largest };
+    let new_size = new_volume_size(size, largest, total);
+    // SHM-17, SHM-18: pages free large volumes keep are given back before
+    // tmpfs is asked for a new volume.
+    remove_free_large();
     loop {
         let idx = header.next_index.load(Ordering::Acquire) as usize;
         if idx >= MAX_VOLUME_NUMBER {
@@ -2115,6 +2589,15 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     }
 }
 
+// SHM-12
+const GROWTH_STEP: usize = 64 << 20;
+
+// SHM-12
+fn new_volume_size(request: usize, largest: usize, total: usize) -> usize {
+    let step = std::cmp::min(largest.saturating_mul(2), request.max(GROWTH_STEP).max(total / 4));
+    std::cmp::max(request.saturating_add(std::mem::size_of::<BlockHeader>()), step)
+}
+
 // SHM-12: map every initialised volume numbered below the primary's count.
 fn map_numbered(basename: &str, primary: *mut ShmHeader) {
     // SAFETY: SHM-10: the primary volume stays mapped.
@@ -2145,19 +2628,36 @@ fn map_numbered(basename: &str, primary: *mut ShmHeader) {
 /// # Safety
 /// `blk` must be a valid BlockHeader in the volume `_held` locks.
 #[inline]
-unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut BlockHeader, MorlocError> {
-    // SHM-13: published by the CAS below; 0 is left to packets to mean unchecked.
-    (*blk).bump_generation();
+// SHM-2, SHM-13: tla:ShmClaim; on a failed split the block is free again.
+unsafe fn claim(
+    held: &ShmGuard<'_>,
+    shm: *mut ShmHeader,
+    blk: *mut BlockHeader,
+    size: usize,
+) -> Result<*mut BlockHeader, MorlocError> {
+    reserve(held, blk)?;
+    if let Err(e) = split_block(held, shm, blk, size) {
+        (*blk).reference_count.store(0, Ordering::Release);
+        return Err(e);
+    }
+    Ok(publish_claim(held, blk))
+}
+
+// SHM-2, SHM-13: tla:ShmClaim; a block in use is left as it is.
+unsafe fn reserve(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<(), MorlocError> {
     (*blk)
         .reference_count
-        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-        .map(|_| {
-            crate::shm_stats::on_claim((*blk).size());
-            blk
-        })
-        .map_err(|n| {
-            MorlocError::Shm(format!("the allocator chose a block already in use (count {n})"))
-        })
+        .compare_exchange(0, TEARING_DOWN, Ordering::AcqRel, Ordering::Relaxed)
+        .map(|_| ())
+        .map_err(|n| MorlocError::Shm(format!("the allocator chose a block already in use (count {n})")))
+}
+
+// SHM-13: tla:ShmClaim; never 0, which no packet may record.
+unsafe fn publish_claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> *mut BlockHeader {
+    (*blk).bump_generation();
+    (*blk).reference_count.store(1, Ordering::Release);
+    crate::shm_stats::on_claim((*blk).size());
+    blk
 }
 
 /// Find a free block of at least `size` bytes, split off the remainder, and
@@ -2210,10 +2710,14 @@ fn find_free_block_in_volume(
         };
 
         let claimed = match found {
-            Some(blk) => {
-                split_block(&held, shm, blk, size)?;
-                Some(claim(&held, blk)?)
-            }
+            Some(blk) => match claim(&held, shm, blk, size) {
+                Ok(b) => Some(b),
+                Err(e) if (*blk).reference_count.load(Ordering::Acquire) == 0 => {
+                    held.release();
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            },
             None => None,
         };
         held.release();
@@ -2273,7 +2777,8 @@ unsafe fn scan_volume(
 /// when it is large enough to carry a header.
 ///
 /// # Safety
-/// `blk` must be a free BlockHeader in `shm`, the volume `_held` locks.
+/// `blk` must be a BlockHeader in `shm` reserved for a claim (SHM-13), in
+/// the volume `_held` locks.
 unsafe fn split_block(
     _held: &ShmGuard<'_>,
     shm: *mut ShmHeader,
@@ -2299,11 +2804,11 @@ unsafe fn split_block(
     let new_free = (blk as *mut u8).add(hdr_size + size) as *mut BlockHeader;
 
     if remaining > hdr_size {
-        (*new_free).set_magic(BLK_MAGIC);
         (*new_free).reference_count.store(0, Ordering::Relaxed);
         (*new_free).set_size(remaining - hdr_size);
         // SHM-13
         (*new_free).set_generation((*blk).generation());
+        (*new_free).set_magic(BLK_MAGIC);
 
         // Update cursor
         let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
@@ -2379,6 +2884,7 @@ mod poison_tests {
     #[test]
     fn a_large_released_block_is_scrubbed_throughout() {
         let _shm = crate::own_test_registry();
+        let _general = crate::shm::tests::GeneralOnly::new();
         for poison in [true, false] {
             set_poison_on_free(poison);
             let want = if poison { POISON_BYTE } else { 0 };
@@ -2427,6 +2933,7 @@ pub(crate) mod tests {
     #[test]
     fn a_process_out_of_room_uses_a_volume_another_made() {
         let _shm = crate::own_test_registry();
+        let _general = GeneralOnly::new();
         const BIG: usize = 48 << 20;
         let primary = super::published_header(super::PRIMARY_VOLUME).unwrap();
         let count = || unsafe { (*primary).next_index.load(std::sync::atomic::Ordering::Acquire) };
@@ -2440,6 +2947,37 @@ pub(crate) mod tests {
         super::shfree(p).unwrap();
         assert!(after_child > super::PRIMARY_VOLUME as u32 + 1, "the child made no volume");
         assert_eq!(after_parent, after_child, "the parent made a volume of its own");
+    }
+
+    // SHM-12
+    #[test]
+    fn a_new_volume_is_sized_to_the_request_beyond_the_growth_step() {
+        const MIB: usize = 1 << 20;
+        let hdr = std::mem::size_of::<super::BlockHeader>();
+        let size = super::new_volume_size;
+        assert!(size(237 * MIB, 32 * MIB, 64 * MIB) >= 237 * MIB + hdr);
+        assert!(size(237 * MIB, 0xffff, 0xffff) >= 237 * MIB + hdr);
+        assert_eq!(size(16 * MIB, 255 * MIB, 495 * MIB), 495 * MIB / 4);
+        assert_eq!(size(16 * MIB, 120 * MIB, 200 * MIB), super::GROWTH_STEP);
+        assert_eq!(size(1, 237 * MIB, 237 * MIB), super::GROWTH_STEP);
+        assert_eq!(size(1024, 0xffff, 0xffff), 2 * 0xffff);
+        assert_eq!(size(1024, 20 * MIB, 30 * MIB), 40 * MIB);
+        assert_eq!(size(100 * MIB, 255 * MIB, 300 * MIB), 100 * MIB + hdr);
+        assert_eq!(size(16 * MIB, 1024 * MIB, 8192 * MIB), 2048 * MIB);
+    }
+
+    // SHM-12
+    #[test]
+    fn volumes_grow_in_number_slower_than_the_memory_they_hold() {
+        const MIB: usize = 1 << 20;
+        let (mut largest, mut total, mut count) = (0xffff, 0xffff, 1);
+        while total < 10 * 1024 * MIB {
+            let v = super::new_volume_size(16 * MIB, largest, total);
+            largest = largest.max(v);
+            total += v;
+            count += 1;
+        }
+        assert!(count < 30, "{count} volumes to hold 10 GiB");
     }
 
     // SHM-10: mapping a volume this process already maps keeps the first
@@ -2839,6 +3377,7 @@ pub(crate) mod tests {
     // not its name starts with '/'.
     #[test]
     fn a_file_backed_segment_lands_in_the_fallback_directory() {
+        let _arena = crate::own_test_shm();
         let fallback = crate::ScopedFallback::new("fbjoin");
         let dir = fallback.path().to_path_buf();
         let name = format!("morloc-{}-fbjoin-0001", std::process::id());
@@ -2876,11 +3415,31 @@ pub(crate) mod tests {
 
     /// A program of one small volume, so that a freed block is soon the
     /// only room left. The caller holds the exclusive test arena.
-    pub(crate) fn small_volume(tag: &str) -> crate::ScopedFallback {
+    pub(crate) fn small_volume(tag: &str) -> SmallVolume {
         let _ = shclose();
         let fallback = crate::ScopedFallback::new(tag);
         shinit(&format!("/morloc-{}-test-{tag}", std::process::id()), 4096).unwrap();
-        fallback
+        SmallVolume { _fallback: fallback }
+    }
+
+    pub(crate) struct SmallVolume {
+        _fallback: crate::ScopedFallback,
+    }
+
+    impl Drop for SmallVolume {
+        fn drop(&mut self) {
+            let _ = shclose();
+        }
+    }
+
+    #[test]
+    fn a_small_volume_is_closed_when_its_scope_ends() {
+        let _arena = crate::own_test_shm();
+        {
+            let _fallback = small_volume("scope");
+        }
+        let left = get_common_basename();
+        assert!(left.is_empty(), "the next test would allocate in {left}");
     }
 
     /// Allocate until `addr` is handed back; the other blocks taken on the way.
@@ -2913,6 +3472,188 @@ pub(crate) mod tests {
         assert_ne!(first, 0);
         assert_ne!(second, 0);
         assert_ne!(first, second, "the same generation names two allocations");
+    }
+
+    // SHM-2, SHM-13: a claim that finds its block in use leaves the holder's
+    // count and generation as they were.
+    #[test]
+    fn a_claim_that_finds_its_block_in_use_changes_nothing() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("claim");
+        let p = shmalloc(64).unwrap();
+        let g = unsafe { block_generation(p) }.unwrap();
+        let (_, base, _) = published_volume_of(p).unwrap();
+        let refused = unsafe {
+            let shm = base.sub(std::mem::size_of::<ShmHeader>()) as *mut ShmHeader;
+            let blk = p.sub(std::mem::size_of::<BlockHeader>()) as *mut BlockHeader;
+            let guard = (*shm).lock.lock_live().unwrap().unwrap();
+            let r = claim(&guard, shm, blk, 16).is_err();
+            guard.release();
+            r
+        };
+        let after = unsafe { block_generation(p) };
+        let count = unsafe { reference_count(p) };
+        shfree(p).unwrap();
+        shclose().unwrap();
+        assert!(refused, "a block in use was claimed");
+        assert_eq!(after, Some(g), "a failed claim changed the holder's generation");
+        assert_eq!(count, Some(1), "a failed claim changed the holder's count");
+    }
+
+    // SHM-13
+    #[test]
+    fn a_block_reads_as_held_only_while_a_holder_holds_it() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("state");
+        let p = shmalloc(64).unwrap();
+        let g = unsafe { block_generation(p) }.unwrap();
+        let held = unsafe { block_state(p) };
+        let interior = unsafe { block_state(p.add(16)) };
+        let misaligned = unsafe { block_state(p.add(8)) };
+        let blk = unsafe { &*(p.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
+        blk.reference_count.store(TEARING_DOWN, Ordering::Release);
+        let tearing = unsafe { block_state(p) };
+        blk.reference_count.store(1, Ordering::Release);
+        shfree(p).unwrap();
+        let free = unsafe { block_state(p) };
+        shclose().unwrap();
+        assert_eq!(held, BlockState::Held(g));
+        assert_eq!(interior, BlockState::NoBlock);
+        assert_eq!(misaligned, BlockState::NoBlock);
+        assert_eq!(tearing, BlockState::Unheld);
+        assert_eq!(free, BlockState::Unheld);
+    }
+
+    // SHM-18: the general path for every request while it lives.
+    pub(crate) struct GeneralOnly;
+    impl GeneralOnly {
+        pub(crate) fn new() -> Self {
+            LARGE_OFF.store(true, Ordering::Relaxed);
+            GeneralOnly
+        }
+    }
+    impl Drop for GeneralOnly {
+        fn drop(&mut self) {
+            LARGE_OFF.store(false, Ordering::Relaxed);
+        }
+    }
+
+    // SHM-18: a large request takes a one-block volume of its own, which no
+    // small request shares, published with no size and reused once free.
+    #[test]
+    fn a_large_request_takes_a_volume_of_its_own() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("large1");
+        if !large_capable() {
+            return;
+        }
+        let p = shmalloc(LARGE_BOUND).unwrap();
+        let (idx, base, _) = published_volume_of(p).unwrap();
+        let q = shmalloc(64).unwrap();
+        let (qidx, _, _) = published_volume_of(q).unwrap();
+        let table_size = MORLOC_VOL_TABLE[idx].data_size.load(Ordering::Relaxed);
+        shfree(p).unwrap();
+        let again = shmalloc(LARGE_BOUND).unwrap();
+        let (again_idx, _, _) = published_volume_of(again).unwrap();
+        shfree(again).unwrap();
+        shfree(q).unwrap();
+        shclose().unwrap();
+        assert!(is_large(idx));
+        assert_eq!(p as usize, base as usize + large_data_offset());
+        assert_eq!(p as usize % page_size(), 0, "a large block's data is not page-aligned");
+        assert!(!is_large(qidx), "a small request landed in a large volume");
+        assert_eq!(table_size, 0, "a large volume was published with its size");
+        assert_eq!(again_idx, idx, "a free large volume was not reused");
+    }
+
+    // SHM-13, SHM-18: no address inside a large block but its start heads a
+    // block, and nothing reads past the block's committed bytes.
+    #[test]
+    fn a_large_block_is_found_only_at_its_start_and_read_only_within_it() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("large2");
+        if !large_capable() {
+            return;
+        }
+        let p = shmalloc(LARGE_BOUND).unwrap();
+        let inner = unsafe { p.add(page_size()) };
+        let inner_state = unsafe { block_state(inner) };
+        let inner_count = unsafe { reference_count(inner) };
+        let inner_incref = unsafe { shincref(inner) }.is_err();
+        let inner_heads = heads_only_its_block(inner);
+        let rel = abs2rel(p).unwrap();
+        let whole = rel2abs_extent(rel, LARGE_BOUND).is_ok();
+        let past = rel2abs_extent(rel, LARGE_BOUND + 1).is_err();
+        shfree(p).unwrap();
+        shclose().unwrap();
+        assert_eq!(inner_state, BlockState::NoBlock);
+        assert_eq!(inner_count, None);
+        assert!(inner_incref, "an interior address of a large block took a reference");
+        assert!(!inner_heads, "an interior address of a large block reads as a block");
+        assert!(whole, "the block's own bytes could not be read");
+        assert!(past, "a read past the block's committed bytes was allowed");
+    }
+
+    // SHM-6, SHM-18: a released large block reads as zero when it is used
+    // again, whether it was kept committed or its pages were removed.
+    #[test]
+    fn a_released_large_block_reads_as_zero_kept_or_removed() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("large3");
+        if !large_capable() {
+            return;
+        }
+        let mut seen = Vec::new();
+        for keep in [true, false] {
+            LARGE_NO_KEEP.store(!keep, Ordering::Relaxed);
+            let p = shmalloc(LARGE_BOUND).unwrap();
+            unsafe { std::ptr::write_bytes(p, 0xAB, LARGE_BOUND) };
+            let (idx, base, _) = published_volume_of(p).unwrap();
+            shfree(p).unwrap();
+            let shm = unsafe { base.sub(std::mem::size_of::<ShmHeader>()) } as *const ShmHeader;
+            let committed = unsafe { (*shm).committed.load(Ordering::Acquire) };
+            let q = shmalloc(LARGE_BOUND).unwrap();
+            let zero = unsafe { std::slice::from_raw_parts(q, LARGE_BOUND) }.iter().all(|&b| b == 0);
+            let (qidx, _, _) = published_volume_of(q).unwrap();
+            shfree(q).unwrap();
+            seen.push((keep, committed, zero, idx == qidx));
+        }
+        LARGE_NO_KEEP.store(false, Ordering::Relaxed);
+        shclose().unwrap();
+        for (keep, committed, zero, same) in seen {
+            assert!(zero, "a reused large block (kept: {keep}) did not read as zero");
+            assert!(same, "the free large volume was not reused (kept: {keep})");
+            if keep {
+                assert!(committed >= LARGE_BOUND, "a kept large block gave back its pages");
+            } else {
+                assert_eq!(committed, 0, "a removed large block kept its pages");
+            }
+        }
+    }
+
+    // SHM-17, SHM-18
+    #[test]
+    #[ignore]
+    fn large_requests_past_a_small_tmpfs_fall_back_cleanly() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("large4");
+        assert!(large_capable());
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(shmalloc(LARGE_BOUND).expect("a large request failed instead of falling back"));
+        }
+        let large = held.iter().filter(|&&p| published_volume_of(p).is_some_and(|(i, _, _)| is_large(i))).count();
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        let used = unsafe {
+            libc::statvfs(c"/dev/shm".as_ptr(), &mut st);
+            (st.f_blocks - st.f_bfree) as usize * st.f_frsize as usize
+        };
+        for p in held {
+            shfree(p).unwrap();
+        }
+        shclose().unwrap();
+        assert!(large >= 1 && large < 8, "{large} of 8 requests took large volumes");
+        assert!(used <= 64 << 20, "tmpfs use {used} exceeds its size");
     }
 
     #[test]
@@ -3335,6 +4076,7 @@ pub(crate) mod tests {
         // Owns the process-global arena: shinit/shclose here would tear it
         // down under any test allocating in the shared arena.
         let _arena = crate::own_test_shm();
+        let _general = crate::shm::tests::GeneralOnly::new();
         // Smoke test for the parallel page-reservation path: allocate
         // a region larger than the 64 MiB serial-fallback cutoff in
         // `fallocate_workers`, then write every page. If the new
@@ -3488,6 +4230,24 @@ mod out_of_shared_memory_tests {
     #[test]
     fn a_failed_release_never_ends_the_pool() {
         assert_eq!(status_of("child_releases_into_an_unmappable_volume"), Some(3));
+    }
+
+    #[test]
+    fn a_free_of_a_block_already_free_ends_the_process() {
+        assert_eq!(status_of("child_frees_a_block_twice"), Some(morloc_runtime_types::EXIT_SHARED_MEMORY_LOST));
+    }
+
+    #[test]
+    #[ignore]
+    fn child_frees_a_block_twice() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let _shm = crate::init_test_shm();
+        let p = shmalloc(64).unwrap();
+        shfree(p).unwrap();
+        let _ = shfree(p);
+        unsafe { libc::_exit(3) };
     }
 
     #[test]

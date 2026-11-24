@@ -4,6 +4,8 @@
 -- projected once (taken), a subject matched twice (copied), a two-field arm
 -- (copied), and a projection inside a tail loop, where the subject is built
 -- again on every iteration. Each must compile and give the same values.
+-- The pair and user subjects are chosen by a conditional, so they are
+-- built and matched rather than folded away (OWN-11).
 --
 -- Rust's generated match consumes the subject variable where C++ takes one
 -- field, so Rust takes the field only when nothing names the subject after
@@ -11,7 +13,7 @@
 -- `match` (secondMatchRust), not `@show` in a throw arm (showAfterRust), and
 -- not from inside a `@try` body the subject was bound outside of
 -- (tryBodyRust); a `data` type the user maps to their own Rust enum takes
--- its field out of the plain Box (userRust). A throw arm that shows the subject
+-- its field out of the user's own enum (userRust). A throw arm that shows the subject
 -- after the projection reads the payload, so neither language may take it
 -- (showAfterRust, showAfterCpp with n = 2), nor when the projection is in an
 -- earlier let's right-hand side (showLetCpp). The two arms of an unwrap
@@ -58,7 +60,7 @@ twiceRust n =
              (match t | (Ok w) = lenRust w | (Err _) = 0)
 
 pairRust :: U64 -> U64
-pairRust n = match (Two (mkRust n) (mkRust (addRust n 1))) | (Two a b) = addRust (lenRust a) (lenRust b)
+pairRust n = match (? n > 0 = Two (mkRust n) (mkRust (addRust n 1)) : Two (mkRust 0) (mkRust 0)) | (Two a b) = addRust (lenRust a) (lenRust b)
 
 loopRust :: U64 -> U64 -> U64
 loopRust k acc
@@ -66,7 +68,7 @@ loopRust k acc
   : loopRust (k - 1) (addRust acc (match (@try (mkRust k)) | (Ok v) = lenRust v | (Err _) = 0))
 
 userRust :: U64 -> U64
-userRust n = match (Hold (mkRust n)) | (Hold v) = lenRust v | Hollow = 0
+userRust n = match (? n > 0 = Hold (mkRust n) : Hollow) | (Hold v) = lenRust v | Hollow = 0
 
 secondMatchRust :: U64 -> U64
 secondMatchRust n =
@@ -98,7 +100,7 @@ twiceCpp n =
             (match t | (Ok w) = lenCpp w | (Err _) = 0)
 
 pairCpp :: U64 -> U64
-pairCpp n = match (Two (mkCpp n) (mkCpp (addCpp n 1))) | (Two a b) = addCpp (lenCpp a) (lenCpp b)
+pairCpp n = match (? n > 0 = Two (mkCpp n) (mkCpp (addCpp n 1)) : Two (mkCpp 0) (mkCpp 0)) | (Two a b) = addCpp (lenCpp a) (lenCpp b)
 
 loopCpp :: U64 -> U64 -> U64
 loopCpp k acc

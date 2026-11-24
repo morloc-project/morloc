@@ -69,6 +69,7 @@ module UnitTypeTests
   , evalSandboxTests
   , typeRenderParenTests
   , sourceNameTests
+  , tupleNameTests
   , suspensionLawTests
   , datafileTests
   ) where
@@ -270,12 +271,9 @@ emptyConfig = do
       { configHome = home <> "/.local/share/morloc"
       , configState = home <> "/.local/share/morloc"
       , configLibrary = home <> "/.local/share/src/morloc"
-      , configPlane = "default"
-      , configPlaneCore = "morloclib"
       , configTmpDir = home <> "/.morloc/tmp"
       , configBuildConfig = home <> "/.morloc/.build-config.yaml"
       , configLangOverrides = mempty
-      , configRegistry = Nothing
       }
 
 assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
@@ -440,7 +438,8 @@ assertSubtypeBad msg gs a b = testCase msg $ do
     Right _ -> assertFailure $ "Expected subtype rejection for " <> show a <> " <: " <> show b
 
 -- | Every unsolved existential the index names is the entry at its slot,
--- and every cached solution is an entry of the context.
+-- every cached solution is an entry of the context, and the annotation
+-- index holds exactly the annotations of the context, newest first.
 assertSubtypeIndexed :: String -> [GammaIndex] -> TypeU -> TypeU -> TestTree
 assertSubtypeIndexed msg gs a b = testCase msg $
   case MTI.subtype Map.empty a b (listToGamma gs) of
@@ -455,6 +454,8 @@ assertSubtypeIndexed msg gs a b = testCase msg $
       mapM_
         (\v -> assertBool (show v <> " is solved but its entry is gone") (Set.member v solvedInContext))
         (Map.keys (gammaSolved g))
+      let annsInContext = Map.fromListWith (flip (<>)) [(v, [s]) | (s, AnnG v _) <- IntMap.toDescList (gammaContext g)]
+      assertEqual "annotation index" annsInContext (gammaAnn g)
 
 -- | A Gamma holding the given entries at the given slots.
 slotGamma :: [(Int, GammaIndex)] -> Gamma
@@ -463,6 +464,7 @@ slotGamma entries =
     { gammaSlot = MTI.slotSpacing * (1 + maximum (0 : map ((`div` MTI.slotSpacing) . fst) entries))
     , gammaContext = IntMap.fromList entries
     , gammaExist = Map.fromList [(v, s) | (s, ExistG v _ _) <- entries]
+    , gammaAnn = Map.fromListWith (flip (<>)) [(v, [s]) | (s, AnnG v _) <- IntMap.toDescList (IntMap.fromList entries)]
     }
 
 -- | Articulating an existential whose free slots are used up keeps every
@@ -493,10 +495,12 @@ listToGamma gs =
       indexed = zip [spacing * (n - 1), spacing * (n - 2) .. 0] gs
       ctx = IntMap.fromList indexed
       existMap = Map.fromList [(v, s) | (s, ExistG v _ _) <- indexed]
+      annMap = Map.fromListWith (flip (<>)) [(v, [s]) | (s, AnnG v _) <- indexed]
   in Gamma
     { gammaCounter = 0
     , gammaSlot = spacing * n
     , gammaContext = ctx
+    , gammaAnn = annMap
     , gammaExist = existMap
     , gammaSolved = Map.empty
     , gammaDeferred = []
@@ -505,15 +509,18 @@ listToGamma gs =
     , gammaEffSubs = Map.empty
     , gammaIntVals = Map.empty
     , gammaConstraints = []
+    , gammaWanteds = []
+    , gammaNestedUses = []
     , gammaAssumedConstraints = Nothing
     , gammaUnfolded = Set.empty
     , gammaPendingNumLits = []
     , gammaRigid = Nothing
     , gammaRigidNats = Set.empty
-    , gammaRigidRows = Set.empty
+    , gammaRigidSlots = Set.empty
     , gammaRigidDomain = []
     , gammaLabelVars = Map.empty
     , gammaObserved = Set.empty
+    , gammaDefinitionLambda = Nothing
     , gammaScoped = Map.empty
 
     , gammaPositionalReceivers = Set.empty
@@ -791,10 +798,10 @@ whitespaceTests =
 module foo (x)
   x = True
 module bar (y)
-  import foo
+  import .foo
   y = True
 module main (z)
-  import bar
+  import .bar
   z = 1
       |]
           int
@@ -965,7 +972,7 @@ typeAliasTests =
          
            module main (foo)
            import a (A)
-           import b (A)
+           import .b (A)
          
            foo :: A -> A -> A
         |]
@@ -988,8 +995,8 @@ typeAliasTests =
            type A a b = List (Tuple2 a b)
            
            module main (foo)
-           import a (A)
-           import b (A)
+           import .a (A)
+           import .b (A)
            
            foo :: A a b -> A a b -> A a b
         |]
@@ -1002,7 +1009,7 @@ typeAliasTests =
              type Foo = A
            module main (f)
              type B
-             import m1 (Foo)
+             import .m1 (Foo)
              f :: Foo -> B
         |]
           (fun [var "A", var "B"])
@@ -1013,12 +1020,12 @@ typeAliasTests =
              type A
              type Foo = A
            module m2 (Foo)
-             import m3 (Foo)
+             import .m3 (Foo)
            module m1 (Foo)
-             import m2 (Foo)
+             import .m2 (Foo)
            module main (f)
              type B
-             import m1 (Foo)
+             import .m1 (Foo)
              f :: Foo -> B
         |]
           (fun [var "A", var "B"])
@@ -1030,7 +1037,7 @@ typeAliasTests =
              type Foo = A
            module main (f)
              type B
-             import m1 (Foo as Bar)
+             import .m1 (Foo as Bar)
              f :: Bar -> B
         |]
           (fun [var "A", var "B"])
@@ -1042,14 +1049,14 @@ typeAliasTests =
              type Foo1 = A
 
            module m2 (Foo2)
-             import m3 (Foo1 as Foo2)
+             import .m3 (Foo1 as Foo2)
 
            module m1 (Foo3)
-             import m2 (Foo2 as Foo3)
+             import .m2 (Foo2 as Foo3)
 
            module main (f)
              type B
-             import m1 (Foo3 as Foo4)
+             import .m1 (Foo3 as Foo4)
              f :: Foo4 -> B
         |]
           (fun [var "A", var "B"])
@@ -1066,8 +1073,8 @@ typeAliasTests =
 
            module main (f)
              type B
-             import m1 (Foo)
-             import m2 (Foo)
+             import .m1 (Foo)
+             import .m2 (Foo)
              f :: Foo -> B
         |]
       , expectError
@@ -1083,8 +1090,8 @@ typeAliasTests =
              type X
              type Y
              type Z
-             import m1 (Foo)
-             import m2 (Foo)
+             import .m1 (Foo)
+             import .m2 (Foo)
              f :: Foo X Y -> Z
         |]
       -- Type-level record literals use `=` to bind fields (mirroring
@@ -2245,7 +2252,31 @@ typeOrderTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
     testGroup
       "Tests of type partial ordering (subtype)"
-      [ testFalse
+      [ testTrue
+          "Int -> (Str -> Real) == Int -> Str -> Real (APP-1)"
+          (alphaEq (FunU [int] (FunU [str] real)) (FunU [int, str] real))
+      , testTrue
+          "Int -> (Str -> Real) <: Int -> Str -> Real (APP-1)"
+          (isSubtypeOf (FunU [int] (FunU [str] real)) (FunU [int, str] real))
+      , testFalse
+          "a suspension of Int -> Int is not Int -> Int"
+          (alphaEq (FunU [] (FunU [int] int)) (FunU [int] int))
+      , testFalse
+          "a suspension of Int -> Int !< Int -> Int"
+          (isSubtypeOf (FunU [] (FunU [int] int)) (FunU [int] int))
+      , testFalse
+          "Int -> Int !< a suspension of Int -> Int"
+          (isSubtypeOf (FunU [int] int) (FunU [] (FunU [int] int)))
+      , testTrue
+          "typecheck: Int -> (Str -> Real) <: Int -> Str -> Real (APP-1)"
+          (MTI.isSubtypeOf2 Map.empty (FunU [int] (FunU [str] real)) (FunU [int, str] real))
+      , testFalse
+          "typecheck: a suspension of Int -> Int !< Int -> Int"
+          (MTI.isSubtypeOf2 Map.empty (FunU [] (FunU [int] int)) (FunU [int] int))
+      , testFalse
+          "typecheck: Int -> Int !< a suspension of Int -> Int"
+          (MTI.isSubtypeOf2 Map.empty (FunU [int] int) (FunU [] (FunU [int] int)))
+      , testFalse
           "Str !< Real"
           (isSubtypeOf str real)
       , testFalse
@@ -2493,7 +2524,41 @@ unitTypeTests =
     testGroup
       "Typechecker unit tests"
       -- instantiating a data type's parameters
-      [ testCase "parameters are set to their arguments at once" $
+      [ -- programs that reach a positional pairing with lists of different
+        -- lengths are refused as the user's error
+        expectError "a definition with more parameters than its @with signature"
+          "module main (streamNums)\nsumFile :: IFile [Int] -> <IO> Int\nproduce :: ([Int] -> <IO> ()) -> <IO> ()\n--' Stream numbers\n--' @with -m/--summary=sumFile\nstreamNums :: Int -> <IO> (Collect Int)\nstreamNums x y = @collect produce\n"
+      , expectError "a specialized alias applied to too many arguments"
+          "module main (f)\ntype Q Int b = (b, Str)\nf :: Q Int Int Int -> Real\n"
+      , expectError "a specialized alias applied to none"
+          "module main (f)\ntype Q Int b = (b, Str)\nf :: Q -> Real\n"
+      , expectError "a function of a type variable applied to two arguments"
+          "module main (g)\nf :: a -> Int\ng x = f x 2\n"
+      , expectError "a parameter applied with two arities"
+          "module main (g)\nadd :: Int -> Int -> Int\ng f = add (f 1) (f 1 2)\n"
+      , expectPass "a record field applying a parameterized data type"
+          "module main (f)\ndata Opt a = None | Some a\nrecord R where\n  x :: Opt Int\nf :: R -> Int\n"
+      , expectError "a record field naming a parameterized data type bare"
+          "module main (f)\ndata Opt a = None | Some a\nrecord R where\n  x :: Opt\nf :: R -> Int\n"
+      , expectError "a record nested in itself at a larger argument"
+          "module main (f)\nrecord Nest a where\n  val :: a\n  sub :: ?(Nest [a])\nf :: Nest Int -> Int\n"
+      , expectError "a record nested in itself at a doubling argument"
+          "module main (f)\nrecord Nest a where\n  val :: a\n  sub :: ?(Nest (a, a))\nf :: Nest Int -> Int\n"
+      , expectError "a data type nested in itself at a larger argument"
+          "module main (f)\ndata Perfect a = Leaf a | Node (Perfect (a, a))\nf :: Perfect Int -> Int\n"
+      , expectError "a record and a data type nested in each other at a larger argument"
+          "module main (f)\ndata D a = E | M (R [a])\nrecord R a where\n  v :: a\n  d :: D a\nf :: R Int -> Int\n"
+      , expectPass "a record nested in itself at its parameters in another order"
+          "module main (f)\nrecord T a b where\n  val :: a\n  sub :: ?(T b a)\nf :: T Int Str -> Int\n"
+      , expectPass "a record nested in itself through an alias of its parameter"
+          "module main (f)\ntype Id a = a\nrecord P a where\n  val :: a\n  sub :: ?(P (Id a))\nf :: P Int -> Int\n"
+      , expectPass "a record nested in itself at an argument its nesting drops"
+          "module main (f)\nrecord N a b where\n  val :: b\n  sub :: ?(N Int [a])\nf :: N Int [Int] -> Int\n"
+      , expectPass "a record and a data type nested in each other at arguments that close"
+          "module main (f)\ndata D b = E | M b (R Int)\nrecord R a where\n  v :: a\n  d :: D (a, Int)\nf :: R Int -> Int\n"
+      , expectPass "a record holding itself in a list"
+          "module main (f)\nrecord Rose a where\n  val :: a\n  kids :: [Rose a]\nf :: Rose Int -> Int\n"
+      , testCase "parameters are set to their arguments at once" $
           map (instantiateParams [(TV "a", VarU (TV "b")), (TV "b", int)]) [VarU (TV "a"), VarU (TV "b")]
             @?= [VarU (TV "b"), int]
       , testCase "a binder shadowing a parameter is respected" $
@@ -3273,8 +3338,8 @@ unitTypeTests =
           module bar (f)
             f :: a -> [a]
           module main (z)
-            import foo (x)
-            import bar (f)
+            import .foo (x)
+            import .bar (f)
             z = f x
         |]
       , (flip $ assertGeneralType "complex parse (1)") int $
@@ -3743,7 +3808,7 @@ unitValuecheckTests =
              bar = 5
            instance Foo Int where
              bar = 6
-           f :: Foo a => a
+           f :: Int
            f = bar
       |]
       , valuecheckPass
@@ -5217,13 +5282,117 @@ complexityRegressionTests =
         localOption (mkTimeout 20000000) $
           testCase "deep singly-used-parameter chain moves instead of cloning"
             (assertGenerates (singleUseChain 2000))
+      , -- The lets each level floats out of its argument move up as one
+        -- piece, so twice the depth costs about twice the time; a quadratic
+        -- float spends far longer than this budget on it.
+        localOption (mkTimeout 30000000) $
+          testCase "a singly-used-parameter chain twice as deep stays linear"
+            (assertGenerates (singleUseChain 4000))
       , -- The realizer's work is linear in a nest of higher-order calls: each
         -- argument is scored once, and a lambda parameter bound to a
         -- function value refers to that score.
         localOption (mkTimeout 5000000) $
           testCase "nested function arguments are scored once"
             (assertGenerates (nestedComposeChain 25))
+      , -- A use whose type only its instance determines (CLS-20) is solved
+        -- while the export is checked with its references left as
+        -- signatures, so the export is specialized use by use rather than
+        -- expanded in place.
+        localOption (mkTimeout 10000000) $
+          assertGeneralType
+            "a use solved by its instance keeps the export shallow"
+            (soleInstanceComparisons 150)
+            (fun [lst (VarU (TV "Tag")), int])
+      , -- Each method use checks every instance of its class and trims the
+        -- context back after each; that trim must not cost the size of
+        -- the context, which grows with the definition.
+        localOption (mkTimeout 10000000) $
+          assertGeneralType
+            "method uses in one definition cost no more as the definition grows"
+            (manyMethodUses 3000)
+            (fun [int, int, lst bool])
+      , -- Checking a definition against its signature takes a method use as
+        -- an obligation, so it never copies the bodies of the use's
+        -- candidate instances, which here use the class again.
+        localOption (mkTimeout 10000000) $
+          assertGeneralType
+            "a signed definition's method uses do not copy instance bodies"
+            (nestedMethodUses 1000)
+            (fun [int, int, lst bool])
       ]
+
+-- | @k@ uses of a method whose class has fourteen sourced instances, in
+-- one definition.
+manyMethodUses :: Int -> MT.Text
+manyMethodUses k =
+  "module main (f)\n"
+    <> "class Gt a where\n  gtm :: a -> a -> Bool\n"
+    <> mconcat
+      [ "instance Gt " <> t <> " where\n  source Py from \"g.py\" (\"gt\" as gtm)\n"
+      | t <- ["Int", "Str", "Real", "Bool", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64"]
+      ]
+    <> "f :: Int -> Int -> [Bool]\n"
+    <> "f x y = [" <> MT.intercalate ", " (replicate k "gtm x y") <> "]\n"
+
+-- | @k@ uses of a method in one signed definition. The method's class is
+-- the first of three; each has fourteen sourced instances and tuple
+-- instances whose bodies use the next class's method once per component.
+nestedMethodUses :: Int -> MT.Text
+nestedMethodUses k =
+  "module main (f)\n"
+    <> mconcat [classOf l | l <- [0 .. layers - 1]]
+    <> "both :: Bool -> Bool -> Bool\nboth a b = a\n"
+    <> mconcat [tupleInstance l n | l <- [0 .. layers - 1], n <- [2, 3, 4]]
+    <> "f :: Int -> Int -> [Bool]\n"
+    <> "f x y = [" <> MT.intercalate ", " (replicate k "m0 x y") <> "]\n"
+  where
+    layers = 3 :: Int
+    showT = MT.pack . show
+    method l = "m" <> showT l
+    classOf l =
+      "class C" <> showT l <> " a where\n  " <> method l <> " :: a -> a -> Bool\n"
+        <> mconcat
+          [ "instance C" <> showT l <> " " <> t <> " where\n  source Py from \"g.py\" (\"eq\" as " <> method l <> ")\n"
+          | t <- ["Int", "Str", "Real", "Bool", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64"]
+          ]
+    tupleInstance l n =
+      let vs = take n ["a", "b", "c", "d"]
+          next = if l + 1 < layers then l + 1 else l
+          ctx = MT.intercalate ", " [cls next v | v <- vs]
+          cls c v = "C" <> showT c <> " " <> v
+          use i = method next <> " (." <> showT i <> " x) (." <> showT i <> " y)"
+          body = foldl (\acc i -> "both (" <> use i <> ") (" <> acc <> ")") (use (0 :: Int)) [1 .. n - 1]
+       in "instance (" <> ctx <> ") => C" <> showT l <> " (" <> MT.intercalate ", " vs <> ") where\n  "
+            <> method l <> " x y = " <> body <> "\n"
+
+-- | A comparison class with container instances whose bodies use the class
+-- again, and a newtype with its Packable instance.
+classComparisons :: MT.Text
+classComparisons =
+  "module main (f)\n"
+    <> "class Cmp a where\n  lt :: a -> a -> Bool\n  le :: a -> a -> Bool\n"
+    <> "instance Cmp Int, Cmp Real, Cmp Str, Cmp Bool where\n  lt x y = False\n  le x y = True\n"
+    <> "pick :: Bool -> Int -> Int -> Int\npick b x y\n  ? b = x\n  : y\n"
+    <> "cmpC :: Cmp a => a -> a -> Int\ncmpC x y = pick (lt x y) 0 (pick (le x y) 1 2)\n"
+    <> "instance Cmp a => Cmp [a] where\n  lt xs ys = lt (cmpC xs ys) 0\n  le xs ys = le (cmpC xs ys) 0\n"
+    <> "instance (Cmp a, Cmp b) => Cmp (a, b) where\n"
+    <> "  lt x y = lt (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (cmpC (.1 x) (.1 y))) 0\n"
+    <> "  le x y = le (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (cmpC (.1 x) (.1 y))) 0\n"
+    <> "instance (Cmp a, Cmp b, Cmp c) => Cmp (a, b, c) where\n"
+    <> "  lt x y = lt (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (pick (lt (cmpC (.1 x) (.1 y)) 0) 0 (cmpC (.2 x) (.2 y)))) 0\n"
+    <> "  le x y = le (pick (lt (cmpC (.0 x) (.0 y)) 0) 0 (pick (lt (cmpC (.1 x) (.1 y)) 0) 0 (cmpC (.2 x) (.2 y)))) 0\n"
+    <> "class Packable a b where\n  pack :: a -> b\n  unpack :: b -> a\n"
+    <> "newtype Tag = Int\n"
+    <> "mapL :: (a -> b) -> [a] -> [b]\nmapL g xs = []\n"
+    <> "sizeL :: [a] -> Int\nsizeL xs = 0\n"
+
+-- | @k@ tuple comparisons and a use whose result type only the selected
+-- Packable instance determines (CLS-20).
+soleInstanceComparisons :: Int -> MT.Text
+soleInstanceComparisons k =
+  classComparisons
+    <> "f :: [Tag] -> Int\n"
+    <> "f ts = " <> foldr (\i e -> "(pick (lt (" <> MT.pack (show i) <> ", 2.0, \"a\") (3, 4.0, \"b\")) 1 " <> e <> ")") "(sizeL (mapL unpack ts))" [1 .. k] <> "\n"
 
 -- | @(inc . inc . ... . inc) x@, @k@ compositions deep, with @(.)@ defined
 -- in morloc and @inc@ sourced in Python and C++ so the realizer has a
@@ -6594,7 +6763,7 @@ namespaceErrorTests =
         y :: Int
         y = 1
         module main (x)
-        import foo as let
+        import .foo as let
         x :: Int
         x = let.y
           |]
@@ -6606,7 +6775,7 @@ namespaceErrorTests =
         y :: Int
         y = 1
         module main (x)
-        import foo as do
+        import .foo as do
         x :: Int
         x = do.y
           |]
@@ -6626,7 +6795,7 @@ namespaceErrorTests =
         double :: Int -> Int
         double x = x
         module main (x)
-        import helpers as h
+        import .helpers as h
         x :: Int
         x = h.double "hello"
           |]
@@ -6638,7 +6807,7 @@ namespaceErrorTests =
         double :: Int -> Int
         double x = x
         module main (x)
-        import helpers as h
+        import .helpers as h
         x :: Int
         x = double 5
           |]
@@ -6652,7 +6821,7 @@ namespaceErrorTests =
         class Eq a where
           (==) :: a -> a -> Bool
         module main (test)
-        import eq ((==))
+        import .eq ((==))
         test :: Bool
         test = True
           |]
@@ -6781,19 +6950,6 @@ typeclassTests =
       , -- === NEGATIVE TESTS ===
 
         exprTestBad
-          "ambiguous: multiple instances, no annotation"
-          [r|
-        module main (x)
-        class Monoid a where
-          mempty :: a
-        instance Monoid Str where
-          mempty = ""
-        instance Monoid (List a) where
-          mempty = []
-        x = mempty
-          |]
-
-      , exprTestBad
           "no matching instance for annotated type"
           [r|
         module main (x)
@@ -6831,8 +6987,9 @@ typeclassTests =
 
       , -- === COERCION-AWARE INSTANCE RESOLUTION ===
 
-        assertGeneralType
-          "instance resolved through optional coercion"
+        -- CLS-17: no coercion makes a head match
+        expectUserError
+          "instance not resolved through optional coercion"
           [r|
         module main (x)
         class Default a where
@@ -6842,7 +6999,6 @@ typeclassTests =
         x :: ?Int
         x = def
           |]
-          (OptionalU int)
 
       , assertGeneralType
           "typeclass method in effectful do-block"
@@ -7654,6 +7810,12 @@ typedefKindVarTests =
     -- VarU case in Typecheck/Internal.hs), so a synthetic pair that
     -- classifies as NONE of Nat/Str/Rec/List/Set must use a shape no
     -- classifier accepts: FunU here.
+    , exprTestBad "deferred row equations are decided together, not one by one" $
+        "module main (top)\n\
+        \type Table (n :: Nat) (r :: Rec)\n\
+        \two :: Table n (u + w) -> Table n (u + v) -> Table n w -> Table n v -> Int\n\
+        \top :: Table m {a = Int} -> Table m {c = Int} -> Table m {} -> Int\n\
+        \top x y z = two x y z z\n"
     , testCase "recheckDeferred rejects an unclassifiable pair" $
         let bad = FunU [] (VarU (TV "a"))
             g0 = (listToGamma []) { gammaDeferred = [(bad, bad)] }
@@ -10320,7 +10482,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @render -p/--plain=showStr
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10340,7 +10502,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @render -p/--pair=showPair
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10359,7 +10521,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @render -p/--plain=showInts
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10378,7 +10540,7 @@ withDocstringTests =
         produce :: ([Int] -> <IO> ()) -> <IO> ()
         produce sink = sink (mk 0)
         --' @with -n/--count=countAny
-        stream :: <IO> ()
+        stream :: <IO> (Collect Int)
         stream = @collect produce
           |]
 
@@ -10701,9 +10863,9 @@ withDocstringTests =
           |]
 
         -- An action applies to the whole output, whatever the shape of the
-        -- body: a `@collect` in one branch of a guard builds.
+        -- body: a `@collect` in each branch of a guard builds.
       , expectPass
-          "with: a gathering action on a @collect in one branch"
+          "with: a gathering action on a @collect in each branch"
           [r|
         module main (foo)
         effect IO
@@ -10711,8 +10873,8 @@ withDocstringTests =
         nop :: <IO> ()
         fmt :: [Int] -> Str
         --' @render -a/--all=fmt
-        foo :: Bool -> <IO> ()
-        foo b = ? b = @collect produce : nop
+        foo :: Bool -> <IO> (Collect Int)
+        foo b = ? b = @collect produce : @collect (\k -> nop)
           |]
 
         -- A leading-underscore long flag name is rejected: those names are
@@ -10747,7 +10909,7 @@ withDocstringTests =
         produce :: Str -> ([Int] -> <IO> ()) -> <IO> ()
         produce s sink = sink (mk s)
         --' @render -p/--plain=showInts
-        stream :: Int -> <IO> ()
+        stream :: Int -> <IO> (Collect Int)
         stream x =
           let x = "s"
               y = x
@@ -10769,14 +10931,14 @@ withDocstringTests =
         produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
         produce n sink = sink (mk n)
         --' @render -p/--plain=showInts
-        stream :: Int -> <IO> ()
+        stream :: Int -> <IO> (Collect Int)
         stream n = let showInts = 5 in @collect (produce showInts)
           |]
 
-        -- A command streams when a @collect is reachable from its definition,
-        -- including from a where-binding.
-      , expectPass
-          "with: a command streaming from a where-binding"
+        -- A stdout source ends the body itself, never a where-binding
+        -- (STRM-4).
+      , expectError
+          "with: a command may not stream from a where-binding"
           [r|
         module main (stream)
         effect IO
@@ -10788,18 +10950,16 @@ withDocstringTests =
         produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
         produce n sink = sink (mk n)
         --' @render -r/--text=render2($1)
-        stream :: Int -> Int -> <IO> ()
+        stream :: Int -> Int -> <IO> (Collect Int)
         stream x y = go
           where
             go = @collect (produce x)
           |]
 
-        -- A where-binding sees only the definition's own parameters, so a
-        -- `$N` naming a parameter bound by a lambda in the body cannot reach
-        -- a @collect inside a where-binding.
-      -- A command that streams from a where-binding runs its actions on its
-      -- staged output, where `$2` is the second argument the stage saved.
-      , testCase "with: `$N` naming a body lambda's parameter from a where-binding" $ do
+        -- A `@stdout` command runs its actions on its staged output, where
+        -- `$2` is the second argument the stage saved, even when a lambda
+        -- in the body binds it.
+      , testCase "with: `$N` naming a body lambda's parameter of a staged command" $ do
           result <- runFront [r|
         module main (stream)
         effect IO
@@ -10811,10 +10971,8 @@ withDocstringTests =
         produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
         produce n sink = sink (mk n)
         --' @render -r/--text=render2($2)
-        stream :: Int -> Int -> <IO> ()
-        stream x = \y -> go
-          where
-            go = @collect (produce x)
+        stream :: Int -> Int -> <IO> (Collect Int)
+        stream x = \y -> @stdout (\o -> @write 0 o (mk x))
           |]
           case result of
             Right _ -> return ()
@@ -11260,6 +11418,73 @@ variantTests =
         idt :: Expr -> Expr
               |]
 
+      , -- INTR-7: @eq and @le compare the wire form, so what they reject
+        -- is decided there: a function or handle anywhere in it, but not a
+        -- type parameter the wire form does not hold.
+        localOption (mkTimeout 20000000) $
+          testCase "spec-intr-7-6" $ do
+            assertGenerates
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        record Tag a where
+          n :: Int
+        record Py => Tag = "dict"
+        mk :: Int -> Tag (Int -> Int)
+        f :: Int -> Bool
+        f x = @eq (mk x) (mk 1)
+              |]
+            assertGenerationFails
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        record R where
+          g :: Int -> Int
+          n :: Int
+        record Py => R = "dict"
+        mkR :: Int -> R
+        mkR x = {g = inc, n = x}
+        f :: Int -> Bool
+        f x = @eq (mkR x) (mkR 1)
+              |]
+            assertGenerationFails
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        record R where
+          h :: IFile Int
+          n :: Int
+        record Py => R = "dict"
+        mk :: Int -> R
+        f :: Int -> Bool
+        f x = @eq (mk x) (mk 1)
+              |]
+            assertGenerationFails
+              [r|
+        module main (f)
+        type Py => Int = "int"
+        type Py => Bool = "bool"
+        type Py => (IFile a) = "int" a
+        source Py from "t.py" ("mk", "inc")
+        inc :: Int -> Int
+        newtype N = (Int -> Int)
+        mk :: Int -> N
+        f :: Int -> Bool
+        f x = @eq (mk x) (mk 1)
+              |]
+
       , -- A declared table column is checked against the block's Arrow
         -- type at every crossing, and only flat primitives, Str and
         -- optionals of them have an Arrow form the runtime can name. A
@@ -11339,11 +11564,11 @@ typeRenderParenTests :: TestTree
 typeRenderParenTests =
   testGroup "nullary named types render bare"
     [ testCase "Pretty Type: record argument of an application" $
-        render (pretty (AppT box [todoT])) @?= "Box Todo"
+        render (pretty (AppT box [TyA todoT])) @?= "Box Todo"
     , testCase "Pretty Type: record under an optional" $
         render (pretty (OptionalT todoT)) @?= "?Todo"
     , testCase "Pretty Type: applied record nested in an application" $
-        render (pretty (AppT box [NamT NamRecord (TV "Box") [todoT] []])) @?= "Box (Box Todo)"
+        render (pretty (AppT box [TyA (NamT NamRecord (TV "Box") [TyA todoT] [])])) @?= "Box (Box Todo)"
     , testCase "Pretty TypeU: record argument of an application" $
         render (pretty (AppU boxU [todoU])) @?= "Box Todo"
     , testCase "Pretty TypeU: record under an optional" $
@@ -11353,13 +11578,13 @@ typeRenderParenTests =
     , testCase "prettyTypeU: applied record nested in an application" $
         render (MTI.prettyTypeU (AppU boxU [NamU NamRecord (TV "Box") [todoU] []])) @?= "Box (Box Todo)"
     , testCase "Pretty Type: suspension argument of an application" $
-        render (pretty (AppT box [EffectT ioSet (VarT (TV "Int"))])) @?= "Box (<IO> Int)"
+        render (pretty (AppT box [TyA (EffectT ioSet (VarT (TV "Int")))])) @?= "Box (<IO> Int)"
     , testCase "Pretty TypeU: suspension argument of an application" $
         render (pretty (AppU boxU [EffectU ioEffectSet (VarU (TV "Int"))])) @?= "Box (<IO> Int)"
     , testCase "Pretty Type: arrow with one space each side" $
         render (pretty (FunT [intT] intT)) @?= "Int -> Int"
     , testCase "Pretty Type: application in arrow position" $
-        render (pretty (FunT [todoT, AppT box [todoT]] (AppT box [todoT]))) @?= "Todo -> Box Todo -> Box Todo"
+        render (pretty (FunT [todoT, AppT box [TyA todoT]] (AppT box [TyA todoT]))) @?= "Todo -> Box Todo -> Box Todo"
     , testCase "Pretty Type: function argument keeps its parentheses" $
         render (pretty (FunT [FunT [intT] intT] intT)) @?= "(Int -> Int) -> Int"
     , testCase "Pretty TypeU: application in arrow position" $
@@ -11371,7 +11596,7 @@ typeRenderParenTests =
     , testCase "prettyTypeU: function argument keeps its parentheses" $
         render (MTI.prettyTypeU (FunU [FunU [intU] intU] intU)) @?= "(Int -> Int) -> Int"
     , testCase "Pretty Type: a wide tuple stays on one line" $
-        render (pretty (AppT (VarT (TV "Tuple5")) (replicate 5 longT))) @?= wideTuple
+        render (pretty (AppT (VarT (TV "Tuple5")) (replicate 5 (TyA longT)))) @?= wideTuple
     , testCase "Pretty TypeU: a wide tuple stays on one line" $
         render (pretty (AppU (VarU (TV "Tuple5")) (replicate 5 longU))) @?= wideTuple
     , testCase "prettyTypeU: a wide tuple stays on one line" $
@@ -11573,7 +11798,7 @@ typeIdentityTests =
             mk :: Int -> Batch
             withSink :: Int -> (Batch -> Int) -> Int
           module main (total, viaSink)
-            import lib (mk, withSink)
+            import .lib (mk, withSink)
             sum :: [Int] -> Int
             total :: Int -> Int
             total n = sum (mk n)
@@ -11589,7 +11814,7 @@ typeIdentityTests =
               y :: Int
             mk :: Int -> P
           module main (f)
-            import lib (mk)
+            import .lib (mk)
             f :: Int -> Int
             f n = .y (mk n)
         |]
@@ -11603,7 +11828,7 @@ typeIdentityTests =
             type Batch = [P]
             mk :: Int -> Batch
           module main (f)
-            import lib (mk, Batch)
+            import .lib (mk, Batch)
             map :: (a -> b) -> [a] -> [b]
             f :: Int -> [Int]
             f n = map .y (mk n)
@@ -11615,7 +11840,7 @@ typeIdentityTests =
             type Batch = [Int]
             mk :: Int -> Batch
           module main (f)
-            import lib (mk, Batch as B)
+            import .lib (mk, Batch as B)
             sum :: [Int] -> Int
             f :: Int -> Int
             f n = sum (mk n)
@@ -11631,7 +11856,7 @@ typeIdentityTests =
               size :: a -> Batch
             mk :: Int -> Int
           module main (f)
-            import lib (Sized, mk)
+            import .lib (Sized, mk)
             sum :: [Int] -> Int
             instance Sized Int where
               size x = [x]
@@ -11647,7 +11872,7 @@ typeIdentityTests =
             mk :: Int -> P
             getx :: P -> Int
           module main (f, g)
-            import lib (mk, getx)
+            import .lib (mk, getx)
             record P where
               z :: Str
             mkq :: Str -> P
@@ -11663,7 +11888,7 @@ typeIdentityTests =
             type Batch = [Int]
             mk :: Int -> Batch
           module main (bad)
-            import lib (mk)
+            import .lib (mk)
             type Batch = Str
             bad :: Int -> Str
             bad n = mk n
@@ -11676,7 +11901,7 @@ typeIdentityTests =
               x :: Int
             mk :: Int -> P
           module main (bad)
-            import lib (mk)
+            import .lib (mk)
             record P where
               z :: Str
             bad :: Int -> Str
@@ -11690,7 +11915,7 @@ typeIdentityTests =
               x :: Int
             mk :: Int -> P
           module main (bad)
-            import lib (mk)
+            import .lib (mk)
             record P where
               x :: Int
             bad :: Int -> P
@@ -11710,7 +11935,7 @@ typeIdentityTests =
               x :: Int
             mk :: Int -> P
           module main (f)
-            import lib (mk)
+            import .lib (mk)
             f :: P -> Int
             f p = .x p
         |]
@@ -11720,7 +11945,7 @@ typeIdentityTests =
           module lib (Batch)
             type Batch = [Int]
           module main (f)
-            import lib (Batch)
+            import .lib (Batch)
             type Batch = [Str]
             f :: Batch -> Int
         |]
@@ -11731,7 +11956,7 @@ typeIdentityTests =
             type Batch = [Int]
             mk :: Int -> Batch
           module main (f)
-            import lib (mk, Batch)
+            import .lib (mk, Batch)
             f :: Int -> Int
         |]
       , expectError
@@ -11742,7 +11967,7 @@ typeIdentityTests =
             type B = Int
             x :: A -> B
           module main (f)
-            import lib (x)
+            import .lib (x)
             type A = B
             type B = A
             f :: A -> Int
@@ -11754,7 +11979,7 @@ typeIdentityTests =
             type Cell = Int
             x :: Cell -> Int
           module main (f)
-            import lib (x)
+            import .lib (x)
             type Cell = Str
             f :: Cell -> Int
         |]
@@ -11766,7 +11991,7 @@ typeIdentityTests =
               v :: Int
             record Py => Box = "dict"
           module main (f)
-            import lib (Box)
+            import .lib (Box)
             record Py => Box = "MyBox"
             f :: Box -> Int
         |]
@@ -11860,6 +12085,55 @@ sourceNameTests =
           source Py from "m" ("__morloc_encode" as g)
           g :: Int -> Int
           f x = g x
+        |]
+    , expectPass "Python: a dotted builtin is a source name"
+          [r|
+          module main (f)
+          source Py ("str.upper" as g)
+          g :: Str -> Str
+          f x = g x
+        |]
+    , expectError "Python: a keyword is not a source name"
+          [r|
+          module main (f)
+          source Py ("yield" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Python: a keyword is not a segment of a source name"
+          [r|
+          module main (f)
+          source Py from "m.py" ("ns.class" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Python: a dotted name from a file is a source name"
+          [r|
+          module main (f)
+          source Py from "m.py" ("helpers.basename" as g)
+          g :: Str -> Str
+          f x = g x
+        |]
+    , expectPass "R: a name with a leading dot is a source name"
+          [r|
+          module main (f)
+          source R from "m.R" (".helper" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "R: a helper the pool binds for user files is not a source name"
+          [r|
+          module main (f)
+          source R from "m.R" (".morloc.pooldir" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "R: an operator named by a string is an operator"
+          [r|
+          module main (f)
+          source R from "m.R" ("+" as (<+>))
+          (<+>) :: Int -> Int -> Int
+          f x = x <+> x
         |]
     , expectError "Rust: a name the pool reserves is not a source name"
           [r|
@@ -12274,3 +12548,48 @@ holds (ND.Holds _) = True
 holds _ = False
 refuted (ND.Refuted _) = True
 refuted _ = False
+
+tupleNameTests :: TestTree
+tupleNameTests =
+  testGroup "a tuple is Tuple<k> applied to k types, and nothing else"
+    [ expectPass "a class named like a tuple is a class"
+          [r|
+          module main (f)
+          class TupleLike a where
+            tl :: a -> a
+          instance TupleLike Int where
+            source Py from "x.py" ("tl")
+          f :: TupleLike a => a -> a
+          f x = tl x
+        |]
+    , expectPass "an index selector reads a tuple"
+          [r|
+          module main (g)
+          source Py from "m.py" ("mkpair")
+          mkpair :: Int -> (Int, Int)
+          g x = .0 (mkpair x)
+        |]
+    , expectError "a type named like a tuple has no tuple fields"
+          [r|
+          module main (g)
+          newtype TupleBox a = (a, a)
+          source Py from "m.py" ("mkbox")
+          mkbox :: Int -> TupleBox Int
+          g x = .0 (mkbox x)
+        |]
+    , expectError "a tuple type cannot be declared"
+          [r|
+          module main (g)
+          newtype Tuple3 a = [a]
+          source Py from "m.py" ("mk")
+          mk :: Int -> Tuple3 Int
+          g x = mk x
+        |]
+    , expectError "a tuple type is applied to its arity"
+          [r|
+          module main (g)
+          source Py from "m.py" ("mk")
+          mk :: Int -> Tuple3 Int Int
+          g x = .1 (mk x)
+        |]
+    ]

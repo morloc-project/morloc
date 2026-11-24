@@ -15,10 +15,10 @@ source Cpp from "emit.hpp" ("emit")
 
 emit :: [Int] -> ([Int] -> <IO> ()) -> <IO> ()
 
-viaGuard :: Bool -> <IO> ()
+viaGuard :: Bool -> <IO> (Collect Int)
 viaGuard b = ? b = @collect (emit [1]) : @collect (emit [2])
 
-viaMatch :: Str -> <IO> ()
+viaMatch :: Str -> <IO> (Collect Int)
 viaMatch path = do
   r <- @open path :: <IO> (Try Str (IFile [Int]))
   match r

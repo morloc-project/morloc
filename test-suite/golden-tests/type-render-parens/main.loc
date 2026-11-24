@@ -12,11 +12,9 @@ import root-py
 
 record Todo where
   title :: Str
-record py => Todo = "dict"
 
 record Box a where
   value :: a
-record py => Box a = "dict" a
 
 data Item
   = Boxed (Box Todo)

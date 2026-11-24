@@ -1,0 +1,84 @@
+-- Copies generated C++ makes of a payload in shapes outside the own7
+-- matrix: packed and optional entry arguments, an optional result, function
+-- values, list elements, arm fields, tuple fields, lets in tests and guards.
+-- Each export returns its value and the copies made in the call; an
+-- optional result is unpacked with 1000 added per copy. The counts are a
+-- baseline, not a target: a count that drops is progress.
+-- Analysis: model/compiler/issues/codegen-copies.md.
+module main
+  ( entryPay, entryOpt, optOut, fnValue, listElemField, armBeside, tupleFields
+  , testLet, guardLet
+  )
+
+import root
+import root-cpp
+
+newtype Pay = Int
+type Cpp => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Cpp from "pay.hpp" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Cpp from "pay.hpp" ("mkp", "keyp", "census", "mktp")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+census :: Int -> (Int, Int)
+mktp :: Int -> (Pay, Int)
+
+record HP where
+  q :: Pay
+  z :: Int
+
+holdP :: Pay -> HP
+holdP v = {q = v, z = 1}
+
+data Bx = Bx Pay Int | NoBox
+data T3 = T3 Pay Pay Bx
+data Ch = End | Link Pay Ch
+
+entryPay :: Pay -> (Int, Int)
+entryPay x = census (keyp x)
+
+entryOpt :: ?Pay -> (Int, Int)
+entryOpt x = census (? isNull x = 0 : keyp (require x))
+
+optOut :: Int -> ?Pay
+optOut n ? n > 0 = mkp n : Null
+
+addK :: Int -> Pay -> Int
+addK k p = keyp p + k
+
+fnValue :: Int -> (Int, Int)
+fnValue n = census (let g = addK 1 in let a = mkp n in g a + g a)
+
+elemField :: [Ch] -> HP
+elemField xs = match xs
+  | [(Link p _)] = holdP p
+  | _ = holdP (mkp 0)
+
+listElemField :: Int -> (Int, Int)
+listElemField n = census (.z (elemField [Link (mkp n) End]))
+
+sumT3 :: T3 -> Int
+sumT3 t = match t
+  | (T3 a b (Bx q k)) = sum (map keyp [a, b]) + keyp q + k
+  | (T3 a b NoBox) = sum (map keyp [a, b])
+
+armBeside :: Int -> (Int, Int)
+armBeside n = census (sumT3 (T3 (mkp n) (mkp 1) (Bx (mkp 2) 3)))
+
+tupleFields :: Int -> (Int, Int)
+tupleFields n = census (let t = mktp n in .z (holdP (.0 t)) + .1 t)
+
+testLet :: Int -> (Int, Int)
+testLet n = census (? (let a = mkp n in .z (holdP a)) > 0 = 1 : 0)
+
+guardLoop :: Int -> Int -> Int
+guardLoop k acc
+  ? (let a = mkp k in .z (holdP a)) > k = acc
+  : ? k == 0 = acc
+  : guardLoop (k - 1) (acc + 1)
+
+guardLet :: Int -> (Int, Int)
+guardLet n = census (guardLoop n 0)

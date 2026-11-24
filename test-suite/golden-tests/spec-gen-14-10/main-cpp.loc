@@ -1,0 +1,24 @@
+-- GEN-14: a generated record with a packed field that is only held in the
+-- pool, never passed in or out, still converts its own field, so its
+-- marshaller and the packers it calls are part of the pool. The packers'
+-- header is named only by the Packable instance. The Rust twin is
+-- main-rust.loc.
+module main (nOf)
+
+import root-cpp
+
+newtype Tenths = Int
+type Cpp => Tenths = "double"
+
+instance Packable Int Tenths where
+  source Cpp from "pk.hpp" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record B where
+  t :: Tenths
+  n :: Int
+
+source Cpp from "f.hpp" ("mkB")
+mkB :: Int -> B
+
+nOf :: Int -> Int
+nOf k = .n (mkB k)

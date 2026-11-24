@@ -1,0 +1,16 @@
+-- GEN-1: a record built in a pool needs no declaration for the pool's
+-- language; it takes the language's default kind. This one is
+-- parameterized and recursive; plain.loc is the unparameterized case.
+
+module main (foo)
+
+import root
+import root-py
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+foo :: Int -> Container Int
+foo n ? n > 0 = {val = n, sub = foo (n - 1)}
+      : {val = 0, sub = Null}

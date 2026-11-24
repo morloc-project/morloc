@@ -16,8 +16,6 @@ import root-r
 record Ops where
   inc :: Int -> Int
   scale :: Int -> Int
-record Py => Ops = "dict"
-record R => Ops = "list"
 
 source Py from "producer.py" ("tick", "add", "mul")
 source R from "consumer.R"

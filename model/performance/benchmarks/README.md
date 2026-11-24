@@ -20,13 +20,18 @@ directories of quiet-machine runs: they are the baseline the next run is
 compared against. After a run, copy the fitted values an item cites into
 its `Measured:` line.
 
-    ./compare.py                         # latest run against the one before
+    ./compare.py                         # each bench's latest run against its own last
     ./compare.py RUN_A RUN_B RUN_C       # any runs, oldest first
     ./compare.py --last 5 --item XL-1    # one item across the last five
     ./compare.py --changed               # only rows with a status
 
 `compare.py` exits 1 when the newest run breaks a `Limit:` or is worse than
-the previous run by more than `--tolerance` (default 0.10). Comparing runs
+the previous run by more than `--tolerance` (default 0.10). A missed `Goal:` shows as `miss`;
+a run whose load passed half the core count shows as `NOISY` and its changes
+are not counted. Every point records the load when it was taken.
+`Bench.sweep_variants` times an in-run A/B (variants as environments,
+interleaved per repetition): use it for before/after, since an older binary
+loads the newly installed runtime. Comparing runs
 from different hosts compares the hosts; each run's header names its CPU.
 
 | bench | items |
@@ -36,10 +41,18 @@ from different hosts compares the hosts; each run's header names its CPU.
 | xl-payload | XL-3, XL-4 |
 | encoding | ENC-1..3 |
 | pure-args | ENC-4 |
+| stream-write-r | ENC-5 |
+| ifile-slice | ENC-9, ENC-10, ENC-13 |
+| gather | ENC-11 |
+| save-load | ENC-6, ENC-7 |
+| stdout-raw | ENC-8 |
 | compression | ZIP-1..7, ZIP-10 |
 | table-read | TBL-1, TBL-2 |
 | par-scaling | PAR-1, PAR-2 |
-| typechecking | TYCK-1..5 |
+| typechecking | TYCK-1..7 |
 | build | BUILD-1 |
 | recursion-depth | DEPTH-1..3 |
 | copies | COPY-1..6 |
+| pfilter-move | COPY-9 |
+| chains | CHAIN-1..4 |
+| serve-json | SERVE-1..3 |

@@ -1,0 +1,23 @@
+-- GEN-11: a Packable whose unpacked form is a dataclass record crosses to
+-- C++ and back; the record keeps its class under the packed type's hint.
+module main (roundTrip)
+
+import root-py
+import root-cpp (idcpp)
+
+record Person where
+  name :: Str
+  age :: Int
+record Py => Person = dataclass
+
+newtype Tag = Person
+type Py => Tag = "Tag"
+instance Packable Person Tag where
+  source Py from "f.py" ("tag_pack" as pack, "tag_unpack" as unpack)
+
+source Py from "f.py" ("mkTag", "tagName")
+mkTag :: Str -> Int -> Tag
+tagName :: Tag -> Str
+
+roundTrip :: Str -> Str
+roundTrip n = tagName (idcpp (mkTag n 3))

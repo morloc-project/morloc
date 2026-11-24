@@ -1,0 +1,8 @@
+module a (f)
+type Py => Int = "int"
+class C a where
+  m1 :: a -> Int
+instance C Int where
+  source Py from "h.py" ("one" as m1)
+f :: Int -> Int
+f x = m1 x

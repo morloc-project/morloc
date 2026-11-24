@@ -1,0 +1,69 @@
+-- Sourced functions named like the locals and binders generated code
+-- declares (`n<N>`, `s<N>`, `helper<N>`, loop indices, Rust closure
+-- parameters) are called, and passed as values, as themselves: a
+-- generated name never shadows a sourced one. Each source adds a distinct
+-- power of ten, so a misbinding changes the digits.
+module main (chain, apply, lmap, wsum, wback, rchain, rapply)
+
+import root-rust
+import root-r
+
+source Rust from "f.rs"
+  ( "n0", "n1", "n2", "n3", "n4", "s0", "s1", "helper0", "twice"
+  , "__e" as ue, "__v" as uv, "i2" as ui0
+  )
+
+n0 :: Int -> Int
+n1 :: Int -> Int
+n2 :: Int -> Int
+n3 :: Int -> Int
+n4 :: Int -> Int
+s0 :: Int -> Int
+s1 :: Int -> Int
+helper0 :: Int -> Int
+twice :: (Int -> Int) -> Int -> Int
+ue :: Int -> Int
+uv :: Int -> Int
+ui0 :: Int -> Int
+
+chain :: Int -> Int
+chain x = n0 (n1 (n2 (n3 (n4 (s0 (s1 (helper0 x)))))))
+
+apply :: Int -> Int
+apply x = twice n3 (twice s1 (twice helper0 x))
+
+lmap :: [Int] -> [Int]
+lmap xs = map (\x -> ui0 (ue (uv x))) xs
+
+-- A packed type whose pack and unpack functions are named like the indices
+-- of the conversion loops that apply them to each element.
+newtype W = Int
+type Rust => W = "MyW"
+
+instance Packable Int W where
+  source Rust from "f.rs" ("i1" as pack, "i0" as unpack)
+
+source Rust from "f.rs" ("wsum", "wback")
+wsum :: [W] -> Int
+wback :: [Int] -> [W]
+
+source R from "f.R"
+  ( "n0" as r0, "n1" as r1, "n2" as r2, "n3" as r3, "n4" as r4
+  , "s0" as rs0, "s1" as rs1, "helper0" as rh0, "twice" as rtwice
+  )
+
+r0 :: Int -> Int
+r1 :: Int -> Int
+r2 :: Int -> Int
+r3 :: Int -> Int
+r4 :: Int -> Int
+rs0 :: Int -> Int
+rs1 :: Int -> Int
+rh0 :: Int -> Int
+rtwice :: (Int -> Int) -> Int -> Int
+
+rchain :: Int -> Int
+rchain x = r0 (r1 (r2 (r3 (r4 (rs0 (rs1 (rh0 x)))))))
+
+rapply :: Int -> Int
+rapply x = rtwice r3 (rtwice rs1 (rtwice rh0 x))

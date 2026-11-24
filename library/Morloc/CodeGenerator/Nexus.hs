@@ -18,6 +18,8 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
+import Data.Foldable (toList)
+import Morloc.Data.Zip (indexed, indexedFrom, zipExact, zipSame)
 import qualified Control.Monad as CM
 import Morloc.CodeGenerator.DimContract (dimConstraints)
 import Morloc.System (shellQuote)
@@ -49,6 +51,7 @@ import Morloc.CodeGenerator.Docstrings (underOptional)
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Express (recursiveTargetOf)
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.NumericLiteral as NL
@@ -61,6 +64,8 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Language as ML
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Typecheck.Internal (indexMethods, sliceMethods)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Version
@@ -167,13 +172,13 @@ instance HasCmdDocSet GastData where
 -- an @IFile@, which is the file itself and is handed on by its path.
 stageReplayArgs :: HasCmdDocSet a => Set.Set EVar -> a -> a
 stageReplayArgs replayEntries x
-  | Set.member (termNameOf x) replayEntries =
-      let ds = docSetOf x
-          args' = zipWith stage (cmdDocArgs ds) (map Just (argAstsOf x) ++ repeat Nothing)
-       in setDocSet ds { cmdDocArgs = args' } x
+  | Set.member (termNameOf x) replayEntries
+  , Just pairs <- zipExact (cmdDocArgs ds) (argAstsOf x) =
+      setDocSet ds { cmdDocArgs = map (uncurry stage) pairs } x
   | otherwise = x
   where
-    stage (CmdArgPos r) (Just ast)
+    ds = docSetOf x
+    stage (CmdArgPos r) ast
       | underOptional (wireShape ast) /= WIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
     stage a _ = a
 
@@ -231,6 +236,8 @@ data NexusExpr
   | NamX Text [(Text, NexusExpr)]
   | StrX Text Text
   | LitX LitType Text
+  | EnumX Text Int
+  -- ^ a constructor of an enum: its schema and its tag byte
   | ShowX Text NexusExpr  -- schema (return type = Str), child expression
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
@@ -292,6 +299,18 @@ data NexusExpr
   | TryX      Text NexusExpr
     -- ^ result schema (@Try Str a@), body. Evaluate the body under a
     -- catch and materialize @Ok value@ or @Err message@ into the result.
+  | CondX     Text [([(Text, NexusExpr)], NexusExpr, NexusExpr)] NexusExpr
+    -- ^ result schema, arms, else value: a chain of guards as one node, so
+    -- its manifest depth does not grow with its length (EMIT-5). An arm is
+    -- the lets written before its test, which scope over the rest of the
+    -- chain, its test and its value.
+  | ChainX    Text Bool [([(Text, NexusExpr)], NexusExpr)]
+    -- ^ Bool schema, and (@True@) or or, operands each with the lets
+    -- written before it: a chain of one short-circuit operator as one node
+    -- (EMIT-5).
+  | LetsX     Text [(Text, NexusExpr)] NexusExpr
+    -- ^ result schema, lets in order, body: a run of nested lets as one
+    -- node (EMIT-5).
   | IfX       Text NexusExpr NexusExpr NexusExpr
     -- ^ result schema, condition (Bool), then-branch, else-branch. The
     -- pure-nexus conditional: evaluate the condition and materialize the
@@ -472,11 +491,11 @@ checkExportedHigherOrder i name t = case findOffender t of
   where
     findOffender :: Type -> Maybe (MDoc, Type)
     findOffender (FunT ts ret) =
-      case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, Serial.containsFunT a] of
+      case [(n, a) | (n, a) <- indexedFrom 1 ts, Serial.containsFunT a] of
         ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
         [] | Serial.containsFunT ret ->
              Just ("return type contains a function", ret)
-           | otherwise -> case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, nestedSuspension a] of
+           | otherwise -> case [(n, a) | (n, a) <- indexedFrom 1 ts, nestedSuspension a] of
                ((n, a) : _) -> Just ("argument" <+> pretty n <+> "holds a suspension below its root", a)
                [] | nestedSuspension ret ->
                     Just ("return type holds a suspension below its root", ret)
@@ -501,7 +520,7 @@ nexusCtorTag :: AnnoS (Indexed Type) One () -> Text -> MorlocMonad Int
 nexusCtorTag (AnnoS (Idx i t) _ _) n = do
   scope <- MM.gets stateGeneralTypedefs
   case TE.enumCtors scope (TE.whnf scope (type2typeu t)) of
-    Just names | (k : _) <- [k' | (k', m) <- zip [0 ..] names, m == n] -> return k
+    Just names | Just k <- List.elemIndex n names -> return k
     _ -> MM.throwCompilerBugAt i $
       "no tag for constructor" <+> squotes (pretty n)
 
@@ -556,20 +575,26 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       Nothing -> build t
       where
         tryInner (EffectT _ inner) = tryInner inner
-        tryInner (AppT (VarT v) [_, a]) | v == MBT.tryVar = Just a
+        tryInner (AppT (VarT v) [_, TyA a]) | v == MBT.tryVar = Just a
         tryInner _ = Nothing
 
     -- PAT-5: the nexus brackets only a value that is a list on the wire.
     -- Another receiver an instance accepts is reached only through that
     -- instance, in a pool.
-    requireListReceiver (AnnoS (Idx ri rt) _ _) = do
+    requireListReceiver methods pev r@(AnnoS (Idx ri rt) _ _) = do
       Infer.requireDetermined ri rt
       ast <- generalTypeToSerialAST i rt
+      env <- MM.gets stateInstances
+      library <- MM.asks configLibrary
+      let native = case patReceiver pev of
+            Just ev -> maybe False (FI.nativeServes library env ev) (FI.evidenceMethod methods ev)
+            Nothing -> True
       case wireShape ast of
-        WList _ -> return ()
-        _ -> MM.throwSourcedError ri $
-          "A bracket step on" <+> pretty rt
-            <+> "needs its instance, which no language here can call"
+        WList _ | native -> return ()
+        _ -> needsInstance "A bracket step on" r
+    needsInstance :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad a
+    needsInstance what (AnnoS (Idx ri rt) _ _) =
+      MM.throwSourcedError ri $ what <+> pretty rt <+> "needs its instance, which no language here can call"
 
     type2schema :: Type -> MorlocMonad Text
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
@@ -581,6 +606,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- A suspension held as a value has no representation in the nexus
     -- evaluator, which has no closure values; it must be run in place
     -- (bound with <-) or realized in a pool.
+    patAppX t ft app =
+      AppX
+        <$> type2schema t
+        <*> (PatX <$> type2schema (funResult ft) <*> pure (patAppPattern app))
+        <*> mapM toNexusExpr (toList app)
+      where
+        funResult (FunT _ r) = r
+        funResult r = r
+
     heldSuspension :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad ()
     heldSuspension how (AnnoS (Idx ix (EffectT _ _)) _ _) =
       MM.throwSourcedError ix $
@@ -588,6 +622,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           <+> "the evaluator runs a suspension where it is written and cannot run it later."
           <+> "Run it first (x <- e), or give the function a language (source) so a pool holds it."
     heldSuspension _ _ = return ()
+
+    letBinds :: [(EVar, AnnoS (Indexed Type) One ())] -> MorlocMonad [(Text, NexusExpr)]
+    letBinds = mapM (\(v, e1) -> heldSuspension "bound with let" e1 >> (,) (render (pretty v)) <$> toNexusExpr e1)
 
     writeCheck :: Int -> Intrinsic -> AnnoS (Indexed Type) One () -> MorlocMonad ()
     writeCheck ix intr (AnnoS (Idx _ vt) _ _) =
@@ -614,63 +651,42 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- @(Null :: ?Int64)@ (from the desugar's empty-bound annotation),
     -- bare integer literals, and explicit @(_ :: Int*)@ annotations
     -- all pass.
-    -- IFile pattern detection at the nexus path: any PatCall on an
+    -- IFile pattern detection at the nexus path: any pattern on an
     -- IFile-typed receiver routes to the unified IFile walker rather
     -- than the generic Array/Tuple dispatch. The receiver is a u64
     -- handle, not an in-memory structure; the standard apply_*
     -- functions would cast garbage. Mirrors Express.hs's pool-path
     -- IFile detection.
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) [sE, eE, pE, rE])) = do
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ pev app@(PatSlice sE eE pE rE))) = do
       validateBracketBound "start" sE
       validateBracketBound "stop"  eE
       validateBracketBound "step"  pE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketSliceSteps [sE, eE, pE]
         else do
-          requireListReceiver rE
-          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) [iE, rE])) = do
+          requireListReceiver sliceMethods pev rE
+          patAppX t ft app
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ pev app@(PatIndex iE rE))) = do
       validateBracketBound "index" iE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketIndexSteps [iE]
         else do
-          requireListReceiver rE
-          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
-    -- PatternStruct app with brackets in the Selector. The first
-    -- bracketArity(sel) args are the bracket bounds (DFS order) and
-    -- the LAST arg is the receiver. IFile receivers route to the
-    -- walker; non-IFile receivers with bracket-in-Selector are
-    -- currently unsupported by the runtime (codegen for that case
-    -- isn't wired yet).
-    toNexusExpr (AnnoS (Idx midx t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) appArgs))
-      | bracketArity sel > 0 =
-          let n        = bracketArity sel
-              rE       = last appArgs
-              brackets = take n appArgs
-          in if length appArgs /= n + 1
-               then MM.throwSourcedError midx
-                      ("PatternStruct app with brackets: expected "
-                       <> pretty (n + 1)
-                       <> " args (bracket bounds + receiver), got "
-                       <> pretty (length appArgs))
-               else do
-                 mapM_ (validateBracketBound "bracket") brackets
-                 if recvIsIFile rE
-                   then do
-                     steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
-                     emitIFileWalkX t rE steps brackets
-                   else
-                     AppX <$> type2schema t
-                          <*> toNexusExpr funcE
-                          <*> mapM toNexusExpr appArgs
-    -- Pure-field PatternStruct getter on an IFile receiver (no
-    -- brackets, single receiver arg). Routes to the walker.
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall (PatternStruct sel)))) [rE]))
-      | recvIsIFile rE = do
+          requireListReceiver indexMethods pev rE
+          patAppX t ft app
+    -- A getter on an IFile receiver routes to the walker. A selector's
+    -- bracket bounds are in DFS order.
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ pev app@(PatGet sel bounds rE))) = do
+      mapM_ (validateBracketBound "bracket") bounds
+      if recvIsIFile rE
+        then do
           steps <- IFile.selectorToWalkSteps (annoIdx rE) sel
-          emitIFileWalkX t rE steps []
-      | otherwise =
-          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
+          emitIFileWalkX t rE steps bounds
+        else case patReceiver pev of
+          Just _ -> needsInstance "A getter on" rE
+          Nothing -> patAppX t ft app
+    toNexusExpr (AnnoS (Idx _ t) _ (PatS (Idx _ ft) _ _ app)) = do
+      mapM_ (heldSuspension "passed as an argument") app
+      patAppX t ft app
     -- a shared specialization the nexus calls by name
     toNexusExpr (AnnoS (Idx _ t) _ (AppS (AnnoS _ _ (CallS v)) es)) = do
       mapM_ (heldSuspension "passed as an argument") es
@@ -679,13 +695,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       mapM_ (heldSuspension "passed as an argument") es
       AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
-    toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = do
       mapM_ (heldSuspension "stored in a list") es
       LstX <$> type2schema t <*> mapM toNexusExpr es
     -- TupS construction. Multi-field patterns are no longer fragmented
-    -- at desugar time (they emit a unified PatCall (PatternStruct ...)
+    -- at desugar time (they emit a unified PatS (PatGet ...)
     -- instead), so any TupS reaching here is a user-written tuple
     -- literal or the legacy fall-back form for mixed-kind groups that
     -- can't be unified. Standard per-element rendering applies.
@@ -700,12 +715,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       resolveNumericToLitX litIx t (NL.RealSrc v)
     toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) =
       resolveNumericToLitX litIx t (NL.IntSrc v)
-    -- A `data` constructor is its tag byte, and an enum's voidstar form is
-    -- exactly that byte -- so the constructor needs no node of its own here,
-    -- only the one-byte literal it already is.
-    -- An argument-free constructor of an all-nullary type is its tag byte,
-    -- and that byte IS the value's wire form, so it needs no node of its
-    -- own here.
+    -- A constructor of an all-nullary type is its tag byte, with the
+    -- enum's schema, so a value saved or sent records its type ('EnumX').
     --
     -- The test is on the TYPE, not on this constructor's arity: a nullary
     -- arm of a payload-bearing type still has the 16-byte tagged-pointer
@@ -715,7 +726,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (ConS tv _ ordinal xs)) = do
       scope <- MM.gets stateGeneralTypedefs
       if TE.dataIsEnum scope (TE.whnf scope (VarU tv))
-        then return $ LitX U8X (MT.pack (show ordinal))
+        then EnumX <$> type2schema t <*> pure ordinal
         else do
           sch <- type2schema t
           fields <- mapM toNexusExpr xs
@@ -732,18 +743,27 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       OptionalT _ -> OptNullX <$> type2schema t
       _           -> return $ LitX NullX "0"
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
-    -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
-    toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
-      heldSuspension "bound with let" e1
-      schema <- type2schema t
-      e1X <- toNexusExpr e1
-      bodyX <- toNexusExpr body
-      return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
-    toNexusExpr (AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) =
-      IfX <$> type2schema ift
-          <*> toNexusExpr cond
-          <*> toNexusExpr thenB
-          <*> toNexusExpr elseB
+    -- A run of lets is one node, however long (EMIT-5).
+    toNexusExpr e@(AnnoS (Idx _ t) _ (LetS _ _ _)) =
+      let (binds, body) = letRun e
+       in LetsX <$> type2schema t <*> letBinds binds <*> toNexusExpr body
+    -- A chain of three or more operands of one short-circuit operator is
+    -- a chain node; any other chain of conditionals in else position is a
+    -- chain of guards, which every conditional is (EMIT-5).
+    toNexusExpr e@(AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) = case shortChain e of
+      Just (isAnd, operands@(_ : _ : _ : _)) ->
+        ChainX <$> type2schema ift <*> pure isAnd
+          <*> mapM (\(bs, o) -> (,) <$> letBinds bs <*> toNexusExpr o) operands
+      _ -> case guardArms e of
+        (arms@(_ : _ : _), final) ->
+          CondX <$> type2schema ift
+            <*> mapM (\(bs, c, t) -> (,,) <$> letBinds bs <*> toNexusExpr c <*> toNexusExpr t) arms
+            <*> toNexusExpr final
+        _ ->
+          IfX <$> type2schema ift
+            <*> toNexusExpr cond
+            <*> toNexusExpr thenB
+            <*> toNexusExpr elseB
     -- The nexus evaluator has no closure values, so it runs a suspension
     -- where it is written. That is the law's own rule at a force, since
     -- running a suspension just built is running its body; every other
@@ -803,9 +823,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
       Serial.checkReadDataType ix IntrRead t >>
       withTryResult t (\inner -> ReadX <$> type2schema inner <*> toNexusExpr arg)
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr [a@(AnnoS (Idx _ ta) _ _), b]))
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS intr [a@(AnnoS (Idx _ ta) _ _), b]))
       | intr `elem` [IntrEq, IntrLe] = do
-          pairSchema <- type2schema (AppT (VarT (MBT.tuple 2)) [ta, ta])
+          generalTypeToSerialAST ix ta >>= Serial.checkComparable ix intr (pretty ta)
+          pairSchema <- type2schema (AppT (VarT (MBT.tuple 2)) [TyA ta, TyA ta])
           pair <- TupX pairSchema <$> mapM toNexusExpr [a, b]
           CompareX (intrinsicName intr) <$> type2schema t <*> pure pair
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
@@ -842,7 +863,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           peelHead ot = ot
           head_ = peelHead handleT
           elemT = case handleT of
-            AppT _ (a : _) -> a
+            AppT _ (TyA a : _) -> a
             _ -> handleT
       case head_ of
         VarT v
@@ -872,8 +893,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
-      writeCheck ix IntrWrite valE >>
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS w [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)]))
+      | isWrite w =
+      writeCheck ix w valE >>
       withTryResult t (\_ -> WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE
@@ -900,7 +922,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       StderrX <$> type2schema (handleStorageOfResult t)
     -- @ifile_walk: synthesised by Express.hs on pool-bound manifolds.
     -- Args: [pathExpr (Str lit), handle, runtime args...]. The nexus
-    -- path normally constructs IFileWalkX directly from PatCall +
+    -- path normally constructs IFileWalkX directly from a pattern +
     -- IFile-receiver detection (see toNexusExpr cases above); this
     -- handler exists to support any future site that synthesises the
     -- IntrinsicS form directly.
@@ -945,19 +967,19 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         "a command with `@parse` arguments must dispatch to a foreign pool;"
           <+> "here the command and its parsers are all morloc code. Call a"
           <+> "foreign function in the command or in its parsers."
-    toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
-      MM.throwSourcedError iTmp $
-        "the whole-list `@with`/`@render` handler currently requires a command"
-          <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
-          <+> "command is not yet supported. Add the `@stream` modifier for"
-          <+> "per-batch streaming, or involve a foreign function in the"
-          <+> "command body."
-    -- The fold accumulator lives in the runtime and its step and combine
-    -- run in a pool. The nexus interpreter cannot call a morloc function
-    -- by name, so a pure (all-morloc) folding command is rejected here
-    -- rather than falling off the evaluator.
+    toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS intr _))
+      | intr `elem` [IntrTmpfile, IntrGather, IntrGatherPut, IntrGatherNative, IntrGatherPutNative] =
+          MM.throwSourcedError iTmp $
+            "the whole-list `@with`/`@render` handler currently requires a command"
+              <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
+              <+> "command is not yet supported. Add the `@stream` modifier for"
+              <+> "per-batch streaming, or involve a foreign function in the"
+              <+> "command body."
+    -- A fold's slots are held in the pool where its step runs. The nexus
+    -- interpreter holds none, so a pure (all-morloc) folding command is
+    -- rejected here rather than falling off the evaluator.
     toNexusExpr (AnnoS (Idx iCell _) _ (IntrinsicS intr _))
-      | intr `elem` [IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce] =
+      | intr `elem` [IntrFold, IntrFoldFile, IntrFoldPut] =
           MM.throwSourcedError iCell $
             "a folding `@render`/`@with` handler currently requires a command"
               <+> "that dispatches to a foreign pool; a pure (all-morloc) fold"
@@ -980,10 +1002,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       StrX <$> type2schema t <*> pure v
     -- one used as a value is the lambda that calls it
     toNexusExpr (AnnoS (Idx _ (FunT ts r)) _ (CallS v)) = do
-      vars <- mapM (const (MM.getCounter >>= \k -> return ("call`" <> MT.pack (show k)))) ts
-      argSchemas <- mapM type2schema ts
+      args <- CM.forM ts $ \t -> do
+        k <- MM.getCounter
+        s <- type2schema t
+        return ("call`" <> MT.pack (show k), s)
       rs <- type2schema r
-      return $ LamX vars (CallX rs (render (pretty v)) (zipWith BndX argSchemas vars))
+      return $ LamX (map fst args) (CallX rs (render (pretty v)) [BndX s x | (x, s) <- args])
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
 
@@ -1017,7 +1041,7 @@ resolveNumericToLitX litIx t src = do
 -- effect + handle head and delegates to 'MBT.handleStorageType'.
 handleStorageOfResult :: Type -> Type
 handleStorageOfResult t = case stripEffect t of
-  AppT (VarT v) (a : _) -> MBT.handleStorageType v a
+  AppT (VarT v) (TyA a : _) -> MBT.handleStorageType v a
   other -> other
 
 resolveCompileTimeIntrinsic :: Intrinsic -> MorlocMonad Text
@@ -1373,7 +1397,7 @@ argToJson key mEmit mGeneral _ armSchemas _ (CmdArgAlt r) =
                 , ("schema", maybe jsonNull jsonStr
                     (lookup (Key (altArmCtor arm <> "/" <> MT.pack (show i))) armSchemas))
                 ]
-            | (i, ft) <- zip [(0 :: Int) ..] (altArmFields arm)
+            | (i, ft) <- indexed (altArmFields arm)
             ])
         ]
 argToJson key mEmit mGeneral _ _ entryShapes (CmdArgGrp r) =
@@ -1457,16 +1481,18 @@ isQuotedArg _literal mSource many mshape =
 -- than re-rendering.
 validateArgSpecs :: Int -> [CmdArg] -> [SerialAST] -> [Text] -> MorlocMonad ()
 validateArgSpecs i cmdargs asts schemas = do
-  CM.when (length cmdargs /= length asts || length asts /= length schemas) $
-    MM.throwCompilerBug $
-      "command at index" <+> pretty i <+> "has" <+> pretty (length cmdargs)
-        <+> "documented arguments," <+> pretty (length asts) <+> "wire forms and"
-        <+> pretty (length schemas) <+> "schemas"
-  loc <- Docstrings.argLocPrefix i
-  CM.zipWithM_ (validateOne loc) (zip3 [(1::Int) ..] cmdargs schemas) asts
+  case zipExact cmdargs asts >>= (`zipExact` schemas) of
+    Nothing ->
+      MM.throwCompilerBug $
+        "command at index" <+> pretty i <+> "has" <+> pretty (length cmdargs)
+          <+> "documented arguments," <+> pretty (length asts) <+> "wire forms and"
+          <+> pretty (length schemas) <+> "schemas"
+    Just entries -> do
+      loc <- Docstrings.argLocPrefix i
+      mapM_ (validateOne loc) (indexedFrom 1 entries)
   where
-    validateOne :: MDoc -> (Int, CmdArg, Text) -> SerialAST -> MorlocMonad ()
-    validateOne loc (n, arg, schemaText) ast = do
+    validateOne :: MDoc -> (Int, ((CmdArg, SerialAST), Text)) -> MorlocMonad ()
+    validateOne loc (n, ((arg, ast), schemaText)) = do
       let argLoc = loc <> "argument #" <> pretty n
       case arg of
         CmdArgPos r -> do
@@ -1570,7 +1596,7 @@ checkDefault loc ast defaultText =
       , "Default text:"
       , pretty (truncateForMsg defaultText)
       ]
-    Right value -> validateValueAgainstAST loc Map.empty rootPath ast value
+    Right value -> validateValueAgainstAST loc [] rootPath ast value
 
 -- Recurse into the entries of an unrolled record group, matching them
 -- against the SerialObject's per-field parameters.
@@ -1594,7 +1620,7 @@ validateAlt loc r ast = do
 altVariantArms :: SerialAST -> Maybe [(Text, [SerialAST])]
 altVariantArms (SerialPack _ (_, inner)) = altVariantArms inner
 altVariantArms (SerialOptional _ inner) = altVariantArms inner
-altVariantArms (SerialVariant _ _ as) = Just as
+altVariantArms (SerialVariant _ _ _ as) = Just as
 altVariantArms (SerialEnum _ _ ns) = Just [(n, []) | n <- ns]
 altVariantArms _ = Nothing
 
@@ -1603,7 +1629,7 @@ altVariantArms _ = Nothing
 -- reads a field's value on its own.
 altArmFieldSchemas :: SerialAST -> [(Text, [Text])]
 altArmFieldSchemas ast0 = case peelPack ast0 of
-    v@(SerialVariant _ _ as) ->
+    v@(SerialVariant _ _ _ as) ->
       [ (n, [render (Serial.serialAstToMsgpackSchema (Serial.rerootUnder v f)) | f <- fs])
       | (n, fs) <- as ]
     SerialEnum _ _ ns -> [(n, []) | n <- ns]
@@ -1644,11 +1670,10 @@ validateGroup loc r ast = case peelGroupAst ast of
 -- Default-value validation
 -- ----------------------------------------------------------------------
 
--- | Recursive-type env: each entry binds a TVar (a declared type's name)
--- to the SerialAST that declared it, so back-references can resolve.
--- Bound at every named node on entry; consulted at SerialRec and at a
--- variant back-reference.
-type RecEnv = Map.Map TVar SerialAST
+-- | Recursive-type env: the named nodes enclosing the value, innermost
+-- first, with the arguments each was built at, so a back-reference
+-- resolves as the wire schema's does (Serial.backRefMatches).
+type RecEnv = [((TVar, [ArgF]), SerialAST)]
 
 -- | The "JSON path" within the default value at which validation is
 -- currently happening, used to anchor mismatch diagnostics. Local to
@@ -1703,27 +1728,21 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- whose value lists the arm's fields; an arm taking no arguments is
   -- still spelled bare. An unlisted name falls through to the mismatch
   -- reporter, which names the whole legal set.
-  -- A variant with no arms is a back-reference to the enclosing
-  -- declaration of its name.
-  (SerialVariant (FV v _) _ [], _) -> backRef v
   (SerialEnum _ _ ctors, Aeson.String name)
     | name `elem` ctors -> return ()
-  (SerialVariant _ _ arms, Aeson.String name)
+  (SerialVariant _ _ _ arms, Aeson.String name)
     | Just [] <- lookup name arms -> return ()
-  (SerialVariant _ _ arms, Aeson.Object o)
+  (SerialVariant _ _ _ arms, Aeson.Object o)
     | [(k, fieldsVal)] <- KM.toList o
     , Just fieldAsts <- lookup (AesonKey.toText k) arms
     , Aeson.Array vs <- fieldsVal
-    , V.length vs == length fieldAsts ->
-        CM.zipWithM_
-          (\fieldAst v -> validateValueAgainstAST loc env path fieldAst v)
-          fieldAsts
-          (V.toList vs)
+    , Just pairs <- zipExact fieldAsts (V.toList vs) ->
+        mapM_ (uncurry (validateValueAgainstAST loc env path)) pairs
 
   -- Lists: array, with an optional fixed-length constraint.
   (SerialList _ dim elemAst, Aeson.Array arr) -> do
     case dim of
-      Just (NatLitF n) | fromIntegral (V.length arr) /= n ->
+      Just (NatLitK n) | fromIntegral (V.length arr) /= n ->
         MM.throwRejected $ formatBlock
           [ loc <> ": default" <> pathAt path <> " is an array of length "
               <> pretty (V.length arr) <> ", expected length "
@@ -1732,14 +1751,15 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
           , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
           ]
       _ -> return ()
-    CM.zipWithM_
-      (\j v -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") elemAst v)
-      [(0::Int) ..]
-      (V.toList arr)
+    CM.forM_ (indexed (V.toList arr)) $ \(j, v) ->
+      validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") elemAst v
 
   -- Tuples: array of exactly the right length.
   (SerialTuple _ subs, Aeson.Array arr)
-    | length subs /= V.length arr ->
+    | Just pairs <- zipExact subs (V.toList arr) ->
+        CM.forM_ (indexed pairs) $ \(j, (subAst, v)) ->
+          validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") subAst v
+    | otherwise ->
         MM.throwRejected $ formatBlock
           [ loc <> ": default" <> pathAt path <> " is an array of length "
               <> pretty (V.length arr) <> ", expected tuple of length "
@@ -1747,11 +1767,6 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
           , "Expected: " <> pretty (expectedJsonShape ast)
           , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
           ]
-    | otherwise ->
-        CM.zipWithM_
-          (\j (subAst, v) -> validateValueAgainstAST loc env (path <> "[" <> pretty j <> "]") subAst v)
-          [(0::Int) ..]
-          (zip subs (V.toList arr))
 
   -- Records: object form. Collect every missing required field up
   -- front so the diagnostic lists all of them at once (for a large
@@ -1778,7 +1793,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
         ]
 
   -- Recursive back-reference: look up the binding, recurse.
-  (SerialRec (FV v _) _, _) -> backRef v
+  (SerialRec (FV v _) ps, _) -> backRef v ps
 
   -- SerialUnknown: opaque type, cannot validate; allow anything.
   (SerialUnknown _, _) -> return ()
@@ -1788,11 +1803,11 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   where
     -- Every named node binds its name for the values beneath it, whatever
     -- kind of declaration it is.
-    env = maybe env0 (\v -> Map.insert v ast env0) (Serial.serialOuterName ast)
+    env = maybe env0 (\k -> (k, ast) : env0) (Serial.serialOuterKey ast)
 
-    backRef v = case Map.lookup v env of
-      Just bound -> validateValueAgainstAST loc env path bound value
-      Nothing -> MM.throwCompilerBug $
+    backRef v ps = case [b | (d, b) <- env, Serial.backRefMatches d v ps] of
+      (bound : _) -> validateValueAgainstAST loc env path bound value
+      [] -> MM.throwCompilerBug $
         loc <> ": unbound back-reference `" <> pretty (unTVar v)
           <> "` reached default-value validator" <> pathAt path
 
@@ -1877,7 +1892,7 @@ expectedJsonShape = go
     -- vocabulary fits in the message, which is the point of carrying
     -- the names rather than the ordinals.
     go (SerialEnum _ _ ns)           = "one of " <> MT.intercalate ", " ns
-    go (SerialVariant _ _ as)        = "one of " <> MT.intercalate ", " (map fst as)
+    go (SerialVariant _ _ _ as)        = "one of " <> MT.intercalate ", " (map fst as)
     go (SerialIFile _ _)             = "IFile path (Str)"
     go (SerialOStream _ _)           = "OStream path (Str)"
     go (SerialIStream _ _)           = "IStream path (Str)"
@@ -1897,7 +1912,7 @@ expectedJsonShape = go
     go (SerialUInt64 _)              = "U64"
     go (SerialOptional _ s)          = go s <> " | null"
     go (SerialList _ Nothing s)      = "[" <> go s <> "]"
-    go (SerialList _ (Just (NatLitF n)) s) =
+    go (SerialList _ (Just (NatLitK n)) s) =
       "[" <> go s <> "] of length " <> MT.pack (show n)
     go (SerialList _ _ s)            = "[" <> go s <> "]"
     go (SerialTuple _ ss)            =
@@ -2033,17 +2048,17 @@ cliDisplayType t0 = case t0 of
     VarT (TV ("{" <> MT.intercalate ", "
                      [unKey k <> " = " <> renderCliType ft | (k, ft) <- fields]
                  <> "}"))
-  AppT f ts -> case filter (not . isPhantomSlot) (map cliDisplayType ts) of
+  AppT f ts -> case filter (not . isPhantomSlot) (map (fmap cliDisplayType) ts) of
     []  -> cliDisplayType f
     ts' -> AppT (cliDisplayType f) ts'
   NamT o v ps fields ->
-    NamT o v (map cliDisplayType ps) [(k, cliDisplayType ft) | (k, ft) <- fields]
+    NamT o v (map (fmap cliDisplayType) ps) [(k, cliDisplayType ft) | (k, ft) <- fields]
   FunT ts t -> FunT (map cliDisplayType ts) (cliDisplayType t)
   EffectT es t -> EffectT es (cliDisplayType t)
   OptionalT t -> OptionalT (cliDisplayType t)
   _ -> t0
   where
-    isPhantomSlot (VoidT _) = True
+    isPhantomSlot (KiA (VoidT _)) = True
     isPhantomSlot _ = False
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity
@@ -2210,7 +2225,7 @@ collectDataTypes = do
   scope <- MM.gets stateGeneralTypedefs
   fmap Map.fromList . sequence $
     [ do
-        ctors <- CM.forM (zip table (map snd ctorDocs <> repeat defaultValue)) $
+        ctors <- CM.forM (zipSame table (map snd ctorDocs)) $
           \((name, fieldTs), vars) -> do
             fts <- mapM (Docstrings.resolveNestedTypes . typeOf) fieldTs
             return (name, fts, docLines vars)
@@ -2340,9 +2355,9 @@ namedTypesJson packedHeads instances recordTypes dataTypes ts =
                 let nm = render (pretty v)
                     seen' = nm : seen
                 in (o, nm, fields)
-                     : concatMap (go seen') ps
+                     : concatMap (go seen') (tyArgs ps)
                      <> concatMap (go seen' . snd) fields
-          AppT f as -> go seen f <> concatMap (go seen) as
+          AppT f as -> go seen f <> concatMap (go seen) (tyArgs as)
           FunT as b -> concatMap (go seen) as <> go seen b
           EffectT _ b -> go seen b
           OptionalT b -> go seen b
@@ -2365,11 +2380,11 @@ namedTypesJson packedHeads instances recordTypes dataTypes ts =
     headNames :: Type -> [TVar]
     headNames t = case t of
       VarT v -> [v]
-      AppT f as -> headNames f <> concatMap headNames as
+      AppT f as -> headNames f <> concatMap headNames (tyArgs as)
       FunT as b -> concatMap headNames as <> headNames b
       EffectT _ b -> headNames b
       OptionalT b -> headNames b
-      NamT _ _ ps fs -> concatMap headNames ps <> concatMap (headNames . snd) fs
+      NamT _ _ ps fs -> concatMap headNames (tyArgs ps) <> concatMap (headNames . snd) fs
       _ -> []
 
     packableEntries :: [Type] -> [Text]
@@ -2456,6 +2471,53 @@ flagRevShortJson _ = jsonNull
 -- Expression tree serialization
 -- ======================================================================
 
+bindsJson :: [(Text, NexusExpr)] -> Text
+bindsJson bs = jsonArr [jsonObj [("name", jsonStr n), ("value", exprToJson v)] | (n, v) <- bs]
+
+-- | A chain element's lets, left out when there are none.
+withBinds :: [(Text, NexusExpr)] -> [(Text, Text)] -> Text
+withBinds [] fields = jsonObj fields
+withBinds bs fields = jsonObj (("binds", bindsJson bs) : fields)
+
+-- | The lets at the head of an expression, in order, and what they scope
+-- over.
+letRun :: AnnoS (Indexed Type) One () -> ([(EVar, AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One ())
+letRun (AnnoS _ _ (LetS v e1 body)) = let (bs, rest) = letRun body in ((v, e1) : bs, rest)
+letRun e = ([], e)
+
+-- | The operands of a chain of one short-circuit operator (BASE-3), each
+-- with the lets written before it: @c && rest@ is
+-- @if c then rest else False@ and @c || rest@ is @if c then True else rest@.
+shortChain ::
+  AnnoS (Indexed Type) One () ->
+  Maybe (Bool, [([(EVar, AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One ())])
+shortChain e = case e of
+  AnnoS _ _ (IfS c x (AnnoS _ _ (LogS False))) -> Just (True, ([], c) : operands True x)
+  AnnoS _ _ (IfS c (AnnoS _ _ (LogS True)) x) -> Just (False, ([], c) : operands False x)
+  _ -> Nothing
+  where
+    operands op x =
+      let (bs, x') = letRun x
+       in case shortChain x' of
+            Just (op', (_, c1) : rest) | op' == op -> (bs, c1) : rest
+            _ -> [([], x)]
+
+-- | The arms of a chain of conditionals nested in else position, each with
+-- the lets written before its test, and the value when no test holds.
+guardArms ::
+  AnnoS (Indexed Type) One () ->
+  ( [([(EVar, AnnoS (Indexed Type) One ())], AnnoS (Indexed Type) One (), AnnoS (Indexed Type) One ())]
+  , AnnoS (Indexed Type) One ()
+  )
+guardArms = go []
+  where
+    go bs (AnnoS _ _ (IfS c t x)) =
+      let (bs', x') = letRun x
+       in case x' of
+            AnnoS _ _ (IfS {}) -> let (arms, final) = go bs' x' in ((bs, c, t) : arms, final)
+            _ -> ([(bs, c, t)], x)
+    go _ e = ([], e)
+
 exprToJson :: NexusExpr -> Text
 exprToJson (LitX lt v) =
   jsonObj
@@ -2463,6 +2525,15 @@ exprToJson (LitX lt v) =
     , ("schema", jsonStr (litSchemaStr lt))
     , ("lit_type", jsonStr (litSchemaStr lt))
     , ("value", jsonStr v)
+    ]
+-- The byte is read as a U8 and carries the enum's schema, so a value saved
+-- or sent records its type.
+exprToJson (EnumX schema ordinal) =
+  jsonObj
+    [ ("tag", jsonStr "lit")
+    , ("schema", jsonStr schema)
+    , ("lit_type", jsonStr (litSchemaStr U8X))
+    , ("value", jsonStr (MT.pack (show ordinal)))
     ]
 exprToJson (StrX schema v) =
   jsonObj
@@ -2702,6 +2773,27 @@ exprToJson (TryX schema body) =
     , ("schema", jsonStr schema)
     , ("body", exprToJson body)
     ]
+exprToJson (CondX schema arms elseX) =
+  jsonObj
+    [ ("tag", jsonStr "cond")
+    , ("schema", jsonStr schema)
+    , ("cases", jsonArr [withBinds bs [("cond", exprToJson c), ("then", exprToJson t)] | (bs, c, t) <- arms])
+    , ("else", exprToJson elseX)
+    ]
+exprToJson (ChainX schema isAnd args) =
+  jsonObj
+    [ ("tag", jsonStr "chain")
+    , ("schema", jsonStr schema)
+    , ("and", jsonBool isAnd)
+    , ("args", jsonArr [withBinds bs [("arg", exprToJson a)] | (bs, a) <- args])
+    ]
+exprToJson (LetsX schema binds body) =
+  jsonObj
+    [ ("tag", jsonStr "lets")
+    , ("schema", jsonStr schema)
+    , ("binds", bindsJson binds)
+    , ("body", exprToJson body)
+    ]
 exprToJson (IfX schema cond thenX elseX) =
   jsonObj
     [ ("tag", jsonStr "if")
@@ -2832,9 +2924,11 @@ data ManifestInputs = ManifestInputs
   , miModuleDoc           :: ![Text]
   , miModuleEpilogues     :: ![[Text]]
   , miUnsafeSkipNullCheck :: !Bool
+  , miUnsafeSkipUtf8Check :: !Bool
   , miInlineSize          :: !(Maybe Int64)
   , miNoShm               :: !Bool
   , miTmpdir              :: !(Maybe Path)
+  , miEnvPrefix           :: !(Maybe FilePath)
   , miSourceHashes        :: !(Map.Map Lang [(FilePath, Word64)])
   , miRebuild             :: !(Maybe RebuildRecipe)
     -- ^ How to repeat an installed program's build
@@ -2888,6 +2982,7 @@ buildManifest ManifestInputs{..} =
     , ("desc", jsonStrArr miModuleDoc)
     , ("epilogues", jsonArr (map jsonStrArr miModuleEpilogues))
     , ("unsafe_skip_null_check", jsonBool miUnsafeSkipNullCheck)
+    , ("unsafe_skip_utf8_check", jsonBool miUnsafeSkipUtf8Check)
     , ("inline_size", maybe jsonNull jsonInt64 miInlineSize)
     , ("no_shm", jsonBool miNoShm)
     , ("tmpdir", maybe jsonNull (jsonStr . MT.pack) miTmpdir)
@@ -2907,6 +3002,7 @@ buildManifest ManifestInputs{..} =
         , ("morloc_version", jsonStr (MT.pack Morloc.Version.versionStr))
         , ("build_params", jsonStr miBuildParams)
         , ("rebuild", maybe "null" rebuildJson miRebuild)
+        , ("env_prefix", maybe jsonNull (jsonStr . MT.pack) miEnvPrefix)
         ]
 
     rebuildJson :: RebuildRecipe -> Text
@@ -2945,9 +3041,12 @@ buildManifest ManifestInputs{..} =
     makeExecArgs lang =
       let name = ML.langName lang
           isCompiled = LR.registryIsCompiled miRegistry name
-          runCmd = case Map.lookup name (MC.configLangOverrides miConfig) of
-            Just cmd -> map MT.unpack cmd
-            Nothing -> map MT.unpack (LR.registryRunCommand miRegistry name)
+          -- An override names the interpreter; the language's own
+          -- arguments to it are kept.
+          base = LR.registryRunCommand miRegistry name
+          runCmd = map MT.unpack $ case Map.lookup name (MC.configLangOverrides miConfig) of
+            Just cmd -> cmd <> drop 1 base
+            Nothing -> base
           -- Relative to the manifest's own directory (the build dir). The
           -- runtime nexus resolves this against dirname(manifest.json), so
           -- the build directory is position-independent and relocatable.
@@ -3170,7 +3269,7 @@ buildManifest ManifestInputs{..} =
                 CmdArgAlt _ ->
                   [ (Key (arm <> "/" <> MT.pack (show i)), fs)
                   | (arm, fss) <- altArmFieldSchemas ast
-                  , (i, fs) <- zip [(0 :: Int) ..] fss ]
+                  , (i, fs) <- indexed fss ]
                 _ -> []
               entryShapes = case a of
                 CmdArgGrp _ -> groupEntryShapes ast
@@ -3226,16 +3325,39 @@ generate cs rASTs helperRASTs = do
   config <- MM.ask
   st <- CMS.get
 
-  -- 'findAllLangsSAnno' does not follow @CallS@ back-edges into hoisted
-  -- helper bodies, so it can't see cross-language calls that live only
-  -- inside them. Merge helper-reachable sockets into every command's
-  -- 'fdataSubSockets' as a safe upper bound; the runtime otherwise fails
-  -- to spin up pools referenced only by helpers.
-  helperSockets <- fmap concat (mapM findSockets helperRASTs)
+  -- 'findAllLangsSAnno' does not follow @CallS@ edges into other pool trees
+  -- (hoisted helpers, shared specializations, recursive exports), so each
+  -- command adds the sockets of every tree holding a manifold its calls
+  -- reach, transitively. A call resolves as pool codegen resolves it
+  -- ('recursiveTargetOf'); one that resolves to no tree counts every
+  -- tree's sockets.
+  let allTrees = map fst rASTs <> helperRASTs
+  nameMap <- MM.gets stateName
+  recTargets <- MM.gets stateRecursionTargets
+  -- the map lowerPools later records as 'stateManifoldLang'
+  let langMap = Map.fromList [(i, lang) | AnnoS (Idx i _) (Idx _ lang) _ <- allTrees]
+  treeInfo <- fmap Map.fromList . CM.forM allTrees $ \t@(AnnoS (Idx i _) _ _) ->
+    (,) i . (,) (calledNames t) <$> findSockets t
+  let treesOfNode = Map.fromListWith (<>)
+        [(n, [i]) | t@(AnnoS (Idx i _) _ _) <- allTrees, AnnoS (Idx n _) _ _ <- annoNodes t]
+      targetOf = recursiveTargetOf nameMap langMap recTargets
+      treesOfCall v = targetOf v >>= (`Map.lookup` treesOfNode)
+      everySocket = concatMap snd (Map.elems treeInfo)
+      reachTrees seen unresolved [] = (seen, unresolved)
+      reachTrees seen unresolved (v : vs) = case treesOfCall v of
+        Nothing -> reachTrees seen True vs
+        Just is -> case filter (`Set.notMember` seen) is of
+          [] -> reachTrees seen unresolved vs
+          new -> reachTrees (foldr Set.insert seen new) unresolved
+                   (concat [maybe [] fst (Map.lookup i treeInfo) | i <- new] <> vs)
+      callSocketsOf r = case reachTrees Set.empty False (calledNames r) of
+        (_, True) -> everySocket
+        (reached, False) -> concat [ss | i <- Set.toList reached, Just (_, ss) <- [Map.lookup i treeInfo]]
 
   xs <- mapM makeFData rASTs
   fdataRaw <- CM.mapM getFData xs
-      |>> map (\fd -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) helperSockets })
+      |>> zipSame (map fst rASTs)
+      |>> map (\(r, fd) -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) (callSocketsOf r) })
 
   -- Extract data for pure commands. The copies of shared specializations a
   -- pure command calls are not commands: each command carries the ones it
@@ -3252,13 +3374,12 @@ generate cs rASTs helperRASTs = do
       reach seen (v : vs)
         | Set.member v seen = reach seen vs
         | otherwise = reach (Set.insert v seen) (Map.findWithDefault [] v callees <> vs)
-  namedGasts <- mapM (annotateGasts . snd) named
-  let namedOrder = [(n, commandExpr g) | ((n, _), g) <- zip named namedGasts]
-      withNamed t g = case reach Set.empty (callsOf t) of
+  namedOrder <- mapM (\(n, c) -> (\g -> (n, commandExpr g)) <$> annotateGasts c) named
+  let withNamed t g = case reach Set.empty (callsOf t) of
         used
           | Set.null used -> g
           | otherwise -> g {commandExpr = NamedX [(unEVar n, e) | (n, e) <- namedOrder, Set.member n used] (commandExpr g)}
-  gastsRaw <- zipWith withNamed (map fst exportCs) <$> mapM annotateGasts exportCs
+  gastsRaw <- mapM (\c -> withNamed (fst c) <$> annotateGasts c) exportCs
 
   -- Give each `mlcp_<parent>_<long>` internal command the parent's
   -- per-arg shape docs. Without this the dispatch loader sees the
@@ -3361,6 +3482,7 @@ generate cs rASTs helperRASTs = do
   moduleDoc <- MM.gets stateModuleDoc
   moduleEpilogues <- MM.gets stateModuleEpilogues
   unsafeSkipNullCheck <- MM.gets stateUnsafeSkipNullCheck
+  unsafeSkipUtf8Check <- MM.gets stateUnsafeSkipUtf8Check
   inlineSize <- MM.gets stateInlineSize
   noShm <- MM.gets stateNoShm
   tmpdir <- MM.gets stateTmpdir
@@ -3409,15 +3531,16 @@ generate cs rASTs helperRASTs = do
     ast <- generalTypeToSerialAST i t
     return (ev, (renderCliType t, render (Serial.serialAstToGeneralSchema ast)))
 
-  -- The batch type is recovered from the producer's sink signature, which does
-  -- not pass through the resolution that argument and return types get, so its
-  -- named types are still bare names. Resolve them here or the glossary has
+  -- The batch type is recorded from the command's signature before the
+  -- resolution that argument and return types get, so its named types are
+  -- still bare names. Resolve them here or the glossary has
   -- nothing to define.
   streamTypes <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
     t <- Docstrings.resolveNestedTypes (typeOf tu)
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances
+  envPrefix <- MM.gets stateEnvPrefix
   recordTypes <- collectRecordTypes
   dataTypes <- collectDataTypes
 
@@ -3437,9 +3560,11 @@ generate cs rASTs helperRASTs = do
             , miModuleDoc           = moduleDoc
             , miModuleEpilogues     = moduleEpilogues
             , miUnsafeSkipNullCheck = unsafeSkipNullCheck
+            , miUnsafeSkipUtf8Check = unsafeSkipUtf8Check
             , miInlineSize          = inlineSize
             , miNoShm               = noShm
             , miTmpdir              = tmpdir
+            , miEnvPrefix           = envPrefix
             , miSourceHashes        = sourceHashes
             , miRebuild             = rebuild
             , miBuildParams         = buildParams
@@ -3529,14 +3654,23 @@ makeWrapperScript mode selfRel manifestPath
   | selfRel =
       -- Resolve the launcher's own directory and find the manifest relative to
       -- it, so the build tree works wherever it is placed. $0 has a slash when
-      -- invoked by a path (the normal case); a bare name is located via PATH.
+      -- invoked by a path (the normal case); a bare name is located via PATH,
+      -- and one not on PATH (`sh name`) is in ".". A launcher reached through
+      -- a link is the file the link names, so links are followed one at a
+      -- time with plain readlink (POSIX, and macOS before 12.3 has no -f); a
+      -- relative target is relative to the link's directory, which cd -P
+      -- reads physically, as the kernel does. The directory is cut from
+      -- $self in the shell itself, sparing a dirname process per run: one
+      -- directly under / leaves "", which is "/".
       MT.unlines
         [ "#!/bin/sh"
         , manifestMarker manifestPath
         , "export MORLOC_PROG_NAME=\"$0\""
         , "self=\"$0\""
-        , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac"
-        , "d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)"
+        , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$0\") || self=./$0 ;; esac"
+        , "while [ -L \"$self\" ]; do l=$(readlink -- \"$self\"); case \"$l\" in /*) self=$l ;; *) self=${self%/*}/$l ;; esac; done"
+        , "case \"$self\" in */*) d=${self%/*} ;; *) d=. ;; esac"
+        , "d=$(CDPATH= cd -P -- \"${d:-/}\" && pwd)"
         , "exec morloc-nexus " <> modeToken mode
             <> " \"$d/" <> MT.pack (dquoteEsc manifestPath) <> "\" \"$@\""
         ]

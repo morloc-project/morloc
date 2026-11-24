@@ -16,7 +16,11 @@ module Morloc.TypeEval
   ( evaluateType
   , transformType
   , evaluateStep
+  , typeUParts
   , pairEval
+  , declaresFormAt
+  , declaresRecord
+  , growingInstance
   , reduceType
   , aliasChain
   , reduceTypeLeaves
@@ -31,6 +35,7 @@ module Morloc.TypeEval
   , flattenApp
   , headName
   , isTransparentAlias
+  , refersToItself
   , whnf
   , dataHead
   , dataCtors
@@ -41,6 +46,8 @@ module Morloc.TypeEval
   , enumCtors
   ) where
 
+import Morloc.Data.Zip (indexed, zipExact, zipSame)
+import Data.Either (isLeft)
 import qualified Data.Set as Set
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
@@ -63,11 +70,24 @@ pairEval ::
   Either MorlocError TypeU
 pairEval cscope gscope =
   -- transform the concrete type until an unresolvable node is reached
-  generalTransformType Set.empty id resolveGen cscope
+  generalTransformTypeWith prot (expandAliases gscope) emptyBound id resolveGen cscope
   where
+    -- A declared record is protected while it is expanded by its instance,
+    -- so a nested use at other arguments (the inner `Container Int` of
+    -- `Container (Container Int)`) is expanded too (NOM-3); a record that
+    -- would meet larger instances of itself is refused before this
+    -- ('growingRefs'). A recursive alias, in either scope, is not a
+    -- declared type and keeps the name cut. Any other type cannot meet
+    -- itself at other arguments, so its instance alone is protected.
+    prot = ByInstance cut
+    cut v
+      | declaresRecord gscope v = CutInstance
+      | refersToItself gscope v || refersToItself cscope v = CutByName
+      | otherwise = CutInstance
+
     -- resolve by attempting to evaluate one step as in the general scope
     resolveGen f bnd t =
-      case generalTransformType bnd (\_ _ -> return) resolveFail gscope t of
+      case generalTransformTypeWith prot id bnd (\_ _ -> return) resolveFail gscope t of
         (Right t') ->
           if t' /= t
             -- If general resolution succeeds, continue evaluation with
@@ -83,7 +103,7 @@ pairEval cscope gscope =
             then f (bumpBnd t bnd) t'
             -- if it fails, return to the concrete scope to handle failure without
             -- general resolution option
-            else generalTransformType Set.empty id resolveFail cscope t
+            else generalTransformType emptyBound id resolveFail cscope t
         -- gscope's general walk failed (typically because the head is
         -- a non-NamU newtype, which 'generalTransformType' treats as
         -- nominally opaque). For per-language form derivation, a
@@ -104,7 +124,7 @@ pairEval cscope gscope =
               -- parent type -- so this must be answered here rather than by
               -- 'expandNewtypeBodyOneStep'.
               | isDataType gscope t -> return t
-              | otherwise -> generalTransformType Set.empty id resolveFail cscope t
+              | otherwise -> generalTransformType emptyBound id resolveFail cscope t
 
     isDataType :: Scope -> TypeU -> Bool
     isDataType scope = isJust . dataHead scope . whnf scope
@@ -124,22 +144,144 @@ pairEval cscope gscope =
         NamU{} -> Nothing
         _
           | length paramKinds == length ts ->
-              let params = [p | Left (p, _) <- paramKinds]
-              in if length params == length ts
-                   then Just (parsubAll (zip params ts) body)
-                   else Nothing
+              Just (parsubAll (paramPairs paramKinds ts) body)
           | otherwise -> Nothing
       _ -> Nothing
     expandNewtypeBodyOneStep _ _ = Nothing
 
-    bumpBnd :: TypeU -> Set.Set TVar -> Set.Set TVar
-    bumpBnd (AppU (VarU v) _) bnd = Set.insert v bnd
-    bumpBnd (VarU v) bnd = Set.insert v bnd
+    bumpBnd :: TypeU -> Bound -> Bound
+    bumpBnd (AppU (VarU v) ts) bnd = protect prot v ts bnd
+    bumpBnd (VarU v) bnd = protect prot v [] bnd
     bumpBnd _ bnd = bnd
+
+-- | The types an expansion is inside of, which are not expanded again
+-- inside it: type variables and types protected by name, and types
+-- protected by instance (name and arguments as written).
+data Bound = Bound
+  { boundNames :: Set.Set TVar
+  , boundInsts :: Map.Map TVar (Set.Set [TypeU])
+  , boundTotal :: Int
+  -- ^ instances in 'boundInsts'
+  }
+
+emptyBound :: Bound
+emptyBound = Bound Set.empty Map.empty 0
+
+bindName :: TVar -> Bound -> Bound
+bindName v b = b {boundNames = Set.insert v (boundNames b)}
+
+-- | How an expansion protects the type it expands: by name, or as each
+-- name says.
+data Protection = ByName | ByInstance (TVar -> Cut)
+
+-- | How a name is protected: by name or by instance.
+data Cut = CutByName | CutInstance
+
+-- | Protect a type while its expansion is walked. However the names are
+-- protected, 256 nested instances in all fall back to the name cut, so a
+-- walk always ends.
+protect :: Protection -> TVar -> [TypeU] -> Bound -> Bound
+protect ByName v _ b = bindName v b
+protect (ByInstance cut) v ts b
+  | Set.member ts insts = b
+  | boundTotal b >= 256 = bindName v b
+  | otherwise = case cut v of
+      CutByName -> bindName v b
+      CutInstance -> b {boundInsts = Map.insert v (Set.insert ts insts) (boundInsts b), boundTotal = boundTotal b + 1}
+  where
+    insts = Map.findWithDefault Set.empty v (boundInsts b)
+
+-- | Whether a type is protected by its name.
+protectedByName :: Bound -> TVar -> Bool
+protectedByName b v = Set.member v (boundNames b)
+
+-- | Whether a type is protected by its instance.
+protectedByInstance :: Bound -> TVar -> [TypeU] -> Bool
+protectedByInstance b v ts = maybe False (Set.member ts) (Map.lookup v (boundInsts b))
+
+-- | Whether a name is declared as a record, object or table.
+declaresRecord :: Scope -> TVar -> Bool
+declaresRecord scope v = case Map.lookup v scope of
+  Just entries -> or [True | (_, NamU {}, _, _, _) <- entries]
+  Nothing -> False
+
+-- | Among declarations that refer to each other (each a name, its
+-- parameters and its body), the instance reached from one, at its own
+-- parameters, by following their references with aliases expanded, when
+-- those instances keep growing (@Nest [a]@ from @record Nest a@): such a type
+-- has no finite expansion. Nothing when they close (@T b a@ in @T a b@,
+-- @N Int [a]@ in @N a b@).
+growingInstance :: Map.Map TVar ([TVar], TypeU) -> Map.Map TVar ([TVar], TypeU) -> TVar -> Maybe TypeU
+growingInstance members aliases v0 = do
+  (ps0, _) <- Map.lookup v0 members
+  go Set.empty [(v0, map VarU ps0)]
+  where
+    go _ [] = Nothing
+    go seen ((w, as) : rest)
+      | Set.member (w, as) seen = go seen rest
+      | Set.size seen >= 256 || sum (map size as) > 256 = Just (AppU (VarU w) as)
+      | otherwise =
+          let next = case Map.lookup w members of
+                Just (ps, body) | length ps == length as -> refs (expand 64 (parsubAll (zipSame ps as) body))
+                _ -> []
+           in go (Set.insert (w, as) seen) (rest <> next)
+    refs t = case t of
+      AppU (VarU w) as | Map.member w members -> (w, as) : concatMap refs as
+      VarU w | Map.member w members -> [(w, [])]
+      _ -> concatMap refs (typeUParts t)
+    size t = 1 + sum (map size (typeUParts t)) :: Int
+    expand :: Int -> TypeU -> TypeU
+    expand 0 t = t
+    expand n t = case t of
+      AppU (VarU a) as | Just (ps, b) <- Map.lookup a aliases, length ps == length as -> expand (n - 1) (parsubAll (zipSame ps (map (expand n) as)) b)
+      VarU a | Just ([], b) <- Map.lookup a aliases -> expand (n - 1) b
+      AppU h as -> AppU (expand n h) (map (expand n) as)
+      FunU as r -> FunU (map (expand n) as) (expand n r)
+      OptionalU x -> OptionalU (expand n x)
+      EffectU e x -> EffectU e (expand n x)
+      LabeledU l x -> LabeledU l (expand n x)
+      NamU o v ps rs -> NamU o v (map (expand n) ps) [(k, expand n x) | (k, x) <- rs]
+      LitU (LList xs) -> LitU (LList (map (expand n) xs))
+      _ -> t
+
+-- | Whether a declaration refers to itself in its own body.
+refersToItself :: Scope -> TVar -> Bool
+refersToItself scope v = or [mentionsName body | (_, body, _, _, _) <- Map.findWithDefault [] v scope]
+  where
+    mentionsName t = varOf t == Just v || any mentionsName (typeUParts t)
+
+-- | The variable a type is, in any of its kinds.
+varOf :: TypeU -> Maybe TVar
+varOf t = case t of
+  VarU p -> Just p
+  NatVarU p -> Just p
+  StrVarU p -> Just p
+  RecVarU p -> Just p
+  ListVarU p -> Just p
+  SetVarU p -> Just p
+  KVarU (p, _) -> Just p
+  _ -> Nothing
+
+-- | The immediate parts of a type.
+typeUParts :: TypeU -> [TypeU]
+typeUParts t = case t of
+  AppU h as -> h : as
+  NamU _ _ ps rs -> ps <> map snd rs
+  FunU as r -> r : as
+  ForallU _ x -> [x]
+  EffectU _ x -> [x]
+  OptionalU x -> [x]
+  LabeledU _ x -> [x]
+  OpU _ as -> as
+  ExistU _ (ps, _) (rs, _) -> ps <> map snd rs
+  LitU (LRec fs) -> map snd fs
+  LitU (LList es) -> es
+  LitU (LSet es) -> es
+  _ -> []
 
 evaluateStep :: Scope -> TypeU -> Maybe TypeU
 evaluateStep scope t0 =
-  case generalTransformType Set.empty (\_ _ -> return) resolveFail scope t0 of
+  case generalTransformType emptyBound (\_ _ -> return) resolveFail scope t0 of
     (Left _) -> Nothing
     (Right t) -> Just t
 
@@ -198,8 +340,8 @@ reduceTypeLeaves scope t0 =
     descend bnd (NamU o n ps rs) =
       let bnd' = Set.insert n bnd
           (ps', cs1) = unzip (map (go bnd') ps)
-          (vs', cs2) = unzip (map (go bnd' . snd) rs)
-      in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
+          (rs', cs2) = unzip (map (\(k, v) -> first ((,) k) (go bnd' v)) rs)
+      in (NamU o n ps' rs', or (cs1 ++ cs2))
     descend bnd (EffectU effs t) =
       let (t', c) = go bnd t in (EffectU effs t', c)
     descend bnd (OptionalU t) =
@@ -212,8 +354,8 @@ reduceTypeLeaves scope t0 =
       let (ts', cs) = unzip (map (go bnd) ts)
       in (OpU op ts', or cs)
     descend bnd (LitU (LRec fs)) =
-      let (vs', cs) = unzip (map (go bnd . snd) fs)
-      in (LitU (LRec (zip (map fst fs) vs')), or cs)
+      let (fs', cs) = unzip (map (\(k, v) -> first ((,) k) (go bnd v)) fs)
+      in (LitU (LRec fs'), or cs)
     descend bnd (LitU (LList es)) =
       let (es', cs) = unzip (map (go bnd) es)
       in (LitU (LList es'), or cs)
@@ -224,15 +366,15 @@ reduceTypeLeaves scope t0 =
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
 transformType :: Scope -> TypeU -> Either MorlocError TypeU
-transformType = generalTransformType Set.empty id resolveFail
+transformType = generalTransformType emptyBound id resolveFail
 
 -- evaluate a type as far as possible given the type functions in scope
 evaluateType :: Scope -> TypeU -> Either MorlocError TypeU
-evaluateType = generalTransformType Set.empty id resolveIgnore
+evaluateType = generalTransformType emptyBound id resolveIgnore
 
 resolveIgnore ::
-  (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-  Set.Set TVar ->
+  (Bound -> TypeU -> Either MorlocError TypeU) ->
+  Bound ->
   TypeU ->
   Either MorlocError TypeU
 resolveIgnore f bnd (AppU (VarU v) ts) = AppU (VarU v) <$> mapM (f bnd) ts
@@ -240,8 +382,8 @@ resolveIgnore _ _ t@(VarU _) = return t
 resolveIgnore _ _ _ = MM.throwCompilerBug "resolveIgnore reached an unexpected branch"
 
 resolveFail ::
-  (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-  Set.Set TVar ->
+  (Bound -> TypeU -> Either MorlocError TypeU) ->
+  Bound ->
   TypeU ->
   Either MorlocError TypeU
 resolveFail _ _ (AppU (VarU v) _) =
@@ -255,26 +397,47 @@ resolveFail _ _ (VarU v) =
 resolveFail _ _ _ = MM.throwCompilerBug "resolveFail reached an unexpected branch"
 
 generalTransformType ::
-  Set.Set TVar ->
-  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-    Set.Set TVar ->
+  Bound ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
     TypeU ->
     Either MorlocError TypeU
   ) ->
-  ( (Set.Set TVar -> TypeU -> Either MorlocError TypeU) ->
-    Set.Set TVar ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
     TypeU ->
     Either MorlocError TypeU
   ) ->
   Scope -> -- may be general or concrete scope
   TypeU ->
   Either MorlocError TypeU
-generalTransformType bnd0 recurse' resolve' scope = f bnd0
+generalTransformType = generalTransformTypeWith ByName id
+
+-- | 'generalTransformType', comparing a type's arguments with a form's
+-- parameters through @norm@.
+generalTransformTypeWith ::
+  Protection ->
+  (TypeU -> TypeU) ->
+  Bound ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
+    TypeU ->
+    Either MorlocError TypeU
+  ) ->
+  ( (Bound -> TypeU -> Either MorlocError TypeU) ->
+    Bound ->
+    TypeU ->
+    Either MorlocError TypeU
+  ) ->
+  Scope ->
+  TypeU ->
+  Either MorlocError TypeU
+generalTransformTypeWith prot norm bnd0 recurse' resolve' scope = f bnd0
   where
     recurse = recurse' f
     resolve = resolve' recurse
 
-    f :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
+    f :: Bound -> TypeU -> Either MorlocError TypeU
     f bnd (ExistU v (ps, pc) (rs, rc)) = do
       ps' <- mapM (recurse bnd) ps
       rs' <- mapM (\(k, v') -> (,) k <$> recurse bnd v') rs
@@ -286,27 +449,15 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         (Just [(_, NamU o'' n'' _ _, _, _, _)]) -> return (n'', o'')
         -- Otherwise, keep the record name and form and recurse only into children
         _ -> return (n, o)
-      -- Bind BOTH the original and the substituted name inside the
-      -- record body so a recursive field referencing either form is
-      -- left alone. A field like @VarU n@ (original) or @VarU n'@
-      -- (concrete alias) would otherwise be looked up in scope and
-      -- re-expanded into the same NamU forever. Add both: when @n@ and
-      -- @n'@ differ (e.g. @record Tree where children :: [Tree]@ with a
-      -- concrete @record Py => Tree = "dict"@ mapping), the children
-      -- field still mentions the original @Tree@ name even though the
-      -- outer NamU is now named @dict@. See
-      -- plans/in-morloc-recursive-fields-* for context.
-      let bnd' = Set.insert n' (Set.insert n bnd)
-      ts' <- mapM (recurse bnd' . snd) rs
-      -- A structural record form holds in its fields every parameter its
-      -- representation uses, so a parameter with no form here is phantom and
-      -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
-      -- its parameters and needs each one.
-      ps' <-
-        if MT.isInfixOf "$" (unTVar n')
-          then mapM (recurse bnd') ps
-          else return [either (const p) id (recurse bnd' p) | p <- ps]
-      return $ NamU o' n' ps' (zip (map fst rs) ts')
+      -- Protect the record inside its own body, so a field referring to
+      -- it is left alone rather than expanded into the same NamU forever;
+      -- under instance protection only a reference at the same arguments
+      -- is. The substituted name (@record Py => Tree = "dict"@) is a form,
+      -- which no field names, and is protected by name.
+      let bnd' = (if n' /= n then bindName n' else id) (protect prot n ps bnd)
+      rs' <- mapM (traverse (recurse bnd')) rs
+      ps' <- formArgs bnd' n' ps
+      return $ NamU o' n' ps' rs'
     -- Flatten nested AppU heads first. Substituting a partial-applied
     -- class head into a method's @f a@ signature produces @AppU (AppU H
     -- [n]) [a]@; the parser-produced canonical shape is @AppU H [n,
@@ -324,27 +475,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       --   f :: Foo Int -> B
       --   -----------------
       --   f :: (Int, A) -> B
-      | Set.member v bnd = AppU (VarU v) <$> mapM (recurse bnd) ts
+      | protectedByName bnd v = AppU (VarU v) <$> mapM (recurse bnd) ts
+      -- A reference to an instance being expanded: the walk that consumes
+      -- this form ties it to that instance, so its arguments are left as
+      -- written rather than expanded again at every level.
+      | protectedByInstance bnd v ts = return t0
       -- Handle specialization, e.g.
       --   type Py => List Int64 = "np.ndarray" "int64"
       | otherwise =
           case Map.lookup v scope of
             (Just ts') -> do
-              mergedAliases <- foldlM (mergeAliases ts) Nothing (map Just ts') |>> fmap (renameTypedefs bnd)
+              mergedAliases <- fmap (renameTypedefs bnd) <$> lookupForm (map norm ts) t0 ts'
               case mergedAliases of
-                -- @v@ is added to bnd only when the substituted body is
-                -- a record (NamU): records are the one alias shape that
-                -- can be self-recursive via fields, and the bnd guard
-                -- short-circuits those self-references during the
-                -- walk. Non-record aliases (e.g. @type List a =
-                -- "vector<$1>" a@) must NOT add @v@ to bnd, otherwise a
-                -- nested use of the same alias in an argument position
-                -- (@List (List Real)@) hits the bnd guard at the inner
-                -- level and is left unevaluated, leaking the morloc
-                -- general name into generated code.
+                -- @v@ is protected only when its substituted body refers
+                -- to it: a non-recursive alias (@type List a =
+                -- "vector<$1>" a@) protected by name would leave a nested
+                -- use of itself (@List (List Real)@) unevaluated, leaking
+                -- the morloc name into generated code.
                 (Just (vs, newType, _, isTerminal, kind)) ->
-                  let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
-                      substituted = parsubAll (zip vs ts) newType
+                  let bnd' = if isSelfRecursive v newType then protect prot v ts bnd else bnd
+                      substituted = parsubAll [(v', t') | (Just v', t') <- zipSame vs ts] newType
                   in case (kind, isTerminal) of
                        -- Newtype and primitive are nominal for typeclass
                        -- instance lookup, but a record newtype's per-language
@@ -366,11 +516,9 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        (TypedefEnum, _) -> resolve bnd t0
                        (TypedefAlias, True) -> terminate bnd' substituted
                        (TypedefAlias, False) -> recurse bnd' substituted
-                Nothing ->
-                  MM.throwRejected $
-                    "No matching alias found for" <+> pretty t0
-                      <> "\n  Available aliases have"
-                      <+> pretty (length ts') <+> "entries, none match the given arguments"
+                -- forms are declared only for other arguments: this type
+                -- has none of its own here (NATIVE-2)
+                Nothing -> resolve bnd t0
             _ -> resolve bnd t0
     -- t may be existential
     f bnd (AppU t ts) = AppU <$> recurse bnd t <*> mapM (recurse bnd) ts
@@ -379,7 +527,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     -- -----------------
     -- f :: A -> B
     f bnd t0@(VarU v)
-      | Set.member v bnd = return t0
+      | protectedByName bnd v || protectedByInstance bnd v [] = return t0
       | otherwise = case Map.lookup v scope of
           (Just []) -> return t0
           (Just ts1) -> do
@@ -401,7 +549,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
               -- @Foo@ in bnd. See `isSelfRecursive` for the structural
               -- check.
               (Just (_, t2, _, isTerminal, kind)) ->
-                let bnd' = if isSelfRecursive v t2 then Set.insert v bnd else bnd
+                let bnd' = if isSelfRecursive v t2 then protect prot v [] bnd else bnd
                 in case kind of
                      -- Newtype: opaque for instance lookup, but a record
                      -- newtype (NamU body) is transparent for per-language
@@ -421,7 +569,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                     <> "\n  Available aliases have"
                     <+> pretty (length ts1) <+> "entries, none match"
           Nothing -> resolve bnd t0
-    f bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
+    f bnd (ForallU v t) = ForallU v <$> recurse (bindName v bnd) t
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
     f _ t@(NatVarU _) = return t  -- nat vars are not type aliases
@@ -449,13 +597,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     f bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
-    terminate :: Set.Set TVar -> TypeU -> Either MorlocError TypeU
+    -- A structural record form holds in its fields every parameter its
+    -- representation uses, so a parameter with no form here is phantom and
+    -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
+    -- its parameters and needs each one.
+    formArgs :: Bound -> TVar -> [TypeU] -> Either MorlocError [TypeU]
+    formArgs bnd form ps
+      | MT.isInfixOf "$" (unTVar form) = mapM (recurse bnd) ps
+      | otherwise = mapM keep ps
+      where
+        keep p = case recurse bnd p of
+          Left (Rejected _ _) -> Right p
+          r -> r
+
+    terminate :: Bound -> TypeU -> Either MorlocError TypeU
     terminate bnd (ExistU v (ts, tc) (rs, rc)) = do
       ts' <- mapM (recurse bnd) ts
       rs' <- mapM (secondM (recurse bnd)) rs
       return $ ExistU v (ts', tc) (rs', rc)
     terminate bnd (FunU ts t) = FunU <$> mapM (recurse bnd) ts <*> recurse bnd t
-    terminate bnd (ForallU v t) = ForallU v <$> recurse (Set.insert v bnd) t
+    terminate bnd (ForallU v t) = ForallU v <$> recurse (bindName v bnd) t
     terminate bnd (AppU t ts) = AppU t <$> mapM (recurse bnd) ts
     terminate bnd (NamU o v ts rs) =
       -- Same bnd-extension as in @f@ above. We only have the local name
@@ -464,8 +625,8 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       -- aliases. @terminate@ is reached only after a full evaluation,
       -- by which point the recursive references inside @rs@ already
       -- reference whichever name @v@ holds.
-      let bnd' = Set.insert v bnd
-      in NamU o v <$> mapM (recurse bnd') ts <*> mapM (secondM (recurse bnd')) rs
+      let bnd' = protect prot v ts bnd
+      in NamU o v <$> formArgs bnd' v ts <*> mapM (secondM (recurse bnd')) rs
     terminate _ (VarU v) = return (VarU v)
     terminate _ t@(NatVarU _) = return t
     terminate _ t@(IntVarU _) = return t
@@ -492,23 +653,26 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     terminate bnd (LitU (LSet es)) = LitU . LSet <$> mapM (recurse bnd) es
     terminate bnd (LabeledU n t) = LabeledU n <$> recurse bnd t
 
+    -- A parameter list with one slot per parameter, Nothing for a
+    -- specialized one, so the slots stay aligned with the arguments.
     renameTypedefs ::
-      Set.Set TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([TVar], TypeU, ArgDoc, Bool, TypedefKind)
+      Bound -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> ([Maybe TVar], TypeU, ArgDoc, Bool, TypedefKind)
     renameTypedefs _ ([], t, d, isTerminal, kind) = ([], t, d, isTerminal, kind)
     renameTypedefs bnd (Left (v@(TV x), _) : vs, t, d, isTerminal, kind)
-      | Set.member v bnd =
+      | Set.member v (boundNames bnd) =
           let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
               v' =
                 head
-                  [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' bnd), x' `notElem` vs'
+                  [ x' | x' <- [TV (MT.show' i <> x) | i <- [(0 :: Int) ..]], not (Set.member x' (boundNames bnd)), Just x' `notElem` vs'
                   ]
               t'' = substituteTVar v (VarU v') t'
-           in (v' : vs', t'', d', isTerminal', kind')
+           in (Just v' : vs', t'', d', isTerminal', kind')
       | otherwise =
           let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
-           in (v : vs', t', d', isTerminal', kind')
+           in (Just v : vs', t', d', isTerminal', kind')
     renameTypedefs bnd (Right _ : vs, t, d, isTerminal, kind) =
-      renameTypedefs bnd (vs, t, d, isTerminal, kind)
+      let (vs', t', d', isTerminal', kind') = renameTypedefs bnd (vs, t, d, isTerminal, kind)
+       in (Nothing : vs', t', d', isTerminal', kind')
 
     -- True iff the substituted body contains a back-reference to the
     -- alias's own name (e.g. @record LL where tail :: ?LL@'s body
@@ -540,98 +704,139 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
         go _                   = False
 
     -- When a type alias is imported from two places, this function reconciles them, if possible
-    mergeAliases ::
-      [TypeU] ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
-    mergeAliases _ Nothing Nothing = Right Nothing
-    mergeAliases tsMain Nothing (Just b)
-      | checkAlias tsMain b = Right (Just b)
-      | otherwise = Right Nothing
-    mergeAliases tsMain (Just a) Nothing
-      | checkAlias tsMain a = Right (Just a)
-      | otherwise = Right Nothing
-    -- TODO: should the docstring args be considered here?
-    mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1, kind1)) (Just b@(ts2, t2, _, isTerminal2, kind2))
-      -- if both are invalid, return nothing
-      | not aIsValid && not bIsValid = Right Nothing
-      -- if one is valid and the other isn't, return the valid one
-      | aIsValid && not bIsValid = Right (Just a)
-      | not aIsValid && bIsValid = Right (Just b)
-      -- if they are both valid AND they are identical AND there is no specialization, return the first
-      | -- the return types are the same
-        isSubtypeOf t1 t2
-          && isSubtypeOf t2 t1
-          -- there is no specialization
-          && nonspecialized
-          -- the return type is concrete, not an alias for something else
-          && isTerminal1 == isTerminal2
-          -- and both are the same kind of definition (alias vs newtype)
-          && kind1 == kind2 =
-          return (Just a)
-      -- handle specialization
-      | not nonspecialized = return $ selectSpecialization a b
-      -- Two fully-generic terminal alias bodies for the same nominal
-      -- type, with different concrete forms. This happens when distinct
-      -- modules each declare their own per-language override for the
-      -- newtype (e.g. table-py maps @Vector@ to a Python @list@ for
-      -- table operations, while vector-py maps it to @numpy.ndarray@).
-      -- The bodies are NOT subtype-comparable here -- they are concrete
-      -- forms in disjoint spaces -- so a per-language conflict is a
-      -- user's choice between competing definitions, not a type error.
-      -- Keep the first definition; the order is determined by import
-      -- order at scope-build time.
-      | nonspecialized
-      , isTerminal1 && isTerminal2
-      , kind1 == TypedefAlias && kind2 == TypedefAlias =
-          return (Just a)
-      | otherwise =
-          MM.throwRejected $
-            "Cannot merge conflicting type aliases:"
-              <> "\n  t1:" <+> pretty t1
-              <> "\n  t2:" <+> pretty t2
-      where
-        aIsValid = checkAlias tsMain a
-        bIsValid = checkAlias tsMain b
-        -- True if all parameters in both aliases are generic
-        nonspecialized =
-          all
-            (\(x, y) -> either (\_ -> either (const True) (const False) y) (const False) x)
-            (zip ts1 ts2)
+mergeAliases ::
+  [TypeU] ->
+  Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
+mergeAliases _ Nothing Nothing = Right Nothing
+mergeAliases tsMain Nothing (Just b)
+  | checkAlias tsMain b = Right (Just b)
+  | otherwise = Right Nothing
+mergeAliases tsMain (Just a) Nothing
+  | checkAlias tsMain a = Right (Just a)
+  | otherwise = Right Nothing
+-- TODO: should the docstring args be considered here?
+mergeAliases tsMain (Just a@(ts1, t1, _, isTerminal1, kind1)) (Just b@(ts2, t2, _, isTerminal2, kind2))
+  -- if both are invalid, return nothing
+  | not aIsValid && not bIsValid = Right Nothing
+  -- if one is valid and the other isn't, return the valid one
+  | aIsValid && not bIsValid = Right (Just a)
+  | not aIsValid && bIsValid = Right (Just b)
+  -- if they are both valid AND they are identical AND there is no specialization, return the first
+  | -- the return types are the same
+    isSubtypeOf t1 t2
+      && isSubtypeOf t2 t1
+      -- there is no specialization
+      && nonspecialized
+      -- the return type is concrete, not an alias for something else
+      && isTerminal1 == isTerminal2
+      -- and both are the same kind of definition (alias vs newtype)
+      && kind1 == kind2 =
+      return (Just a)
+  -- handle specialization
+  | not nonspecialized = return $ selectSpecialization a b
+  -- Two fully-generic terminal alias bodies for the same nominal
+  -- type, with different concrete forms. This happens when distinct
+  -- modules each declare their own per-language override for the
+  -- newtype (e.g. table-py maps @Vector@ to a Python @list@ for
+  -- table operations, while vector-py maps it to @numpy.ndarray@).
+  -- The bodies are NOT subtype-comparable here -- they are concrete
+  -- forms in disjoint spaces -- so a per-language conflict is a
+  -- user's choice between competing definitions, not a type error.
+  -- Keep the first definition; the order is determined by import
+  -- order at scope-build time.
+  | nonspecialized
+  , isTerminal1 && isTerminal2
+  , kind1 == TypedefAlias && kind2 == TypedefAlias =
+      return (Just a)
+  | otherwise =
+      MM.throwRejected $
+        "Cannot merge conflicting type aliases:"
+          <> "\n  t1:" <+> pretty t1
+          <> "\n  t2:" <+> pretty t2
+  where
+    aIsValid = checkAlias tsMain a
+    bIsValid = checkAlias tsMain b
+    -- True if all parameters in both aliases are generic
+    nonspecialized =
+      all
+        (\(x, y) -> either (\_ -> either (const True) (const False) y) (const False) x)
+        (zipSame ts1 ts2)
 
-    selectSpecialization ::
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)
-    selectSpecialization a@(aps0, _, _, _, _) b@(bps0, _, _, _, _) = g aps0 bps0
-      where
-        g [] _ = Just a
-        g _ [] = Just b
-        g ((Right _) : _) ((Left _) : _) = Just a
-        g ((Left _) : _) ((Right _) : _) = Just b
-        g ((Left _) : aps) ((Left _) : bps) = g aps bps
-        g ((Right ta) : aps) ((Right tb) : bps)
-          | isSubtypeOf ta tb && isSubtypeOf tb ta = g aps bps
-          | isSubtypeOf ta tb && not (isSubtypeOf tb ta) = Just b
-          | not (isSubtypeOf ta tb) && isSubtypeOf tb ta = Just a
-          | otherwise = Nothing
+selectSpecialization ::
+  ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
+  Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)
+selectSpecialization a@(aps0, _, _, _, _) b@(bps0, _, _, _, _) = g aps0 bps0
+  where
+    g [] _ = Just a
+    g _ [] = Just b
+    g ((Right _) : _) ((Left _) : _) = Just a
+    g ((Left _) : _) ((Right _) : _) = Just b
+    g ((Left _) : aps) ((Left _) : bps) = g aps bps
+    g ((Right ta) : aps) ((Right tb) : bps)
+      | isSubtypeOf ta tb && isSubtypeOf tb ta = g aps bps
+      | isSubtypeOf ta tb && not (isSubtypeOf tb ta) = Just b
+      | not (isSubtypeOf ta tb) && isSubtypeOf tb ta = Just a
+      | otherwise = Nothing
 
-    checkAlias ::
-      [TypeU] ->
-      ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) ->
-      Bool
-    checkAlias ts1 (ts2, _, _, _, _) =
-      length ts1 == length ts2
-        && all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zip ts1 ts2)
+-- | The form a scope declares for a type at its arguments. A declaration with
+-- another number of parameters is an error, and so are two matching
+-- specializations neither of which is more specific. A type whose forms are
+-- all language forms declared at other arguments has none here (NATIVE-1).
+lookupForm ::
+  [TypeU] ->
+  TypeU ->
+  [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] ->
+  Either MorlocError (Maybe ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind))
+lookupForm ts t0 entries = case filter (checkAlias ts) entries of
+  []
+    | all (\(ps, _, _, terminal, _) -> terminal && length ps == length ts) entries -> Right Nothing
+    | otherwise -> noMatch
+  ms -> foldlM (mergeAliases ts) Nothing (map Just ms) >>= maybe ambiguous (Right . Just)
+  where
+    ambiguous =
+      MM.throwRejected $
+        "Two forms match" <+> pretty t0 <+> "and neither is more specific than the other"
+    noMatch =
+      MM.throwRejected $
+        "No matching alias found for" <+> pretty t0
+          <> "\n  Available aliases have" <+> pretty (length entries) <+> "entries, none match the given arguments"
+
+-- | Whether a declaration's parameters match a type's arguments.
+checkAlias :: [TypeU] -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> Bool
+checkAlias ts1 (ts2, _, _, _, _) =
+  maybe False (all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y)) (zipExact ts1 ts2)
+
+-- | Whether a concrete scope declares a form for a type at its arguments,
+-- compared with the general scope's aliases expanded: a form declared only at
+-- other arguments is not one (NATIVE-1). A declaration that does not fit is
+-- counted as one, so the error it gives is not hidden.
+declaresFormAt :: Scope -> Scope -> TypeU -> Bool
+declaresFormAt cscope gscope t = case flattenApp t of
+  AppU (VarU v) ts -> at v ts
+  VarU v -> at v []
+  NamU _ v _ _ -> not (null (Map.findWithDefault [] v cscope))
+  ForallU _ x -> declaresFormAt cscope gscope x
+  LabeledU _ x -> declaresFormAt cscope gscope x
+  _ -> False
+  where
+    at v ts = case Map.findWithDefault [] v cscope of
+      [] -> False
+      entries -> either (const True) isJust (lookupForm (map (expandAliases gscope) ts) t entries)
+
+-- | A type with the general scope's aliases expanded, for comparison.
+expandAliases :: Scope -> TypeU -> TypeU
+expandAliases gscope t = either (const t) id (evaluateType gscope t)
 
 -- | Replace several type variables at once: an argument that names another
 -- parameter is not substituted again.
 parsubAll :: [(TVar, TypeU)] -> TypeU -> TypeU
 parsubAll pairs body =
-  let fresh = [TV ("#" <> MT.show' j) | j <- [0 .. length pairs - 1]]
-      named = foldr parsub body (zip (map fst pairs) (map VarU fresh))
-   in foldr parsub named (zip fresh (map snd pairs))
+  let held = [(p, a, TV ("#" <> MT.show' j)) | (j, (p, a)) <- indexed pairs]
+      named = foldr (\(p, _, h) -> parsub (p, VarU h)) body held
+   in foldr (\(_, a, h) -> parsub (h, a)) named held
 
 -- Replace a type variable with an expression. For example:
 -- parsub ("a", "Int") -> "Map a b" -> "Map Int b"
@@ -663,7 +868,7 @@ parsub (v, t2) t1@(ListVarU v0)
 parsub (v, t2) t1@(SetVarU v0)
   | v0 == v = t2
   | otherwise = t1
-parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (zip (map fst rs) (map (parsub pair . snd) rs), rc)
+parsub pair (ExistU t (ts, tc) (rs, rc)) = ExistU t (map (parsub pair) ts, tc) (map (second (parsub pair)) rs, rc)
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
 parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
@@ -733,11 +938,8 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
     (Just ((paramKinds, body, _, _, kind) : _))
       | stopAt kind -> Nothing
       | length paramKinds == length args ->
-          let params = [p | Left (p, _) <- paramKinds]
-          in if length params == length args
-             then Just $ parsubAll (zip params args) body
-             else Nothing
-      | length args < length paramKinds ->
+          Just $ parsubAll (paramPairs paramKinds args) body
+      | length args < length paramKinds, all isLeft paramKinds ->
           -- Kind-based realignment: bind type-kinded params from `args`
           -- in order, fill kind-kinded params (Nat/Str) with their
           -- void sentinels. This mirrors the macro indexing convention:
@@ -748,7 +950,7 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
               strParams  = [p | Left (p, KindStr)  <- paramKinds]
           in if length typeParams == length args
              then Just $ parsubAll
-                    (zip typeParams args
+                    (zipSame typeParams args
                       ++ [(p, NatVoidU) | p <- natParams]
                       ++ [(p, StrVoidU) | p <- strParams])
                     body
@@ -834,8 +1036,8 @@ expandLeavesOnce scope t0 =
     descend bnd (NamU o n ps rs) =
       let bnd' = Set.insert n bnd
           (ps', cs1) = unzip (map (go bnd') ps)
-          (vs', cs2) = unzip (map (go bnd' . snd) rs)
-      in (NamU o n ps' (zip (map fst rs) vs'), or (cs1 ++ cs2))
+          (rs', cs2) = unzip (map (\(k, v) -> first ((,) k) (go bnd' v)) rs)
+      in (NamU o n ps' rs', or (cs1 ++ cs2))
     descend bnd (EffectU effs t) =
       let (t', c) = go bnd t in (EffectU effs t', c)
     descend bnd (OptionalU t) =
@@ -848,8 +1050,8 @@ expandLeavesOnce scope t0 =
       let (ts', cs) = unzip (map (go bnd) ts)
       in (OpU op ts', or cs)
     descend bnd (LitU (LRec fs)) =
-      let (vs', cs) = unzip (map (go bnd . snd) fs)
-      in (LitU (LRec (zip (map fst fs) vs')), or cs)
+      let (fs', cs) = unzip (map (\(k, v) -> first ((,) k) (go bnd v)) fs)
+      in (LitU (LRec fs'), or cs)
     descend bnd (LitU (LList es)) =
       let (es', cs) = unzip (map (go bnd) es)
       in (LitU (LList es'), or cs)
@@ -916,7 +1118,7 @@ dataCtorsAt scope (Whnf t) = case t of
 dataCtorsOf :: Scope -> TVar -> [TypeU] -> Maybe [(MT.Text, [TypeU])]
 dataCtorsOf scope v args = do
   (params, cs) <- dataDeclOfName scope v
-  let inst = instantiateParams (zip params args)
+  let inst = instantiateParams (zipSame params args)
   return [(c, map inst fs) | (c, fs) <- cs]
 
 -- | The type parameters of a `data` declaration.

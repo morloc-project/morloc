@@ -10,35 +10,40 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
   `morloc_packet_size`) check every length against the packet's own header,
   not against the bytes the caller holds. Taking `(ptr, len)` is an ABI
   change (/work/plans/brittleness-2026-10-23/1-abi-bundle-proposal.md).
-- [read] RT:843-844 (`make_footer_packet`): a footer sets `offset = length = body length`, so the
+- [read] RT:841-842 (`make_footer_packet`): a footer sets `offset = length = body length`, so the
   generic size counts the body twice. Decide what the fields mean.
-- [speculative] RT:844, 853: footer and metadata block lengths cast
-  `as u32`; an index over 4 GiB is written corrupt.
-- [read] packet_ffi.rs's other file-source readers (the FILE branches near
-  the voidstar, msgpack and print paths) and cache.rs truncate a path at
-  4096 bytes and read a non-UTF-8 one as ""; `get_morloc_data_packet_value`
-  refuses both.
-- [read] `get_morloc_data_packet_value` rejects inline JSON that
-  `packet.rs::get_data_value` accepts.
 - [read] FMT-1: the `version` field is never read, and the header is written
   in host byte order though FMT-1 says little-endian.
-- [read] `PacketHeader::total_size()` (morloc-runtime-types packet.rs)
-  returns `offset + length` without the 32-byte header; a caller taking it
-  for the packet's size is 32 bytes short.
-- [read] morloc-runtime-types compression.rs `subpacket_elem_count`: `off + 32` and
-  `start + length` are unchecked sums.
-- [read, 2026-11-01] stream_format.rs `try_read_footer` (~537-550): a
-  tail footer length below 32 passes the `footer_start + 32 > size` test,
-  then `footer_slice[..32]` panics. A corrupt outside file crashes the
-  reader instead of returning Err.
-- [read, 2026-11-01] cache.rs `hash_morloc_packet` (~924), CALL branch:
-  each nested `arg_size` is not bounded by the outer length before
-  `from_raw_parts`. The same walk in `read_morloc_call_packet` is bounded.
-- [read, 2026-11-01] stream_format.rs `parse_stream_file`: subpacket index
-  offsets are never checked for order or range, and `ForwardScan.partial`
-  (set when a sub-packet runs past the end) is discarded.
+- [read, 2026-11-01] stream_format.rs `parse_stream_file` discards
+  `ForwardScan.partial` (set when a sub-packet runs past the end).
 - [speculative, 2026-11-01] ipc_ffi.rs ~698 `let copied =
   have.min(packet_length)` drops bytes past the first packet from one
   4096-byte head read; a pipelined peer would lose its second packet. The
   declared length is malloc'd before any byte arrives (NET-10).
-- [read, 2026-11-01] packet.rs `PacketHeader::total_size` has no caller.
+- [reproduced 2026-11-02] `@stdin` IStream allocates a stdin sub-packet's
+  claimed length before its bytes arrive (`stdio_bridge::read_into_shm`):
+  a 69-byte input claiming 2^40 bytes makes a 1 TiB file-backed volume
+  before failing (exit 1). Do not rerun at that size. The value lands in
+  one SHM block and there is no SHM realloc, so reading first means a
+  copy of every large legitimate packet; needs a choice (bounded direct
+  allocation, then staging past a size?).
+- [read 2026-11-02] daemon_ffi.rs `reply_reference` reads the reply
+  through packet_ffi.rs `rptr_payload_of` (:937-949), which checks the
+  packet type and length but not the magic.
+- [read 2026-11-04] Metadata lengths still cast with `as u32`:
+  packet_ffi.rs `new_metadata_size as u32` and `extended_offset as u32`
+  (original metadata plus a frame index, as compression.rs's now-checked
+  one), morloc-runtime-types compression.rs:965, cache.rs:1069,
+  intrinsics.rs:171, stream_format.rs:894. `meta_len_u32` is crate-private to
+  morloc-runtime-types.
+- [read 2026-11-04] ipc.rs `read_packet` skips `offset - 32` bytes of
+  metadata (offset is the metadata length: offset 0 underflows, offset 64
+  leaves 32 metadata bytes as payload) and `send_and_receive` skips none;
+  both allocate `length` before any byte. Public API, no internal callers.
+- [read 2026-11-04] The FILE-packet writers (`make_data_indirection_packet`,
+  `make_program_file_packet`, `make_table_file_packet`) accept a path of
+  any length; every reader refuses one past 4096 bytes, so the refusal
+  happens in another process, far from where the path was made.
+- [read 2026-11-04] The FILE-source readers take a packet pointer whose
+  size comes from its own header (`read_file_payload`,
+  `stream_file_payload`), so their bounds rest on the caller.

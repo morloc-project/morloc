@@ -1,0 +1,15 @@
+-- A recursive record nested in itself seven deep is generated and round
+-- trips.
+module main (trip)
+
+import root-cpp
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+source Cpp from "c.hpp" ("same")
+same :: a -> a
+
+trip :: Container (Container (Container (Container (Container (Container (Container (Int))))))) -> Container (Container (Container (Container (Container (Container (Container (Int)))))))
+trip x = same x

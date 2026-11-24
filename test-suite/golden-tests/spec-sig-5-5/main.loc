@@ -1,0 +1,14 @@
+-- Spec SIG-5: a literal at a signature's constrained variable does not
+-- narrow the export; the term still runs at each type a use gives it.
+module main (f, g, k)
+
+import root-py
+
+f :: Integral a => a -> a
+f x = x + 1
+
+g :: Real -> Real
+g y = f y
+
+k :: Int -> Int
+k y = f y

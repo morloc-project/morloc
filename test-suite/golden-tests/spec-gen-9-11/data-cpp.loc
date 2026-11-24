@@ -1,0 +1,34 @@
+-- A `data` type whose parameter is held only through a phantom one
+-- (`Tag a`), directly or through a record (`R a`), holds no value of it, so
+-- its native type takes no parameter for it (rustc refuses an unused one).
+module main (idW, idR, idV, idX)
+
+import root-cpp
+
+data Tag a = Tagged Int | Untagged
+
+data W a = W (Tag a) | Nil
+
+data V a = V (R a) | Empty
+
+-- an arm whose native form spells no argument (an IFile is an offset)
+data X a = X (IFile a) | NoX
+
+record R a where
+  t :: Tag a
+  n :: Int
+
+source Cpp from "f.hpp" ("same")
+same :: a -> a
+
+idW :: W Real -> W Real
+idW x = same x
+
+idR :: R Str -> R Str
+idR x = same x
+
+idV :: V Int -> V Int
+idV x = same x
+
+idX :: X Int -> X Int
+idX x = same x

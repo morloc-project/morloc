@@ -97,6 +97,11 @@ pub enum MorlocExpressionType {
                        // like TagTest, from the Array header it already holds.
     Equal = 35,        // (a, b) -> Bool: the two values are equal (@eq).
     LessEq = 36,       // (a, b) -> Bool: a orders before or with b (@le).
+    Cond = 37,         // n (test, value) arms + else -> value: the value of
+                       // the first arm whose test holds (EMIT-5).
+    Chain = 38,        // n operands -> Bool: `&&` or `||` over them, each
+                       // evaluated only while the chain is undecided (EMIT-5).
+    Lets = 39,         // n lets + body -> value: a run of lets (EMIT-5).
 }
 
 #[repr(C)]
@@ -171,7 +176,6 @@ pub struct MorlocDataArray {
     pub values: *mut *mut MorlocExpression,
 }
 
-#[repr(C)]
 // Primitive contains a pointer (s: *mut c_char), so DataUnion uses ManuallyDrop
 #[repr(C)]
 pub union DataUnion {
@@ -304,6 +308,78 @@ pub struct MorlocIFileWalkExpression {
     pub n_args: u64,
 }
 
+// A zeroed array of `n` pointers (at least one slot).
+unsafe fn ptr_array<T>(n: usize) -> Result<*mut *mut T, MorlocError> {
+    let arr = libc::calloc(n.max(1), std::mem::size_of::<*mut T>()) as *mut *mut T;
+    if arr.is_null() {
+        return Err(MorlocError::Other("out of memory building an expression".into()));
+    }
+    Ok(arr)
+}
+
+// The lets of a JSON "binds" array; null when there are none.
+unsafe fn build_binds(je: Option<&serde_json::Value>) -> Result<*mut MorlocBinds, MorlocError> {
+    let binds = match je.and_then(|v| v.as_array()) {
+        Some(bs) if !bs.is_empty() => bs,
+        _ => return Ok(ptr::null_mut()),
+    };
+    let n = binds.len();
+    let names = ptr_array::<c_char>(n)?;
+    let values = ptr_array::<MorlocExpression>(n)?;
+    for (i, b) in binds.iter().enumerate() {
+        let name = b.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            MorlocError::Other("a let is missing its name".into())
+        })?;
+        *names.add(i) = CString::new(name)
+            .map_err(|_| MorlocError::Other("a let name holds a NUL".into()))?
+            .into_raw();
+        *values.add(i) = build_expr(b.get("value").unwrap_or(&serde_json::Value::Null))?;
+    }
+    let bx = libc::calloc(1, std::mem::size_of::<MorlocBinds>()) as *mut MorlocBinds;
+    if bx.is_null() {
+        return Err(MorlocError::Other("out of memory building an expression".into()));
+    }
+    (*bx).names = names;
+    (*bx).values = values;
+    (*bx).n = n as u64;
+    Ok(bx)
+}
+
+// Lets in order: `values[i]` is bound to `names[i]` (EMIT-5).
+#[repr(C)]
+pub struct MorlocBinds {
+    pub names: *mut *mut c_char,
+    pub values: *mut *mut MorlocExpression,
+    pub n: u64,
+}
+
+// A chain of guards (EMIT-5): `binds[i]`, `conds[i]` and `thens[i]` are one
+// arm; an arm's lets scope over the rest of the chain.
+#[repr(C)]
+pub struct MorlocCondExpression {
+    pub binds: *mut *mut MorlocBinds,
+    pub conds: *mut *mut MorlocExpression,
+    pub thens: *mut *mut MorlocExpression,
+    pub n: u64,
+    pub else_branch: *mut MorlocExpression,
+}
+
+// A chain of `&&` (is_and = 1) or `||` operands, each after its lets (EMIT-5).
+#[repr(C)]
+pub struct MorlocChainExpression {
+    pub binds: *mut *mut MorlocBinds,
+    pub args: *mut *mut MorlocExpression,
+    pub n: u64,
+    pub is_and: u8,
+}
+
+// A run of lets and the body they scope over (EMIT-5).
+#[repr(C)]
+pub struct MorlocLetsExpression {
+    pub binds: *mut MorlocBinds,
+    pub body: *mut MorlocExpression,
+}
+
 #[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
@@ -324,6 +400,9 @@ pub union ExprUnion {
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
     pub ifile_walk_expr: *mut MorlocIFileWalkExpression,
+    pub cond_expr: *mut MorlocCondExpression,
+    pub chain_expr: *mut MorlocChainExpression,
+    pub lets_expr: *mut MorlocLetsExpression,
 }
 
 #[repr(C)]
@@ -1473,6 +1552,83 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             let sc = c_schema(schema_str)?;
             (*expr).schema = sc;
             (*expr).expr.if_expr = ifx;
+            Ok(expr)
+        }
+
+        "cond" => {
+            let cases = je.get("cases").and_then(|v| v.as_array()).ok_or_else(|| {
+                MorlocError::Other("cond expression is missing its cases".into())
+            })?;
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("cond expression is missing its result schema".into())
+            })?;
+            let n = cases.len();
+            let binds = ptr_array::<MorlocBinds>(n)?;
+            let conds = ptr_array::<MorlocExpression>(n)?;
+            let thens = ptr_array::<MorlocExpression>(n)?;
+            for (i, case) in cases.iter().enumerate() {
+                *binds.add(i) = build_binds(case.get("binds"))?;
+                *conds.add(i) = build_expr(case.get("cond").unwrap_or(&serde_json::Value::Null))?;
+                *thens.add(i) = build_expr(case.get("then").unwrap_or(&serde_json::Value::Null))?;
+            }
+            let else_branch = build_expr(je.get("else").unwrap_or(&serde_json::Value::Null))?;
+            let cx = libc::calloc(1, std::mem::size_of::<MorlocCondExpression>()) as *mut MorlocCondExpression;
+            (*cx).binds = binds;
+            (*cx).conds = conds;
+            (*cx).thens = thens;
+            (*cx).n = n as u64;
+            (*cx).else_branch = else_branch;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Cond;
+            // The node's own schema, as for "if": an arm that throws has a
+            // width-0 schema.
+            (*expr).schema = c_schema(schema_str)?;
+            (*expr).expr.cond_expr = cx;
+            Ok(expr)
+        }
+
+        "chain" => {
+            let args = je.get("args").and_then(|v| v.as_array()).ok_or_else(|| {
+                MorlocError::Other("chain expression is missing its operands".into())
+            })?;
+            let is_and = je.get("and").and_then(|v| v.as_bool()).ok_or_else(|| {
+                MorlocError::Other("chain expression is missing its operator".into())
+            })?;
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("chain expression is missing its result schema".into())
+            })?;
+            let n = args.len();
+            let binds = ptr_array::<MorlocBinds>(n)?;
+            let arr = ptr_array::<MorlocExpression>(n)?;
+            for (i, a) in args.iter().enumerate() {
+                *binds.add(i) = build_binds(a.get("binds"))?;
+                *arr.add(i) = build_expr(a.get("arg").unwrap_or(&serde_json::Value::Null))?;
+            }
+            let chx = libc::calloc(1, std::mem::size_of::<MorlocChainExpression>()) as *mut MorlocChainExpression;
+            (*chx).binds = binds;
+            (*chx).args = arr;
+            (*chx).n = n as u64;
+            (*chx).is_and = u8::from(is_and);
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Chain;
+            (*expr).schema = c_schema(schema_str)?;
+            (*expr).expr.chain_expr = chx;
+            Ok(expr)
+        }
+
+        "lets" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("lets expression is missing its result schema".into())
+            })?;
+            let binds = build_binds(je.get("binds"))?;
+            let body = build_expr(je.get("body").unwrap_or(&serde_json::Value::Null))?;
+            let lx = libc::calloc(1, std::mem::size_of::<MorlocLetsExpression>()) as *mut MorlocLetsExpression;
+            (*lx).binds = binds;
+            (*lx).body = body;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::Lets;
+            (*expr).schema = c_schema(schema_str)?;
+            (*expr).expr.lets_expr = lx;
             Ok(expr)
         }
 

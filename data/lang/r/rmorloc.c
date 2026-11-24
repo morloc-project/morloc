@@ -5,11 +5,14 @@
 #include <Rinternals.h>
 #include <Rdefines.h>
 #include <R_ext/Arith.h>
+#include <R_ext/Riconv.h>
 #include <Rversion.h>
 
 #include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <langinfo.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <limits.h>
 #include <string.h>
@@ -153,6 +156,130 @@ static void morloc_error_take(const char* prefix, char* heap_msg) {
     error("%s", msg);
 }
 
+// Whether the native encoding of this process is UTF-8 or ASCII, so that a
+// string in it is already UTF-8 if it is text at all.
+static bool r_native_is_utf8(void) {
+    const char* cs = nl_langinfo(CODESET);
+    return cs == NULL || strcasecmp(cs, "UTF-8") == 0 || strcasecmp(cs, "utf8") == 0
+        || strcmp(cs, "ANSI_X3.4-1968") == 0 || strcmp(cs, "ASCII") == 0 || strcmp(cs, "US-ASCII") == 0;
+}
+
+// Fail on Str bytes that are not UTF-8 (FMT-10), unless the check is off.
+static void r_require_text(const char* s, size_t n) {
+    int64_t bad = mlc_utf8_check((const uint8_t*)s, n);
+    if (bad >= 0) {
+        MORLOC_ERROR("R produced a Str that is not valid UTF-8 (byte %lld of %zu)", (long long)bad, n);
+    }
+}
+
+// Whether the UTF-8 check is off (FMT-10): the runtime then accepts any
+// bytes, a byte that is never UTF-8 included.
+static bool r_utf8_check_off(void) {
+    return mlc_utf8_check((const uint8_t*)"\xff", 1) < 0;
+}
+
+// Convert n bytes in encoding `from` ("" for the locale's) to UTF-8, or
+// return NULL when they are not text in that encoding.
+static const char* r_iconv_utf8(const char* str, size_t n, const char* from, size_t* out_len, size_t* bad_at) {
+    void* cd = Riconv_open("UTF-8", from);
+    if (cd == (void*)(-1)) {
+        MORLOC_ERROR("R cannot convert its string encoding to UTF-8");
+    }
+    size_t cap = 4 * n + 1;
+    char* out = R_alloc(cap, 1);
+    const char* in = str;
+    size_t in_left = n;
+    char* o = out;
+    size_t o_left = cap - 1;
+    size_t rc = Riconv(cd, &in, &in_left, &o, &o_left);
+    Riconv_close(cd);
+    if (rc == (size_t)(-1)) {
+        *bad_at = n - in_left;
+        return NULL;
+    }
+    *o = '\0';
+    *out_len = (size_t)(o - out);
+    return out;
+}
+
+// Convert to UTF-8 (FMT-10). Bytes that are not text in `from` fail, unless
+// the check is off, when they are passed on as they are.
+static const char* r_to_utf8(const char* str, size_t n, const char* from, size_t* out_len) {
+    size_t bad = 0;
+    const char* out = r_iconv_utf8(str, n, from, out_len, &bad);
+    if (out == NULL && strcmp(from, "CP1252") == 0) {
+        out = r_iconv_utf8(str, n, "ISO-8859-1", out_len, &bad);
+    }
+    if (out != NULL) {
+        return out;
+    }
+    if (r_utf8_check_off()) {
+        *out_len = n;
+        return str;
+    }
+    MORLOC_ERROR("R produced a Str that is not text in its encoding (byte %zu of %zu)", bad, n);
+    return NULL;
+}
+
+static bool r_bytes_ascii(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if ((unsigned char)s[i] & 0x80) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The UTF-8 bytes of an R string (FMT-10): one marked latin1 is converted as
+// R reads it (CP1252), and one in the native encoding of a locale that is
+// neither UTF-8 nor ASCII is converted from it; any other (ASCII, marked
+// UTF-8 or bytes, or native in a UTF-8 locale) is used as it is. With
+// `check`, the result must be UTF-8.
+static const char* r_str_utf8(SEXP chr, size_t* len, bool check) {
+    const char* s = CHAR(chr);
+    size_t n = (size_t)LENGTH(chr);
+    if (!r_bytes_ascii(s, n)) {
+        cetype_t ce = Rf_getCharCE(chr);
+        if (ce == CE_LATIN1) {
+            s = r_to_utf8(s, n, "CP1252", &n);
+        } else if (ce == CE_NATIVE && !r_native_is_utf8()) {
+            s = r_to_utf8(s, n, "", &n);
+        }
+        if (check) {
+            r_require_text(s, n);
+        }
+    }
+    if (len != NULL) {
+        *len = n;
+    }
+    return s;
+}
+
+// A Str value's UTF-8 bytes; NA has no Str form (an absent value is a
+// ?Str's NULL).
+static const char* r_str_value(SEXP chr, size_t* len, bool check) {
+    if (chr == NA_STRING) {
+        MORLOC_ERROR("NA cannot be written as a Str");
+    }
+    return r_str_utf8(chr, len, check);
+}
+
+// A Str value's UTF-8 bytes, as r_str_value with no check, and whether they
+// are all ASCII, which makes them text with no check.
+static const char* r_str_leaf(SEXP chr, size_t* len, int* ascii) {
+    if (chr == NA_STRING) {
+        MORLOC_ERROR("NA cannot be written as a Str");
+    }
+    const char* s = CHAR(chr);
+    size_t n = (size_t)LENGTH(chr);
+    *ascii = r_bytes_ascii(s, n);
+    if (*ascii) {
+        *len = n;
+        return s;
+    }
+    return r_str_utf8(chr, len, false);
+}
+
 // Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
 // codegen's per-call decision; `cleanup` releases whatever the caller owns
 // before the longjmp out of error(). The path returned by the runtime names
@@ -226,9 +353,42 @@ static void __attribute__((noinline, noreturn)) morloc_internal_abort_impl(
 // pattern in pymorloc.c and pool.cpp.
 
 #define SHM_TRACKER_INIT_CAP 16
+// Parsed schemas, keyed by the schema table's interned string, which is
+// preserved so its address is never reused; each lives until the process
+// ends.
+typedef struct { SEXP key; Schema* schema; } r_schema_t;
+static r_schema_t* r_schemas = NULL;
+static size_t r_schemas_len = 0;
+static size_t r_schemas_cap = 0;
+
+static Schema* r_schema(SEXP schema_str_r) {
+    MAYFAIL
+    SEXP key = STRING_ELT(schema_str_r, 0);
+    for (size_t i = 0; i < r_schemas_len; i++) {
+        if (r_schemas[i].key == key) return r_schemas[i].schema;
+    }
+    char* schema_str = strdup(CHAR(key));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+    if (r_schemas_len == r_schemas_cap) {
+        size_t cap = r_schemas_cap ? r_schemas_cap * 2 : 16;
+        r_schema_t* grown = (r_schema_t*)realloc(r_schemas, cap * sizeof(r_schema_t));
+        if (grown == NULL) {
+            free_schema(schema);
+            MORLOC_INTERNAL_ABORT("out of memory caching a schema");
+        }
+        r_schemas = grown;
+        r_schemas_cap = cap;
+    }
+    R_PreserveObject(key);
+    r_schemas[r_schemas_len].key = key;
+    r_schemas[r_schemas_len].schema = schema;
+    r_schemas_len++;
+    return schema;
+}
+
 typedef struct {
     absptr_t ptr;
-    Schema* schema;  // owned by the tracker; freed in shm_tracker_flush
 } shm_entry_t;
 static shm_entry_t* shm_tracker = NULL;
 static size_t shm_tracker_count = 0;
@@ -240,16 +400,11 @@ static void shm_tracker_forget_inherited(void) {
     if (g == shm_tracker_gen) {
         return;
     }
-    for (size_t i = 0; i < shm_tracker_count; i++) {
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
-    }
     shm_tracker_count = 0;
     shm_tracker_gen = g;
 }
 
-static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+static void shm_tracker_push(absptr_t ptr) {
     shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
@@ -263,7 +418,6 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
         shm_tracker_cap = new_cap;
     }
     shm_tracker[shm_tracker_count].ptr = ptr;
-    shm_tracker[shm_tracker_count].schema = schema;
     shm_tracker_count++;
 }
 
@@ -273,15 +427,12 @@ static void shm_tracker_flush(void) {
         char* err = NULL;
         shfree(shm_tracker[i].ptr, &err);
         if (err) { free(err); }
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
     }
     shm_tracker_count = 0;
 }
 
-// Drop one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used by morloc_release_packet_shm to
+// Drop one tracker entry matching ptr (swap-with-last) and shfree the
+// block. Used by morloc_release_packet_shm to
 // free a morloc_put_value-tracked packet's SHM as soon as its
 // codegen-determined scope ends, rather than waiting for the next
 // dispatch flush.
@@ -289,13 +440,11 @@ static bool shm_tracker_release_one(absptr_t ptr) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
-            Schema* schema = shm_tracker[i].schema;
             shm_tracker[i] = shm_tracker[shm_tracker_count - 1];
             shm_tracker_count--;
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
-            if (schema) { free_schema(schema); }
             return true;
         }
     }
@@ -430,6 +579,9 @@ static int64_t i64_from_sexp(SEXP obj) {
 // The value of an R integer, double or bit64 integer64 scalar as a double;
 // NA for R's NA in any of them.
 static double r_number(SEXP obj) {
+    if (XLENGTH(obj) != 1) {
+        MORLOC_ERROR("Expected a single number, but got %lld", (long long)XLENGTH(obj));
+    }
     if (is_integer64(obj)) {
         int64_t v;
         memcpy(&v, &REAL(obj)[0], sizeof(int64_t));
@@ -496,6 +648,14 @@ typedef struct {
     int flat_answer;
     ssize_t total;          // size pass
     void** cursor;          // write pass
+    // Write pass in a stream's buffer (SLOT-36): offsets are from `base`,
+    // alignment from `origin`, and a step's compound children are laid out
+    // after it, in field order. NULL otherwise.
+    char* base;
+    char* origin;
+    int in_step;
+    int deferring;
+    size_t later_len;
     morloc_space_t space;   // read pass: where relptrs lead
     SEXP result;            // read pass: the root, PROTECTed until returned
 } r_walk_t;
@@ -504,6 +664,8 @@ typedef struct {
 // nothing to free.
 static __thread r_frame_t* r_frames = NULL;
 static __thread size_t r_frames_cap = 0;
+static __thread r_frame_t* r_later = NULL;
+static __thread size_t r_later_cap = 0;
 
 // True iff a back-reference occurs anywhere under `schema`.
 static int r_schema_has_recur(const Schema* schema) {
@@ -545,6 +707,49 @@ static void r_push(r_walk_t* w, const r_frame_t* f) {
         r_frames_cap = cap;
     }
     r_frames[w->len++] = *f;
+}
+
+// Hold a child's frame until the current step returns.
+static void r_defer(r_walk_t* w, const r_frame_t* f) {
+    if (w->later_len >= r_later_cap) {
+        size_t cap = r_later_cap ? r_later_cap * 2 : 16;
+        r_frame_t* grown = (r_frame_t*)realloc(r_later, cap * sizeof(r_frame_t));
+        if (grown == NULL) {
+            MORLOC_ERROR("out of memory growing the marshalling walk");
+        }
+        r_later = grown;
+        r_later_cap = cap;
+    }
+    r_later[w->later_len++] = *f;
+}
+
+// `p` aligned to `align`, from the element's origin when placed.
+static void* r_align(r_walk_t* w, void* p, size_t align) {
+    uintptr_t c = (uintptr_t)p;
+    if (w->origin != NULL) {
+        return w->origin + ALIGN_UP(c - (uintptr_t)w->origin, align);
+    }
+    return (void*)ALIGN_UP(c, align);
+}
+
+// The relative pointer to `p`: an offset from the walk's base in a
+// stream's buffer, else a shared-memory relptr.
+static relptr_t r_rel(r_walk_t* w, void* p) {
+    MAYFAIL
+    if (w->base != NULL) return (relptr_t)((char*)p - w->base);
+    return R_TRY(abs2rel, p);
+}
+
+// Where a relative pointer `r_rel` made leads.
+static char* r_abs(r_walk_t* w, relptr_t rel) {
+    MAYFAIL
+    if (w->base != NULL) return w->base + rel;
+    return (char*)R_TRY(rel2abs, rel);
+}
+
+// The data pointer of an empty array or string.
+static relptr_t r_empty_rel(r_walk_t* w) {
+    return w->base != NULL ? 0 : RELNULL;
 }
 
 // Visit the current node again for element `idx`, carrying `aux`.
@@ -672,7 +877,7 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                 size_t buf_align = (schema->type == MORLOC_STRING)
                     ? schema->parameters[0]->alignment
                     : schema->parameters[0]->data_alignment;
-                size += buf_align - 1;
+                if (length > 0) size += buf_align - 1;
                 // Array of IFile handles: each element is wire-encoded as
                 // Array<u8>(path). The REALSXP fast-path below would treat
                 // bit64-backed IFile handles as fixed-width 8-byte ints
@@ -725,16 +930,23 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
 
                 switch (TYPEOF(obj)) {
                     case CHARSXP:
-                        str = CHAR(obj);
-                        size += (size_t)strlen(str);  // Do not include null terminator
+                        if (schema->type == MORLOC_STRING) {
+                            size_t n = 0;
+                            r_str_value(obj, &n, true);
+                            size += n;
+                        } else {
+                            str = CHAR(obj);
+                            size += (size_t)strlen(str);  // Do not include null terminator
+                        }
                         break;
                     case STRSXP:
                         if (schema->type == MORLOC_STRING) {
                             if (LENGTH(obj) != 1) {
                                 MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
-                            str = CHAR(STRING_ELT(obj, 0));
-                            size += (size_t)strlen(str);  // Do not include null terminator
+                            size_t n = 0;
+                            r_str_value(STRING_ELT(obj, 0), &n, true);
+                            size += n;
                         } else if(elem->type == MORLOC_STRING){
                             for(size_t i = 0; i < length; i++){
                                 r_size_child(w, elem, STRING_ELT(obj, i), 0);
@@ -772,6 +984,9 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                                 UNPROTECT(1);
                             }
                         } else {
+                            if (schema->type == MORLOC_STRING && TYPEOF(obj) == RAWSXP) {
+                                r_require_text((const char*)RAW(obj), length);
+                            }
                             // Inline BigInt and fixed-width types: width covers the full element
                             size += length * elem->width;
                         }
@@ -826,6 +1041,8 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
                             r_size_child(w, schema->parameters[i], value, 1);
+                        } else if (schema->parameters[i]->type != MORLOC_OPTIONAL) {
+                            MORLOC_ERROR("the record has no field '%s'", schema->keys[i]);
                         }
                     }
                     return;
@@ -941,12 +1158,11 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 // below silently admit any NaN (including R's NA_integer_/NA_real_, which
 // asReal collapses to NA_REAL). Casting NaN to an integer is undefined
 // behaviour and typically wraps to INT*_MIN. Reject explicitly.
-#define HANDLE_SINT_TYPE(CTYPE, MIN, MAX) \
-    do { \
-        if (!(isInteger(obj) || isReal(obj))) { \
-            MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
-        } \
-        double value = r_number(obj); \
+//
+// The r_store_* functions take the value as r_number gives it, so a scalar
+// and an element of an atomic vector go through the same checks.
+#define R_STORE_FIXED(CTYPE, MIN, MAX) \
+    static inline void r_store_##CTYPE(double value, void* dest) { \
         if (ISNAN(value)) { \
             MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
         } \
@@ -954,6 +1170,21 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
             MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
         } \
         *(CTYPE*)dest = (CTYPE)value; \
+    }
+
+R_STORE_FIXED(int8_t, INT8_MIN, INT8_MAX)
+R_STORE_FIXED(int16_t, INT16_MIN, INT16_MAX)
+R_STORE_FIXED(int32_t, INT32_MIN, INT32_MAX)
+R_STORE_FIXED(uint8_t, 0, UINT8_MAX)
+R_STORE_FIXED(uint16_t, 0, UINT16_MAX)
+R_STORE_FIXED(uint32_t, 0, UINT32_MAX)
+
+#define HANDLE_SINT_TYPE(CTYPE, MIN, MAX) \
+    do { \
+        if (!(isInteger(obj) || isReal(obj))) { \
+            MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
+        } \
+        r_store_##CTYPE(r_number(obj), dest); \
     } while(0)
 
 // An enum's R form is an ordered factor: integer storage plus a levels
@@ -1024,14 +1255,7 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
-        double value = r_number(obj); \
-        if (ISNAN(value)) { \
-            MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
-        } \
-        if (value < 0 || value > MAX) { \
-            MORLOC_ERROR("Integer overflow for %s", #CTYPE); \
-        } \
-        *(CTYPE*)dest = (CTYPE)value; \
+        r_store_##CTYPE(r_number(obj), dest); \
     } while(0)
 
 // 64-bit fixed-width: distinct from HANDLE_*_TYPE because the full 64-bit
@@ -1041,6 +1265,66 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
 // range round-trips losslessly. Plain REALSXP / INTSXP still work for
 // convenience (e.g. integer literals from R user code), with the existing
 // 2^53 precision ceiling.
+static inline void r_store_int64_t(double value, void* dest) {
+    if (ISNAN(value)) {
+        MORLOC_ERROR("Cannot pack NA or NaN into int64_t");
+    }
+    value = trunc(value);
+    if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
+        MORLOC_ERROR(
+            "Integer %.0f does not fit in R's numeric type"
+            " (max 2^53 = 9007199254740992 for integer precision)."
+            " Wrap with bit64::as.integer64() for the full Int64 range.",
+            value);
+    }
+    *(int64_t*)dest = (int64_t)value;
+}
+
+static inline void r_store_uint64_t(double value, void* dest) {
+    if (ISNAN(value)) {
+        MORLOC_ERROR("Cannot pack NA or NaN into uint64_t");
+    }
+    value = trunc(value);
+    if (value < 0 || value > (double)R_DOUBLE_INT_MAX) {
+        MORLOC_ERROR(
+            "Unsigned integer %.0f does not fit in R's numeric type"
+            " (max 2^53 = 9007199254740992 for integer precision)."
+            " Wrap with bit64::as.integer64() for the full UInt64 range.",
+            value);
+    }
+    *(uint64_t*)dest = (uint64_t)value;
+}
+
+// MORLOC_INT from a number, inline BigInt: [size=1, value]
+static inline void r_store_bigint(double value, void* dest) {
+    if (ISNAN(value)) {
+        MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
+    }
+    value = trunc(value);
+    // (double)INT64_MAX rounds to 2^63 and defeats the bound check;
+    // anything outside [-2^53, 2^53] cannot have come from R as a
+    // precise integer, so reject rather than silently corrupt.
+    if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
+        MORLOC_ERROR(
+            "Integer %.0f does not fit in R's numeric type"
+            " (max 2^53 = 9007199254740992 for integer precision).",
+            value);
+    }
+    int64_t* fields = (int64_t*)dest;
+    fields[0] = 1;
+    fields[1] = (int64_t)value;
+}
+
+static inline void r_store_float(double d, void* dest) {
+    if (morloc_f32_from_f64(d, (float*)dest) != 0) {
+        MORLOC_ERROR("value %g out of range for F32", d);
+    }
+}
+
+static inline void r_store_double(double d, void* dest) {
+    *(double*)dest = d;
+}
+
 #define HANDLE_SINT64() \
     do { \
         if (is_integer64(obj)) { \
@@ -1055,19 +1339,7 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for int64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
-        double value = r_number(obj); \
-        if (ISNAN(value)) { \
-            MORLOC_ERROR("Cannot pack NA or NaN into int64_t"); \
-        } \
-        value = trunc(value); \
-        if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) { \
-            MORLOC_ERROR( \
-                "Integer %.0f does not fit in R's numeric type" \
-                " (max 2^53 = 9007199254740992 for integer precision)." \
-                " Wrap with bit64::as.integer64() for the full Int64 range.", \
-                value); \
-        } \
-        *(int64_t*)dest = (int64_t)value; \
+        r_store_int64_t(r_number(obj), dest); \
     } while(0)
 
 #define HANDLE_UINT64() \
@@ -1084,22 +1356,68 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for uint64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
-        double value = r_number(obj); \
-        if (ISNAN(value)) { \
-            MORLOC_ERROR("Cannot pack NA or NaN into uint64_t"); \
-        } \
-        value = trunc(value); \
-        if (value < 0 || value > (double)R_DOUBLE_INT_MAX) { \
-            MORLOC_ERROR( \
-                "Unsigned integer %.0f does not fit in R's numeric type" \
-                " (max 2^53 = 9007199254740992 for integer precision)." \
-                " Wrap with bit64::as.integer64() for the full UInt64 range.", \
-                value); \
-        } \
-        *(uint64_t*)dest = (uint64_t)value; \
+        r_store_uint64_t(r_number(obj), dest); \
     } while(0)
 
 // {{{ write pass
+
+// Write the n elements of an atomic vector with the checks the scalar path
+// gives each element as a ScalarLogical/ScalarInteger/ScalarReal; 0 when
+// the elements must take the scalar path instead.
+static int r_write_atomic(const Schema* es, char* start, SEXP obj, size_t n) {
+    size_t width = es->width;
+    if (TYPEOF(obj) == LGLSXP) {
+        if (es->type != MORLOC_BOOL) return 0;
+        const int* x = LOGICAL(obj);
+        for (size_t i = 0; i < n; i++) {
+            if (x[i] == NA_LOGICAL) {
+                MORLOC_ERROR("Expected one TRUE or FALSE for MORLOC_BOOL");
+            }
+            *(uint8_t*)(start + i * width) = (uint8_t)(x[i] != 0);
+        }
+        return 1;
+    }
+    const int* ix = NULL;
+    const double* dx = NULL;
+    if (TYPEOF(obj) == INTSXP) {
+        ix = INTEGER(obj);
+    } else if (TYPEOF(obj) == REALSXP && !is_integer64(obj)) {
+        dx = REAL(obj);
+    } else {
+        return 0;
+    }
+    if (dx != NULL && es->type == MORLOC_FLOAT64 && width == sizeof(double)) {
+        memcpy(start, dx, n * sizeof(double));
+        return 1;
+    }
+#define R_ATOMIC_LOOP(STORE) \
+    if (ix != NULL) { \
+        for (size_t i = 0; i < n; i++) { \
+            STORE(ix[i] == NA_INTEGER ? NA_REAL : (double)ix[i], start + i * width); \
+        } \
+    } else { \
+        for (size_t i = 0; i < n; i++) { \
+            STORE(dx[i], start + i * width); \
+        } \
+    } \
+    return 1;
+    switch (es->type) {
+        case MORLOC_SINT8:   R_ATOMIC_LOOP(r_store_int8_t)
+        case MORLOC_SINT16:  R_ATOMIC_LOOP(r_store_int16_t)
+        case MORLOC_SINT32:  R_ATOMIC_LOOP(r_store_int32_t)
+        case MORLOC_SINT64:  R_ATOMIC_LOOP(r_store_int64_t)
+        case MORLOC_UINT8:   R_ATOMIC_LOOP(r_store_uint8_t)
+        case MORLOC_UINT16:  R_ATOMIC_LOOP(r_store_uint16_t)
+        case MORLOC_UINT32:  R_ATOMIC_LOOP(r_store_uint32_t)
+        case MORLOC_UINT64:  R_ATOMIC_LOOP(r_store_uint64_t)
+        case MORLOC_INT:     R_ATOMIC_LOOP(r_store_bigint)
+        case MORLOC_FLOAT32: R_ATOMIC_LOOP(r_store_float)
+        case MORLOC_FLOAT64: R_ATOMIC_LOOP(r_store_double)
+        default:
+            return 0;
+    }
+#undef R_ATOMIC_LOOP
+}
 
 static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj, size_t idx);
 
@@ -1107,7 +1425,9 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
 // frame.
 static void r_write_child(r_walk_t* w, const Schema* schema, void* dest, SEXP obj) {
     const Schema* s = r_resolve(schema);
-    if (r_flat(w, s)) {
+    // A child that may write a tail waits behind a deferred sibling.
+    int later = w->deferring && !s->fixed_width;
+    if (!later && r_flat(w, s)) {
         r_write_step(w, s, dest, obj, 0);
         return;
     }
@@ -1116,6 +1436,15 @@ static void r_write_child(r_walk_t* w, const Schema* schema, void* dest, SEXP ob
     f.schema = s;
     f.obj = obj;
     f.dest = dest;
+    if (later) {
+        r_defer(w, &f);
+        return;
+    }
+    if (w->in_step && w->base != NULL) {
+        w->deferring = 1;
+        r_defer(w, &f);
+        return;
+    }
     r_push(w, &f);
 }
 
@@ -1134,7 +1463,10 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (!isLogical(obj)) {
                 MORLOC_ERROR("Expected logical for MORLOC_BOOL, but got %s", type2char(TYPEOF(obj)));
             }
-            *((uint8_t*)dest) = (uint8_t)((LOGICAL(obj)[0] == TRUE) ? 1 : 0);
+            if (XLENGTH(obj) != 1 || LOGICAL(obj)[0] == NA_LOGICAL) {
+                MORLOC_ERROR("Expected one TRUE or FALSE for MORLOC_BOOL");
+            }
+            *((uint8_t*)dest) = (uint8_t)(LOGICAL(obj)[0] == TRUE);
             break;
         case MORLOC_SINT8:
             HANDLE_SINT_TYPE(int8_t, INT8_MIN, INT8_MAX);
@@ -1212,42 +1544,21 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (!(isInteger(obj) || isReal(obj))) {
                 MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
             }
-            double value = r_number(obj);
-            if (ISNAN(value)) {
-                MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
-            }
-            value = trunc(value);
-            if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
-                // (double)INT64_MAX rounds to 2^63 and defeats the bound check;
-                // anything outside [-2^53, 2^53] cannot have come from R as a
-                // precise integer, so reject rather than silently corrupt.
-                MORLOC_ERROR(
-                    "Integer %.0f does not fit in R's numeric type"
-                    " (max 2^53 = 9007199254740992 for integer precision).",
-                    value);
-            }
-            int64_t* fields = (int64_t*)dest;
-            fields[0] = 1;
-            fields[1] = (int64_t)value;
+            r_store_bigint(r_number(obj), dest);
             break;
         }
         case MORLOC_FLOAT32:
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
             }
-            {
-                double d = asReal(obj);
-                if (morloc_f32_from_f64(d, (float*)dest) != 0) {
-                    MORLOC_ERROR("value %g out of range for F32", d);
-                }
-            }
+            r_store_float(r_number(obj), dest);
             break;
 
         case MORLOC_FLOAT64:
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT64, but got %s", type2char(TYPEOF(obj)));
             }
-            *((double*)dest) = asReal(obj);
+            r_store_double(r_number(obj), dest);
             break;
         case MORLOC_IFILE:
         case MORLOC_OSTREAM:
@@ -1262,13 +1573,11 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 size_t length = 0;
                 switch(TYPEOF(obj)){
                     case CHARSXP:
-                        str = CHAR(obj);
-                        length = (size_t)strlen(str);
+                        str = r_str_value(obj, &length, false);
                         break;
                     case STRSXP:
                         if (LENGTH(obj) == 1) {
-                            str = CHAR(STRING_ELT(obj, 0));
-                            length = (size_t)strlen(str);
+                            str = r_str_value(STRING_ELT(obj, 0), &length, false);
                         } else {
                             MORLOC_ERROR("Expected character of length 1");
                         }
@@ -1284,16 +1593,17 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                       MORLOC_ERROR("Expected a character type");
                       break;
                 }
+
                 Array* array = (Array*)dest;
                 array->size = length;  // Do not include null terminator
                 if(length > 0){
                     // String character data: natural alignment (1 byte for chars)
-                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema->parameters[0]->alignment);
-                    array->data = R_TRY(abs2rel, *cursor);
-                    absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
+                    *cursor = r_align(w, *cursor, schema->parameters[0]->alignment);
+                    array->data = r_rel(w, *cursor);
+                    absptr_t tmp_ptr = r_abs(w, array->data);
                     memcpy(tmp_ptr, str, array->size);
                 } else {
-                    array->data = RELNULL;
+                    array->data = r_empty_rel(w);
                 }
 
                 // move cursor to the location after the copied data
@@ -1317,14 +1627,14 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             }
             array->size = (size_t)length(obj);
             if(array->size == 0){
-                array->data = RELNULL;
+                array->data = r_empty_rel(w);
                 break;
             }
 
             // align cursor for element data placement
             // (bumps to 64 for primitive numerics for SIMD/BLAS)
-            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema->parameters[0]->data_alignment);
-            array->data = R_TRY(abs2rel, *cursor);
+            *cursor = r_align(w, *cursor, schema->parameters[0]->data_alignment);
+            array->data = r_rel(w, *cursor);
             const Schema* element_schema = r_resolve(schema->parameters[0]);
             char* start;
 
@@ -1348,7 +1658,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     handles = scratch;
                 }
                 *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                start = R_TRY(rel2abs, array->data);
+                start = r_abs(w, array->data);
                 R_TRY(mlc_write_handles_voidstar,
                     handles, array->size, start, element_schema->width, cursor);
                 break;
@@ -1363,7 +1673,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (element_schema->type == MORLOC_ENUM
                 && (isFactor(obj) || TYPEOF(obj) == STRSXP)) {
                 *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                start = R_TRY(rel2abs, array->data);
+                start = r_abs(w, array->data);
                 SEXP levels = isFactor(obj)
                     ? getAttrib(obj, R_LevelsSymbol)
                     : R_NilValue;
@@ -1397,7 +1707,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                         if(element_schema->type == MORLOC_STRING){
                             // set the cursor the the location after the array headers
                             *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                            start = R_TRY(rel2abs, array->data);
+                            start = r_abs(w, array->data);
                             for(size_t i = 0; i < array->size; i++){
                                 SEXP elem = STRING_ELT(obj, i);
                                 r_write_child(w, element_schema, start + i * element_schema->width, elem);
@@ -1419,13 +1729,13 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     } else if (element_schema->type != MORLOC_UINT8) {
                         MORLOC_ERROR("Expected MORLOC_UINT8 for raw vector");
                     }
-                    absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
+                    absptr_t tmp_ptr = r_abs(w, array->data);
                     memcpy(tmp_ptr, RAW(obj), array->size * sizeof(uint8_t));
                     *cursor = (void*)(*(char**)cursor + array->size * sizeof(uint8_t));
                     break;
                 case VECSXP:  // This handles lists
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
                     if (!r_flat(w, element_schema)) {
                         // One compound element per visit, starting here.
                         if (array->size > 1) r_resume(w, 1, start);
@@ -1441,7 +1751,8 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 // next is made, never handed to a frame.
                 case LGLSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
+                    if (r_write_atomic(element_schema, start, obj, array->size)) break;
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
@@ -1450,7 +1761,8 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     break;
                 case INTSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
+                    if (r_write_atomic(element_schema, start, obj, array->size)) break;
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarInteger(INTEGER(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
@@ -1459,7 +1771,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     break;
                 case REALSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
-                    start = R_TRY(rel2abs, array->data);
+                    start = r_abs(w, array->data);
                     // bit64::integer64 storage: REALSXP's 8 bytes per
                     // cell ARE the int64. For SINT64 / UINT64 element
                     // schemas we can memcpy the whole vector directly
@@ -1484,6 +1796,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                         memcpy(start, REAL(obj), array->size * sizeof(int64_t));
                         break;
                     }
+                    if (r_write_atomic(element_schema, start, obj, array->size)) break;
                     int elem_i64 = is_integer64(obj);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(elem_i64
@@ -1535,6 +1848,10 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
                             r_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value);
+                        } else if (schema->parameters[i]->type == MORLOC_OPTIONAL) {
+                            *(relptr_t*)((char*)dest + schema->offsets[i]) = RELNULL;
+                        } else {
+                            MORLOC_ERROR("the record has no field '%s'", schema->keys[i]);
                         }
                     }
                 } else {
@@ -1557,12 +1874,8 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             } else {
                 SEXP wfields = VECTOR_ELT(obj, 1);
                 size_t warm_align = warm->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
-                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_VARIANT"); }
-                }
+                *cursor = r_align(w, *cursor, warm_align);
+                *(relptr_t*)((char*)dest + 8) = r_rel(w, *cursor);
                 void* arm_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + warm->width);
                 r_write_child(w, warm, arm_dest, wfields);
@@ -1580,12 +1893,8 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             } else {
                 const Schema* inner_schema = r_resolve(schema->parameters[0]);
                 size_t inner_align = inner_schema->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
-                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_OPTIONAL"); }
-                }
+                *cursor = r_align(w, *cursor, inner_align);
+                *(relptr_t*)dest = r_rel(w, *cursor);
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
                 r_write_child(w, inner_schema, inner_dest, obj);
@@ -1598,6 +1907,21 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
     }
 }
 
+// Step the frames of a write walk to the end, laying out the children a
+// step deferred after it returns (SLOT-36).
+static void r_write_run(r_walk_t* w) {
+    while (r_next(w)) {
+        w->in_step = 1;
+        w->deferring = 0;
+        r_write_step(w, w->cur.schema, w->cur.dest, w->cur.obj, w->cur.idx);
+        w->in_step = 0;
+        w->deferring = 0;
+        while (w->later_len > 0) {
+            r_push(w, &r_later[--w->later_len]);
+        }
+    }
+}
+
 // Write `obj` into the slot at `dest`, appending variable-length parts at
 // the cursor.
 static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
@@ -1605,25 +1929,48 @@ static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema
     r_walk_init(&w, schema);
     w.cursor = cursor;
     r_write_child(&w, schema, dest, obj);
-    while (r_next(&w)) {
-        r_write_step(&w, w.cur.schema, w.cur.dest, w.cur.obj, w.cur.idx);
-    }
+    r_write_run(&w);
     return dest;
 }
 
-// NOTE: If to_voidstar_inner calls error() (via MORLOC_ERROR or R_TRY), the shared
-// memory at dest leaks. This only happens on type mismatches (a development-time
-// bug) and the memory is reclaimed when the pool process exits.
-static void* to_voidstar(SEXP obj, const Schema* schema) {
-    MAYFAIL
+typedef struct {
+    SEXP obj;
+    Schema* schema;
+    void* held;
+    void* dest;
+} r_encode_t;
 
-    size_t total_size = get_shm_size(schema, obj);
+static SEXP r_encode_body(void* data) { MAYFAIL
+    r_encode_t* e = (r_encode_t*)data;
+    size_t total_size = get_shm_size(e->schema, e->obj);
+    e->dest = R_TRY(shmalloc, total_size);
+    void* cursor = (void*)((char*)e->dest + e->schema->width);
+    to_voidstar_inner(e->dest, &cursor, e->obj, e->schema);
+    return R_NilValue;
+}
 
-    void* dest = R_TRY(shmalloc, total_size);
+static void r_encode_cleanup(void* data, Rboolean jump) {
+    if (!jump) return;
+    r_encode_t* e = (r_encode_t*)data;
+    void* blocks[2] = { e->dest, e->held };
+    for (int i = 0; i < 2; i++) {
+        if (blocks[i] != NULL) {
+            char* errmsg = NULL;
+            shfree(blocks[i], &errmsg);
+            free(errmsg);
+        }
+    }
+}
 
-    void* cursor = (void*)((char*)dest + schema->width);
-
-    return to_voidstar_inner(dest, &cursor, obj, schema);
+// Encode `obj` into a new SHM block. When the encoding raises an R error,
+// the new block, the caller's block `held` (may be NULL) and `schema` are
+// released before the error continues.
+static void* to_voidstar(SEXP obj, Schema* schema, void* held) {
+    r_encode_t e = { obj, schema, held, NULL };
+    SEXP cont = PROTECT(R_MakeUnwindCont());
+    R_UnwindProtect(r_encode_body, &e, r_encode_cleanup, &e, cont);
+    UNPROTECT(1);
+    return e.dest;
 }
 
 // }}} write pass
@@ -1953,7 +2300,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                     Array* str_array = (Array*)data;
                     if(str_array->size > 0){
                         void* tmp_ptr = R_TRY_READ(resolve_array, str_array->data, str_array->size, 1, space);
-                        SEXP chr = PROTECT(mkCharLen(tmp_ptr, str_array->size));
+                        SEXP chr = PROTECT(mkCharLenCE(tmp_ptr, (int)str_array->size, CE_UTF8));
                         obj = PROTECT(ScalarString(chr));
                     } else {
                         SEXP chr = PROTECT(mkChar(""));
@@ -2005,7 +2352,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                                 item = PROTECT(mkCharLen("", 0));
                             } else {
                                 void* str_ptr = R_TRY_WITH_READ(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
-                                item = PROTECT(mkCharLen(str_ptr, str_array->size));
+                                item = PROTECT(mkCharLenCE(str_ptr, (int)str_array->size, CE_UTF8));
                             }
                             UNPROTECT(1);
                             SET_STRING_ELT(obj, i, item);
@@ -2154,11 +2501,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
                         ? (LOGICAL(self_contained_r)[0] == TRUE)
                         : false;
 
-    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
-
-    char* schema_str = strdup(schema_cstr);
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through the
     // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
@@ -2176,7 +2519,6 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         SEXP coerce_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("as_record_batch")));
         if (export_fn == R_UnboundValue || coerce_fn == R_UnboundValue) {
             UNPROTECT(3);
-            free_schema(schema);
             MORLOC_ERROR("arrow::ExportRecordBatch not found; is the arrow package installed?");
         }
 
@@ -2197,7 +2539,6 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
 
         if (errmsg) {
-            free_schema(schema);
             morloc_error_take("Arrow export failed: ", errmsg);
         }
 
@@ -2206,52 +2547,47 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
         void* shm_ptr = rel2abs(relptr, &resolve_err);
         if (resolve_err) { free(resolve_err); }
         if (shm_ptr) {
-            shm_tracker_push((absptr_t)shm_ptr, NULL);
+            shm_tracker_push((absptr_t)shm_ptr);
         }
 
         uint8_t* packet = NULL;
         if (self_contained) {
-            packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, shm_ptr, schema);
+            packet = R_TRY_INFRA(make_inline_data_packet, shm_ptr, schema);
         } else {
             packet = make_arrow_data_packet(relptr, schema);
         }
         if (!packet) {
-            free_schema(schema);
             MORLOC_INTERNAL_ABORT("Failed to create arrow data packet");
         }
 
-        size_t packet_size = R_TRY_WITH({free(packet); free_schema(schema);}, morloc_packet_size, packet);
+        size_t packet_size = R_TRY_WITH({free(packet); }, morloc_packet_size, packet);
         SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
         memcpy(RAW(result), packet, packet_size);
         free(packet);
-        free_schema(schema);
         UNPROTECT(1);
         return result;
     }
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
+    relptr_t relptr = R_TRY(abs2rel, voidstar);
 
     uint8_t* packet = NULL;
     if (self_contained) {
-        packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, voidstar, schema);
+        packet = R_TRY_INFRA(make_inline_data_packet, voidstar, schema);
     } else {
-        packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+        packet = R_TRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
     }
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    bool tracked = false;
     if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
-        // SHM is referenced by the result packet. Hand voidstar AND schema to
-        // the tracker: they are released once the reply holds the caller's
+        // SHM is referenced by the result packet. Hand voidstar to the
+        // tracker: it is released once the reply holds the caller's
         // reference (send_reply_to_foreign_server in dispatch_manifold_c).
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
+        shm_tracker_push((absptr_t)voidstar);
     } else {
         // Data inlined in packet -- free SHM immediately. shfree zeros the
         // block on final ref-drop.
@@ -2261,15 +2597,12 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
     }
 
     size_t packet_size = R_TRY_WITH(
-        {free(packet); if (!tracked) free_schema(schema);},
+        {free(packet);},
         morloc_packet_size, packet);
 
     SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
     memcpy(RAW(result), packet, packet_size);
     free(packet);
-    if (!tracked) {
-        free_schema(schema);
-    }
 
     UNPROTECT(1);
     return result;
@@ -2363,18 +2696,15 @@ static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
     int64_t level = i64_from_sexp(level_r);
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("%s: failed to convert R object to voidstar", fn_name);
     }
 
     R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(voidstar, &err); free(err); },
         save_fn, (absptr_t)voidstar, schema, level, path);
 
     {
@@ -2382,7 +2712,6 @@ static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
         shfree(voidstar, &err);
         free(err);
     }
-    free_schema(schema);
     return R_NilValue;
 }
 
@@ -2407,18 +2736,15 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_hash: schema must be a single string");
     }
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("mlc_hash: failed to convert R object to voidstar");
     }
 
     char* hex = R_TRY_WITH(
-        { char* err = NULL; shfree(voidstar, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(voidstar, &err); free(err); },
         mlc_hash, voidstar, schema);
 
     {
@@ -2426,7 +2752,6 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         shfree(voidstar, &err);
         free(err);
     }
-    free_schema(schema);
 
     SEXP result = PROTECT(mkString(hex));
     free(hex);
@@ -2439,26 +2764,22 @@ SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_compare: schema must be a single string");
     }
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* va = to_voidstar(a_r, schema);
+    void* va = to_voidstar(a_r, schema, NULL);
     if (!va) {
-        free_schema(schema);
         MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
     }
-    void* vb = to_voidstar(b_r, schema);
+    void* vb = to_voidstar(b_r, schema, va);
     if (!vb) {
         char* err = NULL;
         shfree(va, &err);
         free(err);
-        free_schema(schema);
         MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
     }
 
     int order = R_TRY_WITH(
-        { char* err = NULL; shfree(va, &err); free(err); err = NULL; shfree(vb, &err); free(err); free_schema(schema); },
+        { char* err = NULL; shfree(va, &err); free(err); err = NULL; shfree(vb, &err); free(err); },
         mlc_compare, va, vb, schema);
 
     {
@@ -2469,7 +2790,6 @@ SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
         shfree(vb, &err);
         free(err);
     }
-    free_schema(schema);
     return ScalarInteger(order);
 }
 
@@ -2484,11 +2804,9 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_load, path, schema);
+    void* voidstar = R_TRY(mlc_load, path, schema);
     if (voidstar == NULL) {
         MORLOC_INTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
@@ -2496,7 +2814,7 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     // Tracked while it is read, so an R error on the way still releases
     // it; from_voidstar deep-copies, so it is released as soon as that
     // returns. The tracker owns `schema` from here.
-    shm_tracker_push((absptr_t)voidstar, schema);
+    shm_tracker_push((absptr_t)voidstar);
     SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     shm_tracker_release_one((absptr_t)voidstar);
     return obj;
@@ -2511,11 +2829,9 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     if (TYPEOF(json_str_r) != STRSXP || LENGTH(json_str_r) != 1) {
         error("mlc_read: json must be a single string");
     }
-    const char* json_str = CHAR(STRING_ELT(json_str_r, 0));
+    const char* json_str = r_str_utf8(STRING_ELT(json_str_r, 0), NULL, false);
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     char* errmsg = NULL;
     void* voidstar = mlc_read(json_str, schema, &errmsg);
@@ -2528,12 +2844,11 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
         } else {
             snprintf(msg_buf, sizeof(msg_buf), "@read: parse failed");
         }
-        free_schema(schema);
         MORLOC_ERROR("%s", msg_buf);
     }
     if (errmsg != NULL) { free(errmsg); }
 
-    shm_tracker_push((absptr_t)voidstar, schema);
+    shm_tracker_push((absptr_t)voidstar);
     SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     shm_tracker_release_one((absptr_t)voidstar);
     return obj;
@@ -2563,38 +2878,6 @@ static SEXP r_literal_elt(SEXP x, size_t i) {
     return e;
 }
 
-// Parsed literal schemas, keyed by the schema table's interned string.
-typedef struct { SEXP key; Schema* schema; } r_literal_schema_t;
-static r_literal_schema_t* r_literal_schemas = NULL;
-static size_t r_literal_schemas_len = 0;
-static size_t r_literal_schemas_cap = 0;
-
-static Schema* r_literal_schema(SEXP schema_str_r) {
-    MAYFAIL
-    SEXP key = STRING_ELT(schema_str_r, 0);
-    for (size_t i = 0; i < r_literal_schemas_len; i++) {
-        if (r_literal_schemas[i].key == key) return r_literal_schemas[i].schema;
-    }
-    char* schema_str = strdup(CHAR(key));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
-    if (r_literal_schemas_len == r_literal_schemas_cap) {
-        size_t cap = r_literal_schemas_cap ? r_literal_schemas_cap * 2 : 16;
-        r_literal_schema_t* grown = (r_literal_schema_t*)realloc(r_literal_schemas, cap * sizeof(r_literal_schema_t));
-        if (grown == NULL) {
-            free_schema(schema);
-            MORLOC_INTERNAL_ABORT("out of memory caching a literal schema");
-        }
-        r_literal_schemas = grown;
-        r_literal_schemas_cap = cap;
-    }
-    R_PreserveObject(key);
-    r_literal_schemas[r_literal_schemas_len].key = key;
-    r_literal_schemas[r_literal_schemas_len].schema = schema;
-    r_literal_schemas_len++;
-    return schema;
-}
-
 // A literal built in this pool, given the form the decoder gives a value of
 // its schema (NATIVE-9). A list literal is written element by element with
 // the encoder's checks and filled by the decoder's own construction; an I64
@@ -2603,7 +2886,7 @@ SEXP morloc_mlc_conform(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_conform: schema must be a single string");
     }
-    const Schema* schema = r_literal_schema(schema_str_r);
+    const Schema* schema = r_schema(schema_str_r);
     r_walk_t w;
     if (schema->type == MORLOC_SINT64 || schema->type == MORLOC_UINT64) {
         int64_t v = 0;
@@ -2733,17 +3016,13 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
         }
     }
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(do { free(schema_str); free(packed); } while(0),
-                                parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = R_TRY_WITH(do { free_schema(schema); free(packed); } while(0),
+    void* voidstar = R_TRY_WITH(free(packed),
                                 mlc_ifile_walk,
                                 handle, path, packed, (uint64_t)n);
     free(packed);
     if (voidstar == NULL) {
-        free_schema(schema);
         return R_NilValue;
     }
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
@@ -2752,7 +3031,6 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -2784,12 +3062,10 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
         error("mlc_next: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     void* voidstar = R_TRY(mlc_next, handle);
     if (voidstar == NULL) {
-        free_schema(schema);
         return R_NilValue;
     }
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
@@ -2798,7 +3074,6 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -2811,21 +3086,19 @@ SEXP morloc_mlc_next_frame(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
         error("mlc_next_frame: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
     int32_t eof = 0;
     void* voidstar = R_TRY(mlc_next_frame, handle, &eof);
     if (eof) {
         return R_NilValue;
     }
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -2836,12 +3109,10 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
         error("mlc_stream_layout: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
-    Schema* schema = R_TRY(parse_schema, schema_str);
+    Schema* schema = r_schema(schema_str_r);
     void* voidstar = R_TRY(mlc_stream_layout, handle);
     if (voidstar == NULL) {
-        free_schema(schema);
         return R_NilValue;
     }
     SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
@@ -2850,7 +3121,6 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return result;
 }
 
@@ -2937,6 +3207,199 @@ SEXP morloc_mlc_open_stderr(SEXP schema_str_r) { MAYFAIL
     return make_integer64_scalar(h);
 }
 
+// An in-place @write batch (SLOT-36, SLOT-37): a list, or a character
+// vector of Str elements, written into an output file's buffer.
+typedef struct {
+    const Schema* schema;
+    SEXP value;
+    int64_t level;
+    int64_t handle;
+    int open;
+    int fallback;
+} r_place_t;
+
+// Act on an in-place call's result: a closed pipe unwinds as the
+// pipe-closed condition, any other refusal as an error.
+static void r_place_rc(r_place_t* pl, int rc) {
+    if (rc == 0) return;
+    pl->open = 0;
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
+    MORLOC_ERROR("@write: an in-place call failed with code %d", rc);
+}
+
+// SLOT-36: place `n` elements at `src` as a leaf the runtime writes whole,
+// checking a Str's bytes as text. A Str that is not text has aborted the
+// batch when this raises.
+static void r_place_leaf(r_place_t* pl, const char* src, size_t n, uint32_t flags, const uint8_t** reached) {
+    const uint8_t* end = NULL;
+    int64_t bad = -1;
+    char* err = NULL;
+    int32_t rc = mlc_write_place_bytes((const uint8_t*)src, (uint64_t)n, flags, *reached, &end, &bad, &err);
+    if (rc == MLC_WRITE_NOT_TEXT) {
+        free(err);
+        pl->open = 0;
+        MORLOC_ERROR("R produced a Str that is not valid UTF-8 (byte %lld of %zu)", (long long)bad, n);
+    }
+    if (err != NULL) {
+        pl->open = 0;
+        morloc_error_take("", err);
+    }
+    r_place_rc(pl, rc);
+    *reached = end;
+}
+
+// The bytes of `x` when it is a leaf of `elem` held in its wire form: a
+// raw vector for a Str or a [U8], a double vector for a [Real]. Returns 0
+// otherwise.
+static int r_leaf_bytes(const Schema* elem, SEXP x, const char** src, size_t* n) {
+    if (elem->type == MORLOC_STRING && TYPEOF(x) == RAWSXP) {
+        *src = (const char*)RAW(x);
+        *n = (size_t)XLENGTH(x);
+        return 1;
+    }
+    if (elem->type != MORLOC_ARRAY) return 0;
+    const Schema* p = elem->parameters[0];
+    if (p->type == MORLOC_UINT8 && TYPEOF(x) == RAWSXP) {
+        *src = (const char*)RAW(x);
+        *n = (size_t)XLENGTH(x);
+        return 1;
+    }
+    if (p->type == MORLOC_FLOAT64 && p->width == sizeof(double) && TYPEOF(x) == REALSXP && !is_integer64(x)) {
+        *src = (const char*)REAL(x);
+        *n = (size_t)XLENGTH(x);
+        return 1;
+    }
+    return 0;
+}
+
+static SEXP r_place_body(void* data) { MAYFAIL
+    r_place_t* pl = (r_place_t*)data;
+    const Schema* elem = r_resolve(pl->schema->parameters[0]);
+    SEXP xs = pl->value;
+    const size_t n = (size_t)XLENGTH(xs);
+    const int strs = TYPEOF(xs) == STRSXP;
+    if (mlc_write_open()) {
+        MORLOC_ERROR("@write: a batch is already being written on this thread (a @write from code run while encoding one)");
+    }
+    int rc = R_TRY(mlc_write_begin, pl->level, pl->handle, 0);
+    if (rc == MLC_WRITE_FALLBACK) {
+        pl->fallback = 1;
+        return R_NilValue;
+    }
+    r_place_rc(pl, rc);
+    pl->open = 1;
+    const size_t width = elem->width;
+    const int run = (elem->fixed_width || elem->type == MORLOC_INT) && width > 0;
+    const uint8_t* reached = NULL;
+    r_walk_t w;
+    for (size_t i = 0; i < n;) {
+        if (run) {
+            uint8_t* slots = NULL;
+            uint64_t placed = 0;
+            rc = R_TRY(mlc_write_place_run, (uint64_t)(n - i), reached, &slots, &placed);
+            r_place_rc(pl, rc);
+            r_walk_init(&w, elem);
+            for (uint64_t j = 0; j < placed; j++) {
+                SEXP x = strs ? STRING_ELT(xs, i + j) : VECTOR_ELT(xs, i + j);
+                r_write_child(&w, elem, slots + j * width, x);
+                r_write_run(&w);
+            }
+            reached = slots + placed * width;
+            i += (size_t)placed;
+            continue;
+        }
+        if (strs) {
+            size_t len = 0;
+            int ascii = 0;
+            // NA is refused here; the runtime checks text that is not ASCII as it copies it.
+            const char* str = r_str_leaf(STRING_ELT(xs, i), &len, &ascii);
+            r_place_leaf(pl, str, len, ascii ? MLC_PLACE_VALID_TEXT : 0, &reached);
+            i++;
+            continue;
+        }
+        SEXP x = VECTOR_ELT(xs, i);
+        const char* leaf = NULL;
+        size_t leaf_n = 0;
+        if (r_leaf_bytes(elem, x, &leaf, &leaf_n)) {
+            r_place_leaf(pl, leaf, leaf_n, 0, &reached);
+            i++;
+            continue;
+        }
+        size_t size = get_shm_size(elem, x);
+        mlc_room_t room;
+        rc = R_TRY(mlc_write_place, (uint64_t)size, reached, &room);
+        r_place_rc(pl, rc);
+        void* cursor = room.data;
+        r_walk_init(&w, elem);
+        w.cursor = &cursor;
+        w.base = (char*)room.base;
+        w.origin = (char*)room.origin;
+        r_write_child(&w, elem, room.slot, x);
+        r_write_run(&w);
+        reached = (const uint8_t*)cursor;
+        i++;
+    }
+    pl->open = 0;
+    rc = R_TRY(mlc_write_commit, reached);
+    r_place_rc(pl, rc);
+    return R_NilValue;
+}
+
+static void r_place_cleanup(void* data, Rboolean jump) {
+    r_place_t* pl = (r_place_t*)data;
+    if (jump && pl->open) {
+        pl->open = 0;
+        mlc_write_abort();
+    }
+}
+
+// 1 when the batch was written in place, 0 when it takes a voidstar copy.
+// An R error aborts the batch and continues to unwind.
+static int r_write_in_place(const Schema* schema, int64_t level, SEXP value, int64_t handle) {
+    if (schema->type != MORLOC_ARRAY) return 0;
+    const Schema* elem = r_resolve(schema->parameters[0]);
+    if (elem->type == MORLOC_TABLE) return 0;
+    if (!(TYPEOF(value) == VECSXP || (TYPEOF(value) == STRSXP && elem->type == MORLOC_STRING))) return 0;
+    r_place_t pl = { schema, value, level, handle, 0, 0 };
+    SEXP cont = PROTECT(R_MakeUnwindCont());
+    R_UnwindProtect(r_place_body, &pl, r_place_cleanup, &pl, cont);
+    UNPROTECT(1);
+    return !pl.fallback;
+}
+
+// One @write's state, freed whether it returns or an R error unwinds it.
+typedef struct {
+    Schema* schema;
+    SEXP value;
+    int64_t level;
+    int64_t handle;
+    void* voidstar;
+    int rc;
+} r_write_t;
+
+static SEXP r_write_body(void* data) { MAYFAIL
+    r_write_t* wr = (r_write_t*)data;
+    if (r_write_in_place(wr->schema, wr->level, wr->value, wr->handle)) return R_NilValue;
+    size_t bytes = get_shm_size(wr->schema, wr->value);
+    wr->voidstar = R_TRY(shmalloc, bytes);
+    void* cursor = (uint8_t*)wr->voidstar + wr->schema->width;
+    to_voidstar_inner(wr->voidstar, &cursor, wr->value, wr->schema);
+    wr->rc = R_TRY(mlc_write, wr->level, wr->handle, wr->voidstar);
+    return R_NilValue;
+}
+
+// Runs again after a normal return, so it frees only once.
+static void r_write_cleanup(void* data, Rboolean jump) {
+    (void)jump;
+    r_write_t* wr = (r_write_t*)data;
+    if (wr->voidstar != NULL) {
+        char* shfree_errmsg = NULL;
+        shfree(wr->voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        wr->voidstar = NULL;
+    }
+}
+
 // @write: serialise value to voidstar, emit one sub-packet.
 SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
@@ -2950,117 +3413,180 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
         || LENGTH(handle_r) != 1) {
         error("mlc_write: handle must be a single number");
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
     int64_t level = i64_from_sexp(level_r);
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    size_t bytes = get_shm_size(schema, value_r);
-    void* voidstar = R_TRY(shmalloc, bytes);
-    void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar_inner(voidstar, &cursor, value_r, schema);
-    int rc = R_TRY(mlc_write, level, handle, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
+    Schema* schema = r_schema(schema_str_r);
+    r_write_t wr = { schema, value_r, level, handle, NULL, 0 };
+    SEXP cont = PROTECT(R_MakeUnwindCont());
+    R_UnwindProtect(r_write_body, &wr, r_write_cleanup, &wr, cont);
+    UNPROTECT(1);
+    r_write_cleanup(&wr, TRUE);
+    if (wr.rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
-// -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; @cellreduce reads them all
-// (morloc_mlc_cell_slots in pool.R) and merges them with the handler's
-// `combine`.
+// -- Native folds (model/runtime/fold.md) --------------------------------
+// FOLD-6, FOLD-10
 
-SEXP morloc_mlc_cell_new(SEXP schema_str_r, SEXP init_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_new: schema must be a single string");
+static void* r_fold_fresh(void* init) {
+    return init;
+}
+
+static void r_fold_release(void** values, size_t n) {
+    for (size_t i = 0; i < n; i++) R_ReleaseObject((SEXP)values[i]);
+    free(values);
+}
+
+SEXP morloc_mlc_fold_new(SEXP init_r) { MAYFAIL
+    int64_t h = R_TRY(mlc_fold_new, (void*)init_r, r_fold_fresh);
+    return make_integer64_scalar(h);
+}
+
+// list(kind, value, fresh): kind 1 with this thread's value, 0 for the side
+// file, 2 for a stream handle (FOLD-9); a fresh value is init, which the
+// caller copies (FOLD-6).
+SEXP morloc_mlc_fold_checkout(SEXP h_r) { MAYFAIL
+    int64_t h = i64_from_sexp(h_r);
+    SEXP out = PROTECT(allocVector(VECSXP, 3));
+    SET_VECTOR_ELT(out, 2, ScalarLogical(FALSE));
+    if (h >= 0) {
+        SET_VECTOR_ELT(out, 0, ScalarInteger(2));
+        UNPROTECT(1);
+        return out;
     }
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    size_t bytes = get_shm_size(schema, init_r);
-    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, bytes);
-    void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar_inner(voidstar, &cursor, init_r, schema);
-    int64_t handle = R_TRY(mlc_cell_new, schema, voidstar);
+    void* value = NULL;
+    int32_t fresh = 0;
+    int32_t r = R_TRY_WITH(UNPROTECT(1), mlc_fold_checkout, h, &value, &fresh);
+    SET_VECTOR_ELT(out, 0, ScalarInteger(r));
+    if (r == 1) {
+        SET_VECTOR_ELT(out, 1, (SEXP)value);
+        SET_VECTOR_ELT(out, 2, ScalarLogical(fresh != 0));
+        if (!fresh) R_ReleaseObject((SEXP)value);
+    }
+    UNPROTECT(1);
+    return out;
+}
+
+SEXP morloc_mlc_fold_store(SEXP h_r, SEXP value_r) { MAYFAIL
+    int64_t h = i64_from_sexp(h_r);
+    R_PreserveObject(value_r);
+    R_TRY_WITH(R_ReleaseObject(value_r), mlc_fold_store, h, (void*)value_r);
+    return R_NilValue;
+}
+
+// FORK-17
+SEXP morloc_mlc_fork_generation(void) {
+    return make_integer64_scalar((int64_t)morloc_fork_generation());
+}
+
+SEXP morloc_mlc_exit_if_forked_since(SEXP g_r) {
+    mlc_exit_if_forked_since((uint64_t)i64_from_sexp(g_r));
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_sink_failed(SEXP h_r) {
+    mlc_sink_failed(i64_from_sexp(h_r));
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_fold_failed(SEXP h_r) {
+    mlc_fold_failed(i64_from_sexp(h_r));
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_fold_drop(SEXP h_r) {
+    void** values = NULL;
+    size_t n = 0;
+    mlc_fold_drop(i64_from_sexp(h_r), &values, &n);
+    r_fold_release(values, n);
+    return R_NilValue;
+}
+
+// A NULL schema (no wire form) fails the fold (SIDE-10).
+SEXP morloc_mlc_side_put(SEXP id_r, SEXP schema_str_r, SEXP value_r) { MAYFAIL
+    int64_t id = i64_from_sexp(id_r);
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        R_TRY(mlc_side_put, id, NULL, NULL);
+        return R_NilValue;
+    }
+    Schema* schema = r_schema(schema_str_r);
+    void* voidstar = to_voidstar(value_r, schema, NULL);
+    R_TRY_WITH(
+        { char* err = NULL; shfree(voidstar, &err); free(err); },
+        mlc_side_put, id, schema, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
-    return make_integer64_scalar(handle);
+    return R_NilValue;
 }
 
-// Shared tail for the accumulator readers. R's from_voidstar copies into
-// R vectors rather than viewing the block, so the block is released here
-// rather than deferred to the end of the call -- a fold reads one of these
-// per batch, and deferring would hold one block per batch.
-static SEXP cell_value_to_r(void* voidstar, Schema* schema) {
-    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
+typedef struct {
+    void* reader;
+    Schema* schema;
+} side_reader_r;
+
+static void side_reader_r_free(SEXP p) {
+    side_reader_r* r = (side_reader_r*)R_ExternalPtrAddr(p);
+    if (r == NULL) return;
+    mlc_side_reader_free(r->reader);
+    free(r);
+    R_ClearExternalPtr(p);
+}
+
+// list(values, reader): the fold's stored values and the reader over its
+// side batches. With a NULL schema, a batch in the file fails the take.
+SEXP morloc_mlc_fold_take(SEXP h_r, SEXP schema_str_r) { MAYFAIL
+    int64_t h = i64_from_sexp(h_r);
+    void** values = NULL;
+    size_t n = 0;
+    char* errmsg = NULL;
+    void* reader = mlc_fold_take(h, &values, &n, &errmsg);
+    SEXP vs = PROTECT(allocVector(VECSXP, (R_xlen_t)n));
+    for (size_t i = 0; i < n; i++) SET_VECTOR_ELT(vs, (R_xlen_t)i, (SEXP)values[i]);
+    r_fold_release(values, n);
+    if (reader == NULL) {
+        UNPROTECT(1);
+        morloc_error_take("", errmsg);
+    }
+    Schema* schema = NULL;
+    if (TYPEOF(schema_str_r) == STRSXP && LENGTH(schema_str_r) == 1) {
+        schema = r_schema(schema_str_r);
+    }
+    side_reader_r* r = (side_reader_r*)calloc(1, sizeof(side_reader_r));
+    if (r == NULL) {
+        mlc_side_reader_free(reader);
+        MORLOC_ERROR("out of memory");
+    }
+    r->reader = reader;
+    r->schema = schema;
+    SEXP p = PROTECT(R_MakeExternalPtr(r, R_NilValue, R_NilValue));
+    R_RegisterCFinalizerEx(p, side_reader_r_free, TRUE);
+    SEXP out = PROTECT(allocVector(VECSXP, 2));
+    SET_VECTOR_ELT(out, 0, vs);
+    SET_VECTOR_ELT(out, 1, p);
+    UNPROTECT(3);
+    return out;
+}
+
+// The next side batch in a list of one, or an empty list at the end.
+SEXP morloc_mlc_side_next(SEXP p) { MAYFAIL
+    side_reader_r* r = (side_reader_r*)R_ExternalPtrAddr(p);
+    if (r == NULL) return allocVector(VECSXP, 0);
+    int32_t eof = 0;
+    void* voidstar = R_TRY_WITH(side_reader_r_free(p), mlc_side_next, r->reader, r->schema, &eof);
+    if (eof) {
+        side_reader_r_free(p);
+        return allocVector(VECSXP, 0);
+    }
+    SEXP out = PROTECT(allocVector(VECSXP, 1));
+    SET_VECTOR_ELT(out, 0, from_voidstar(voidstar, r->schema, morloc_shm_space()));
     char* shfree_errmsg = NULL;
     shfree(voidstar, &shfree_errmsg);
     free(shfree_errmsg);
-    free_schema(schema);
-    return obj;
-}
-
-SEXP morloc_mlc_cell_get(SEXP handle_r, SEXP schema_str_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_get: schema must be a single string");
-    }
-    int64_t handle = i64_from_sexp(handle_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_cell_get, handle, schema);
-    return cell_value_to_r(voidstar, schema);
-}
-
-SEXP morloc_mlc_cell_put(SEXP handle_r, SEXP schema_str_r, SEXP value_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_put: schema must be a single string");
-    }
-    int64_t handle = i64_from_sexp(handle_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    size_t bytes = get_shm_size(schema, value_r);
-    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, bytes);
-    void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar_inner(voidstar, &cursor, value_r, schema);
-    R_TRY(mlc_cell_put, handle, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return R_NilValue;
-}
-
-SEXP morloc_mlc_cell_count(SEXP handle_r) { MAYFAIL
-    int64_t handle = i64_from_sexp(handle_r);
-    int64_t n = R_TRY(mlc_cell_count, handle);
-    return ScalarReal((double)n);
-}
-
-SEXP morloc_mlc_cell_slot(SEXP handle_r, SEXP index_r, SEXP schema_str_r) { MAYFAIL
-    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_cell_slot: schema must be a single string");
-    }
-    int64_t handle = i64_from_sexp(handle_r);
-    int64_t index = i64_from_sexp(index_r);
-    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
-    Schema* schema = R_TRY(parse_schema, schema_str);
-    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_cell_slot, handle, index, schema);
-    return cell_value_to_r(voidstar, schema);
-}
-
-SEXP morloc_mlc_cell_free(SEXP handle_r) { MAYFAIL
-    int64_t handle = i64_from_sexp(handle_r);
-    R_TRY(mlc_cell_free, handle);
-    return R_NilValue;
+    UNPROTECT(1);
+    return out;
 }
 
 SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
@@ -3168,26 +3694,22 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
 
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
-    void* voidstar = to_voidstar(obj_r, schema);
+    void* voidstar = to_voidstar(obj_r, schema, NULL);
     if (!voidstar) {
-        free_schema(schema);
         MORLOC_ERROR("Failed to convert R object to internal representation");
     }
 
-    char* json = R_TRY_WITH(free_schema(schema), mlc_show, voidstar, schema);
+    char* json = R_TRY_WITH({ char* e_ = NULL; shfree(voidstar, &e_); free(e_); }, mlc_show, voidstar, schema);
 
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
 
-    SEXP result = PROTECT(mkString(json));
+    SEXP result = PROTECT(ScalarString(mkCharCE(json, CE_UTF8)));
     free(json);
     UNPROTECT(1);
     return result;
@@ -3234,11 +3756,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;
 
-    const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
-
-    char* schema_str = strdup(schema_cstr);
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
+    Schema* schema = r_schema(schema_str_r);
 
     // Arrow dispatch: a table-typed value is a block. It arrives by
     // reference (an Arrow packet) or in a form the runtime materializes
@@ -3250,9 +3768,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         // PANIC-14: one another pool built is not.
         uint8_t* arrow_ptr = NULL;
         if (materialized) {
-            arrow_ptr = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+            arrow_ptr = R_TRY(get_morloc_data_packet_value, packet, schema);
         } else {
-            arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+            arrow_ptr = R_TRY_INFRA(get_morloc_data_packet_value, packet, schema);
         }
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
@@ -3263,7 +3781,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 shfree((absptr_t)arrow_ptr, &ferr);
                 if (ferr) { free(ferr); }
             }
-            free_schema(schema);
             morloc_error_take("Arrow table failed validation: ", validate_err);
         }
 
@@ -3281,7 +3798,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 shfree((absptr_t)arrow_ptr, &ferr);
                 if (ferr) { free(ferr); }
             }
-            free_schema(schema);
             morloc_error_take("Arrow import failed: ", arrow_err);
         }
 
@@ -3294,7 +3810,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
             UNPROTECT(2);
-            free_schema(schema);
             MORLOC_ERROR("arrow::ImportRecordBatch not found; is the arrow package installed?");
         }
 
@@ -3311,11 +3826,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
         if (arrow_array.release) arrow_array.release(&arrow_array);
 
-        free_schema(schema);
         return obj_r;
     }
     if (format == PACKET_FORMAT_ARROW) {
-        free_schema(schema);
         MORLOC_ERROR("Arrow packet received for a non-table type");
     }
 
@@ -3331,14 +3844,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
         morloc_space_t space = morloc_payload_space(payload, (size_t)header->length);
         if ((size_t)header->length < schema->width) {
-            free_schema(schema);
             MORLOC_ERROR("a %zu-byte inline payload cannot hold its %zu-byte value",
                          (size_t)header->length, schema->width);
         }
         MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, space,
-                          free_schema(schema));
+                          (void)0);
         SEXP obj_r = from_voidstar((const void*)payload, schema, space);
-        free_schema(schema);
         if (obj_r == NULL) {
             MORLOC_ERROR("Failed to convert internal representation to R object");
         }
@@ -3355,7 +3866,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         size_t payload_len = header->length;
         char path[PATH_MAX];
         if (payload_len >= sizeof(path)) {
-            free_schema(schema);
             MORLOC_ERROR("stream ingest: path exceeds PATH_MAX");
         }
         memcpy(path, packet + sizeof(morloc_packet_header_t) + header->offset,
@@ -3373,7 +3883,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 char msg[512];
                 snprintf(msg, sizeof(msg), "stream ingest: %s", open_err);
                 free(open_err);
-                free_schema(schema);
                 MORLOC_ERROR("%s", msg);
             }
             char* len_err = NULL;
@@ -3381,7 +3890,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             if (len_err || total_i64 < 0) {
                 char* cerr = NULL; mlc_close(handle, &cerr);
                 if (cerr) free(cerr);
-                free_schema(schema);
                 if (len_err) {
                     char msg[512];
                     snprintf(msg, sizeof(msg), "stream ingest: mlc_ifile_length failed: %s", len_err);
@@ -3409,7 +3917,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                     free(nerr);
                     char* cerr = NULL; mlc_close(handle, &cerr);
                     if (cerr) free(cerr);
-                    free_schema(schema);
                     MORLOC_ERROR("%s", msg);
                 }
                 if (eof || chunk == NULL) break;
@@ -3424,7 +3931,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                     UNPROTECT(2);
                     char* cerr = NULL; mlc_close(handle, &cerr);
                     if (cerr) free(cerr);
-                    free_schema(schema);
                     MORLOC_ERROR("stream ingest: sub-packets decode to different R types");
                 }
                 R_xlen_t sz = XLENGTH(chunk_r);
@@ -3449,7 +3955,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 REPROTECT(result, result_ix);
             }
             UNPROTECT(1);
-            free_schema(schema);
             return result;
         }
         // Not a stream file -- fall through to legacy FILE+DATA handling.
@@ -3458,13 +3963,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // SHM paths (RPTR source from upstream pool/daemon, or our own
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
-    bool tracked = false;
     // PANIC-13, PANIC-14
     uint8_t* voidstar = NULL;
     if (is_rptr) {
-        voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+        voidstar = R_TRY_INFRA(get_morloc_data_packet_value, packet, schema);
     } else {
-        voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+        voidstar = R_TRY(get_morloc_data_packet_value, packet, schema);
     }
 
     if (is_rptr) {
@@ -3479,14 +3983,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
         if (!acquired) {
-            free_schema(schema);
             MORLOC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
+        shm_tracker_push((absptr_t)voidstar);
     }
 
-    MORLOC_REJECT_NUL(check_nul, voidstar, schema, morloc_shm_space(), { if (!tracked) free_schema(schema); });
+    MORLOC_REJECT_NUL(check_nul, voidstar, schema, morloc_shm_space(), {});
 
     r_value_read_t value_read = { voidstar, schema };
     SEXP obj_r;
@@ -3502,11 +4004,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
         }
-        // The tracker owns the schema only where it took the block; the
-        // block itself belongs to its sender unless we allocated it.
-        if (!tracked) {
-            free_schema(schema);
-        }
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
@@ -3519,9 +4016,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
-    }
-    if (!tracked) {
-        free_schema(schema);
     }
 
     return obj_r;
@@ -3602,22 +4096,11 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         }
     }
 
-    // The callee took a reference on the result's block before the packet
-    // left it, and that reference is ours now. Inherit it so the tracker
-    // releases it at the start of the next request, once R has finished
-    // with the deserialized form.
+    // SHM-3, SHM-8, SHM-13
     {
-        const morloc_packet_header_t* res_header =
-            (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)((uint8_t*)result
-                + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-            if (res_voidstar) {
-                shm_tracker_push((absptr_t)res_voidstar, NULL);
-            }
+        absptr_t res_block = R_TRY_WITH_INFRA({free(packet); free(result);}, mlc_packet_block, result);
+        if (res_block) {
+            shm_tracker_push(res_block);
         }
     }
 
@@ -3700,17 +4183,11 @@ SEXP morloc_release_packet_shm(SEXP packet_r) {
         return R_NilValue;
     }
     const uint8_t* packet = (const uint8_t*)RAW(packet_r);
-    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
-        return R_NilValue;
-    }
-    size_t relptr = *(size_t*)(packet
-        + sizeof(morloc_packet_header_t) + hdr->offset);
-    char* resolve_err = NULL;
-    void* voidstar = rel2abs(relptr, &resolve_err);
-    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-    if (voidstar) {
-        shm_tracker_release_one((absptr_t)voidstar);
+    if (((const morloc_packet_header_t*)packet)->command.data.source == PACKET_SOURCE_RPTR) {
+        absptr_t block = mlc_tracked_block(packet);
+        if (block) {
+            shm_tracker_release_one(block);
+        }
     }
     return R_NilValue;
 }
@@ -4057,7 +4534,6 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
         mlc_trace("run_job READ-FAIL client=%d err=%s\n", client_fd, errmsg);
         send_fail_to_client(client_fd, errmsg);
         free(errmsg);
-        close_socket(client_fd);
         return;
     }
 
@@ -4096,7 +4572,6 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     mlc_trace("run_job EXIT client=%d\n", client_fd);
 
     free(packet);
-    close_socket(client_fd);
 }
 
 // }}} serving a call
@@ -4387,19 +4862,28 @@ static void __attribute__((unused)) _r_init_impl(DllInfo *info);
 void R_init_librmorloc(DllInfo *info) { _r_init_impl(info); }
 void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
 
+#ifndef MORLOC_BINDING_BUILD_ID
+#error "MORLOC_BINDING_BUILD_ID is set by morloc init (LIFE-6)"
+#endif
 static void _r_init_impl(DllInfo *info) {
+    morloc_require_build(MORLOC_BINDING_BUILD_ID);
     morloc_install_panic_hook(NULL);
     R_CallMethodDef callMethods[] = {
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
-        {"morloc_mlc_cell_new", (DL_FUNC) &morloc_mlc_cell_new, 2},
-        {"morloc_mlc_cell_get", (DL_FUNC) &morloc_mlc_cell_get, 2},
-        {"morloc_mlc_cell_put", (DL_FUNC) &morloc_mlc_cell_put, 3},
-        {"morloc_mlc_cell_count", (DL_FUNC) &morloc_mlc_cell_count, 1},
-        {"morloc_mlc_cell_slot", (DL_FUNC) &morloc_mlc_cell_slot, 3},
-        {"morloc_mlc_cell_free", (DL_FUNC) &morloc_mlc_cell_free, 1},
+        {"morloc_mlc_fold_new", (DL_FUNC) &morloc_mlc_fold_new, 1},
+        {"morloc_mlc_fold_checkout", (DL_FUNC) &morloc_mlc_fold_checkout, 1},
+        {"morloc_mlc_fold_store", (DL_FUNC) &morloc_mlc_fold_store, 2},
+        {"morloc_mlc_fold_failed", (DL_FUNC) &morloc_mlc_fold_failed, 1},
+        {"morloc_mlc_sink_failed", (DL_FUNC) &morloc_mlc_sink_failed, 1},
+        {"morloc_mlc_fork_generation", (DL_FUNC) &morloc_mlc_fork_generation, 0},
+        {"morloc_mlc_exit_if_forked_since", (DL_FUNC) &morloc_mlc_exit_if_forked_since, 1},
+        {"morloc_mlc_fold_drop", (DL_FUNC) &morloc_mlc_fold_drop, 1},
+        {"morloc_mlc_fold_take", (DL_FUNC) &morloc_mlc_fold_take, 2},
+        {"morloc_mlc_side_put", (DL_FUNC) &morloc_mlc_side_put, 3},
+        {"morloc_mlc_side_next", (DL_FUNC) &morloc_mlc_side_next, 1},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
         {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},

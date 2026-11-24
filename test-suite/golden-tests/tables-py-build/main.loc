@@ -28,5 +28,5 @@ mvp_typed total take = sliceRows 0 take (makeXY_typed total)
 foo :: Int -> Table n r -> Table m r
 foo n t = sliceRows 0 n t
 
-mvp_polymorphic :: n@U64 -> Table m r
+mvp_polymorphic :: n@U64 -> Table m {x=Int, y=Str, z=Real}
 mvp_polymorphic n = foo 3 (makeXYZ n)

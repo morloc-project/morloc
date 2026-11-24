@@ -1,0 +1,24 @@
+-- GEN-6: a sourced Rust file names the generated types by their paths
+-- from the crate root (GEN-4).
+module main (fooRs, age, area)
+
+import root-rust (idrust, Str, Int, Real, List)
+
+record Inner where
+  label :: Str
+  tags :: [Str]
+
+record Person where
+  name :: Str
+  age :: Int
+  inner :: Inner
+
+data Shape = Circle Real | Rect Real Real
+
+source Rust from "geo.rs" ("person_age" as age, "shape_area" as area)
+
+age :: Person -> Int
+area :: Shape -> Real
+
+fooRs :: Person -> Person
+fooRs p = idrust p

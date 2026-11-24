@@ -7,4 +7,5 @@ def py_pt_a(p):
 
 
 def py_flip(d):
-    return 1 - int(d)
+    from mlc_types._local.main import Dir
+    return Dir(1 - d.value)

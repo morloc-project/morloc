@@ -34,6 +34,8 @@ RULES = [
     (r"\becho\s+-n\b", "make", "macOS /bin/sh prints -n literally; use printf"),
     (r"\bwc\s+-[lcw]\b[^|;)]*>>", "any", "BSD wc pads its count; pipe through `tr -d ' '`"),
     (r"\"[^\"]*\$+\((?![^)]*tr -d)[^)]*\bwc\s+-[lcw]\b[^)]*\)", "any", "BSD wc pads its count; pipe through `tr -d ' '`"),
+    (r"\bpaste((\s+-[^\s|;>)&]+)+)\s*(?:[|;>)&]|$)", "any", "BSD paste needs a file operand; read stdin with `-`"),
+    (r"\buniq\s+-[A-Za-z]*c\b(?![^;)]*\|\s*(?:awk|tr\s+-s|sed)\b)", "any", "BSD uniq -c pads counts differently; normalize with awk"),
     (r"(?<![+{])\"\$\{[A-Za-z_]\w*\[@\]\}\"", "sh", "an empty array is unbound under set -u in bash 3.2; use ${a[@]+\"${a[@]}\"}"),
 ]
 

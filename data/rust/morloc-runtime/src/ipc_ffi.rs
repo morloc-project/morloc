@@ -105,8 +105,12 @@ pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SendFail {
     /// The peer's end was closed: no byte sent from here on reached it.
-    PeerClosed,
-    Other,
+    PeerClosed(String),
+    Other(String),
+}
+
+fn os_reason(errno: i32) -> String {
+    std::io::Error::from_raw_os_error(errno).to_string()
 }
 
 /// Send `parts` in order as one stream of bytes. The iovecs are consumed.
@@ -151,14 +155,14 @@ pub(crate) unsafe fn send_parts(fd: i32, parts: &mut [libc::iovec]) -> Result<()
             continue;
         }
         if n == 0 {
-            return Err(SendFail::Other);
+            return Err(SendFail::Other("the send accepted no bytes".into()));
         }
         let e = crate::utility::errno_val();
         if e == libc::EINTR {
             continue;
         }
-        if e == libc::EPIPE || e == libc::ECONNRESET {
-            return Err(SendFail::PeerClosed);
+        if e == libc::EPIPE || e == libc::ECONNRESET || e == libc::ENOTCONN {
+            return Err(SendFail::PeerClosed(os_reason(e)));
         }
         if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
             // Send buffer full on a non-blocking socket. Bail if the peer has
@@ -169,17 +173,17 @@ pub(crate) unsafe fn send_parts(fd: i32, parts: &mut [libc::iovec]) -> Result<()
             let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
             if let Some(p) = peer.get_or_insert_with(|| Peer::of(fd)) {
                 if poll_wait(&mut pfd, 1, &PEER_CHECK) == 0 && !p.alive() {
-                    return Err(SendFail::PeerClosed);
+                    return Err(SendFail::PeerClosed("the receiving process ended".into()));
                 }
                 continue;
             }
             if stalled_since.get_or_insert_with(std::time::Instant::now).elapsed() >= stall_dur {
-                return Err(SendFail::Other);
+                return Err(SendFail::Other(format!("no byte was taken for {stall_dur:?}")));
             }
             let _ = poll_wait(&mut pfd, 1, &stall); // EINTR just re-loops (deadline still bounds it)
             continue;
         }
-        return Err(SendFail::Other);
+        return Err(SendFail::Other(os_reason(e)));
     }
     Ok(())
 }
@@ -645,7 +649,13 @@ enum Wait<'a> {
 unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
     match read_packet_raw(client_fd, wait, reply) {
-        Ok(p) => p,
+        // NET-11: this connection carries one packet, so bytes behind it are a defect.
+        Ok(p) if p.past_end => {
+            libc::free(p.packet as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("a reply was followed by more bytes on its connection".into()));
+            ptr::null_mut()
+        }
+        Ok(p) => p.packet,
         Err(ReadFailure::Packet(e)) => {
             *errmsg = e;
             ptr::null_mut()
@@ -669,7 +679,14 @@ pub(crate) enum ReadFailure {
     Packet(*mut c_char),
 }
 
-unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mut u8, ReadFailure> {
+/// One packet read from a socket. `past_end`: the read also took bytes
+/// that follow the packet, which are not kept (NET-11).
+pub(crate) struct ReadPacket {
+    pub(crate) packet: *mut u8,
+    pub(crate) past_end: bool,
+}
+
+unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<ReadPacket, ReadFailure> {
     let mut reader = PacketReader {
         fd: client_fd,
         pfd: libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 },
@@ -695,6 +712,8 @@ unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mu
     if result.is_null() {
         return Err(ReadFailure::Alloc);
     }
+    // NET-11: a read past the packet is reported; its caller ends the connection.
+    let past_end = have > packet_length;
     let copied = have.min(packet_length);
     ptr::copy_nonoverlapping(head.as_ptr(), result, copied);
     let mut got = copied;
@@ -707,7 +726,7 @@ unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mu
             }
         }
     }
-    Ok(result)
+    Ok(ReadPacket { packet: result, past_end })
 }
 
 /// Bytes read before the header is parsed: a whole small packet.
@@ -865,15 +884,32 @@ pub(crate) unsafe fn stream_from_client(
 }
 
 pub(crate) unsafe fn read_request(client_fd: i32) -> Result<*mut u8, ReadFailure> {
+    // NET-7: a held descriptor's number repeats, so nothing of the last request carries over.
+    REQUEST.with(|r| {
+        let mut request = r.get();
+        request.fd = -1;
+        request.asked = false;
+        request.replied_kept = false;
+        r.set(request);
+    });
     // NET-5: a sender that cannot be named has its stalls bounded instead.
-    let request = match Peer::of(client_fd) {
+    let read = match Peer::of(client_fd) {
         Some(peer) => read_packet_raw(client_fd, Wait::Peer(&peer), false),
         None => read_packet_raw(client_fd, Wait::Stall, false),
     }?;
+    // NET-11: nothing follows a request (NET-7), so one with bytes behind it is not run.
+    if read.past_end {
+        libc::free(read.packet as *mut c_void);
+        return Err(ReadFailure::Io("a request was followed by more bytes on its connection"));
+    }
+    let request = read.packet;
+    let asked = take_keep_bit(request);
     REQUEST.with(|r| r.set(Request {
         fd: client_fd,
         generation: crate::fork_policy::generation(),
         failures: Failures::now(),
+        asked,
+        replied_kept: false,
     }));
     LAST_PEER_DEATH.with(|m| m.borrow_mut().take());
     Ok(request)
@@ -884,11 +920,51 @@ struct Request {
     fd: i32,
     generation: u64,
     failures: Failures,
+    asked: bool,
+    replied_kept: bool,
+}
+
+// NET-7
+pub(crate) fn request_asked_keep(client_fd: i32) -> bool {
+    let request = REQUEST.with(|r| r.get());
+    request.fd == client_fd && request.asked
+}
+
+// NET-9
+pub(crate) fn take_replied_kept(client_fd: i32) -> bool {
+    REQUEST.with(|r| {
+        let mut request = r.get();
+        let kept = request.fd == client_fd && request.replied_kept;
+        request.replied_kept = false;
+        r.set(request);
+        kept
+    })
+}
+
+// NET-9: a fork worker keeps a connection whose caller asked.
+fn reply_keeps(client_fd: i32) -> bool {
+    request_asked_keep(client_fd) && crate::fork_pool::keeps_connections()
+}
+
+fn note_replied_kept(client_fd: i32) {
+    REQUEST.with(|r| {
+        let mut request = r.get();
+        if request.fd == client_fd {
+            request.replied_kept = true;
+            r.set(request);
+        }
+    });
 }
 
 thread_local! {
     static REQUEST: std::cell::Cell<Request> = const {
-        std::cell::Cell::new(Request { fd: -1, generation: 0, failures: Failures { peer_deaths: 0, pipe_closes: 0 } })
+        std::cell::Cell::new(Request {
+            fd: -1,
+            generation: 0,
+            failures: Failures { peer_deaths: 0, pipe_closes: 0 },
+            asked: false,
+            replied_kept: false,
+        })
     };
     // LIFE-5
     static LAST_PEER_DEATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -960,11 +1036,15 @@ pub(crate) fn morloc_exit_if_forked() {
 
 pub(crate) fn exit_if_forked_since(generation: u64) {
     if generation != crate::fork_policy::generation() {
-        let msg = b"morloc: a process forked during a call returned into the runtime; it exits instead of replying\n";
-        unsafe {
-            libc::write(2, msg.as_ptr() as *const c_void, msg.len());
-            libc::_exit(1);
-        }
+        exit_forked();
+    }
+}
+
+pub(crate) fn exit_forked() -> ! {
+    let msg = b"morloc: a process forked during a call returned into the runtime; it exits instead of replying\n";
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const c_void, msg.len());
+        libc::_exit(1);
     }
 }
 
@@ -1082,6 +1162,7 @@ unsafe fn drop_conn(fd: i32) {
 // NET-7: a forked child closes its copies of its parent's connections.
 pub(crate) fn after_fork_in_child() {
     use std::sync::atomic::Ordering;
+    crate::fork_pool::after_fork_in_child();
     for s in CONN_FDS.iter() {
         let fd = s.swap(-1, Ordering::AcqRel);
         if fd >= 0 {
@@ -1134,6 +1215,24 @@ fn put_cached(path: &[u8], fd: i32) -> bool {
     CONN_CACHE
         .try_with(|cache| cache.borrow_mut().0.push(CachedConn { path: path.to_vec(), fd, generation }))
         .is_ok()
+}
+
+// WPOOL-10: NET-7's connections of an idle thread, so it pins no worker of
+// another pool (NET-8, NET-9).
+pub(crate) fn close_kept_connections() {
+    let generation = crate::fork_policy::generation();
+    let kept: Vec<CachedConn> = CONN_CACHE.try_with(|c| c.borrow_mut().0.drain(..).collect()).unwrap_or_default();
+    for c in kept {
+        // FORK-14
+        if c.generation == generation {
+            unsafe { drop_conn(c.fd) };
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn keep_connection_for_test(path: &[u8], fd: i32) -> bool {
+    put_cached(path, fd)
 }
 
 /// How many connections this thread holds open for reuse.
@@ -1250,6 +1349,13 @@ pub(crate) unsafe fn take_keep_bit(packet: *mut u8) -> bool {
     true
 }
 
+// NET-7
+unsafe fn is_not_run(packet: *const u8) -> bool {
+    use morloc_runtime_types::packet::{MODE_NOT_RUN, PKT_MODE_OFF};
+    let at = packet.add(PKT_MODE_OFF);
+    u16::from_le_bytes([*at, *at.add(1)]) & MODE_NOT_RUN != 0
+}
+
 /// Set the keep bit on a reply the callee is about to send.
 pub(crate) unsafe fn set_keep_bit(packet: *mut u8) {
     use morloc_runtime_types::packet::{MODE_KEEP, PKT_MODE_OFF};
@@ -1284,7 +1390,7 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     // the peer closed, which delivered nothing; that alone is retried.
     let path = CStr::from_ptr(socket_path).to_bytes();
     let mut cached = take_cached(path);
-    let (client_fd, tracked) = loop {
+    let (client_fd, tracked, past_end, result) = loop {
         let reused = cached.is_some();
         let (fd, tracked) = match cached.take() {
             Some(fd) => (fd, true),
@@ -1298,38 +1404,55 @@ pub(crate) unsafe fn send_and_receive_over_socket(
             },
         };
         match send_request(fd, packet, packet_size, tracked) {
-            Ok(()) => break (fd, tracked),
-            Err(SendFail::PeerClosed) if reused => drop_conn(fd),
-            Err(_) => {
+            Ok(()) => {}
+            Err(SendFail::PeerClosed(_)) if reused => {
                 drop_conn(fd);
-                return peer_died(socket_path, "the request could not be sent");
+                continue;
+            }
+            Err(SendFail::PeerClosed(why) | SendFail::Other(why)) => {
+                drop_conn(fd);
+                return peer_died(socket_path, &format!("the request could not be sent: {why}"));
             }
         }
-    };
 
-    if trace_close_enabled() {
-        eprintln!("[MLC_IPC] pid={} sent request fd={} bytes={} to '{}'",
-            libc::getpid(), client_fd, packet_size,
-            CStr::from_ptr(socket_path).to_string_lossy());
-    }
-
-    let peer = Peer::of(client_fd);
-    let result = match read_packet_raw(client_fd, reply_wait(&peer), true) {
-        Ok(p) => p,
-        Err(ReadFailure::Io(why)) => {
-            drop_conn(client_fd);
-            return peer_died(socket_path, why);
+        if trace_close_enabled() {
+            eprintln!("[MLC_IPC] pid={} sent request fd={} bytes={} to '{}'",
+                libc::getpid(), fd, packet_size,
+                CStr::from_ptr(socket_path).to_string_lossy());
         }
-        Err(ReadFailure::Alloc) => {
-            drop_conn(client_fd);
-            set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
+
+        let peer = Peer::of(fd);
+        let (past_end, result) = match read_packet_raw(fd, reply_wait(&peer), true) {
+            Ok(p) => (p.past_end, p.packet),
+            Err(ReadFailure::Io(why)) => {
+                drop_conn(fd);
+                return peer_died(socket_path, why);
+            }
+            Err(ReadFailure::Alloc) => {
+                drop_conn(fd);
+                set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
+                return ptr::null_mut();
+            }
+            Err(ReadFailure::Packet(e)) => {
+                drop_conn(fd);
+                *errmsg = e;
+                return ptr::null_mut();
+            }
+        };
+        // NET-7: a callee that let a kept connection go did not run the request on it.
+        if is_not_run(result) {
+            libc::free(result as *mut c_void);
+            drop_conn(fd);
+            if reused {
+                continue;
+            }
+            set_errmsg(errmsg, &MorlocError::Ipc(format!(
+                "'{}' answered a call on a new connection with a not-run notice",
+                CStr::from_ptr(socket_path).to_string_lossy()
+            )));
             return ptr::null_mut();
         }
-        Err(ReadFailure::Packet(e)) => {
-            drop_conn(client_fd);
-            *errmsg = e;
-            return ptr::null_mut();
-        }
+        break (fd, tracked, past_end, result);
     };
     let reply_header = &*(result as *const morloc_runtime_types::packet::PacketHeader);
     if reply_header.is_pipe_closed() {
@@ -1348,11 +1471,17 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     }
 
     let kept = take_keep_bit(result);
-    if !(kept && tracked && put_cached(path, client_fd)) {
+    // NET-11: bytes behind the reply can only be a revoke's notice.
+    if !(kept && tracked && !past_end && put_cached(path, client_fd)) {
         drop_conn(client_fd);
     }
     // SHM-8
-    crate::packet_ffi::inherit_reply(result);
+    if let Err(e) = crate::packet_ffi::inherit_reply(result) {
+        crate::shm::exit_if_shared_memory_lost(&e.to_string());
+        libc::free(result as *mut c_void);
+        set_errmsg(errmsg, &e);
+        return ptr::null_mut();
+    }
     result
 }
 
@@ -1481,7 +1610,15 @@ pub(crate) unsafe fn mlc_spawn_watched(
         let result = read_packet(fd, Wait::Forever, true, &mut err);
         close_socket(fd);
         // SHM-8
-        crate::packet_ffi::inherit_reply(result);
+        if let Err(e) = crate::packet_ffi::inherit_reply(result) {
+            crate::shm::exit_if_shared_memory_lost(&e.to_string());
+            libc::free(result as *mut c_void);
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
+            let _ = crate::stream::shared_channel_fail(handle, &e.to_string());
+            return;
+        }
         if !err.is_null() {
             libc::free(err as *mut c_void);
             let _ = crate::stream::shared_channel_fail(
@@ -1540,9 +1677,14 @@ pub(crate) unsafe fn send_reply_to_foreign_server(
         use morloc_runtime_types::packet::PKT_MODE_OFF;
         std::ptr::copy_nonoverlapping(packet.add(PKT_MODE_OFF), p.add(PKT_MODE_OFF), 2);
     }
-    let sent = send_reply_packet(client_fd, substitute.unwrap_or(packet), release, errmsg);
+    let keep = reply_keeps(client_fd);
+    let sent = send_reply_packet(client_fd, substitute.unwrap_or(packet), release, keep, errmsg);
     if let Some(p) = substitute {
         libc::free(p as *mut c_void);
+    }
+    // NET-9: held only once the whole reply saying so is out.
+    if keep && sent > 0 {
+        note_replied_kept(client_fd);
     }
     sent
 }
@@ -1551,6 +1693,7 @@ unsafe fn send_reply_packet(
     client_fd: i32,
     packet: *mut u8,
     release: Option<unsafe extern "C" fn()>,
+    keep: bool,
     errmsg: *mut *mut c_char,
 ) -> usize {
     let mut err: *mut c_char = ptr::null_mut();
@@ -1570,7 +1713,7 @@ unsafe fn send_reply_packet(
         return 0;
     }
 
-    if !send_all(client_fd, packet, size) {
+    if !send_with_keep_bit(client_fd, packet, size, keep) {
         // Nobody received the packet, so nobody will release the reference
         // taken for its recipient.
         crate::packet_ffi::revoke_packet_reference(packet);
@@ -1581,6 +1724,23 @@ unsafe fn send_reply_packet(
     }
 
     size
+}
+
+// NET-7: the header goes from a copy, since the packet may be the language's own value.
+unsafe fn send_with_keep_bit(fd: i32, packet: *const u8, size: usize, keep: bool) -> bool {
+    use morloc_runtime_types::packet::{MODE_KEEP, PKT_HEADER_SIZE, PKT_MODE_OFF};
+    if !keep || size < PKT_HEADER_SIZE {
+        return send_all(fd, packet, size);
+    }
+    let mut header = [0u8; PKT_HEADER_SIZE];
+    ptr::copy_nonoverlapping(packet, header.as_mut_ptr(), PKT_HEADER_SIZE);
+    let mode = u16::from_le_bytes([header[PKT_MODE_OFF], header[PKT_MODE_OFF + 1]]) | MODE_KEEP;
+    header[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&mode.to_le_bytes());
+    let mut parts = [
+        libc::iovec { iov_base: header.as_mut_ptr() as *mut c_void, iov_len: PKT_HEADER_SIZE },
+        libc::iovec { iov_base: packet.add(PKT_HEADER_SIZE) as *mut c_void, iov_len: size - PKT_HEADER_SIZE },
+    ];
+    send_parts(fd, &mut parts).is_ok()
 }
 
 // ── Accept ──────────────────────────────────────────────────────────────────
@@ -2215,6 +2375,32 @@ mod dispatch_fork_tests {
         assert!(waited < std::time::Duration::from_secs(5), "waited {waited:?}");
     }
 
+    #[test]
+    fn a_failed_send_names_the_os_error() {
+        let p = hold_pipe();
+        let mut byte = 0u8;
+        let mut parts = [libc::iovec { iov_base: &mut byte as *mut u8 as *mut c_void, iov_len: 1 }];
+        let got = unsafe { send_parts(p[1], &mut parts) };
+        unsafe {
+            libc::close(p[0]);
+            libc::close(p[1]);
+        }
+        let want = std::io::Error::from_raw_os_error(libc::ENOTSOCK).to_string();
+        assert_eq!(got, Err(SendFail::Other(want)));
+    }
+
+    #[test]
+    fn a_send_on_a_socket_with_no_peer_is_peer_closed() {
+        let fd = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let mut byte = 0u8;
+        let mut parts = [libc::iovec { iov_base: &mut byte as *mut u8 as *mut c_void, iov_len: 1 }];
+        let got = unsafe { send_parts(fd, &mut parts) };
+        unsafe { libc::close(fd) };
+        let want = std::io::Error::from_raw_os_error(libc::ENOTCONN).to_string();
+        assert_eq!(got, Err(SendFail::PeerClosed(want)));
+    }
+
     fn drain(fd: i32) -> Vec<u8> {
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
@@ -2263,7 +2449,14 @@ mod dispatch_fork_tests {
         unsafe { libc::close(peer) };
         let has = |needle: &[u8]| got.windows(needle.len()).any(|w| w == needle);
         assert!(!has(b"from-the-child"), "a child forked during a dispatch replied to its parent's request");
-        assert!(has(b"from-the-parent"), "the parent's reply was lost");
+        // LIFE-5: a concurrent test's peer death may turn the parent's reply into a dead-peer packet.
+        let mut err: *mut c_char = ptr::null_mut();
+        let size = if got.len() < morloc_runtime_types::packet::PKT_HEADER_SIZE {
+            0
+        } else {
+            unsafe { crate::packet_ffi::morloc_packet_size(got.as_ptr(), &mut err) }
+        };
+        assert!(err.is_null() && size > 0 && size == got.len(), "the peer did not get exactly the parent's reply: {} bytes", got.len());
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1, "child status {status}");
     }
 }
@@ -2389,6 +2582,19 @@ mod c_abi {
         super::morloc_exit_if_forked()
     }
 
+    /// FORK-17: called when a sourced call returns, with the generation it
+    /// recorded on entry.
+    #[no_mangle]
+    pub extern "C" fn mlc_exit_if_forked_since(generation: u64) {
+        super::exit_if_forked_since(generation)
+    }
+
+    /// FORK-17: a binding that found its own record of the call stale.
+    #[no_mangle]
+    pub extern "C" fn mlc_exit_forked() {
+        super::exit_forked()
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn send_and_receive_over_socket(socket_path: *const c_char, packet: *const u8, errmsg: *mut *mut c_char) -> *mut u8 {
         super::send_and_receive_over_socket(socket_path, packet, errmsg)
@@ -2413,7 +2619,7 @@ mod c_abi {
 #[cfg(test)]
 mod reuse_tests {
     use super::*;
-    use morloc_runtime_types::packet::{PacketHeader, MODE_KEEP, PKT_HEADER_SIZE, PKT_MODE_OFF};
+    use morloc_runtime_types::packet::{PacketHeader, MODE_KEEP, MODE_NOT_RUN, PKT_HEADER_SIZE, PKT_MODE_OFF};
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2425,8 +2631,18 @@ mod reuse_tests {
         Close,
         DieAfterRead,
         // NET-7: answers with `return_ping` and closes, as the accept loop
-        // and the Python and R pools answer a ping.
+        // answers a ping.
         Pong,
+        // NET-7: keeps, then answers the next request on the connection
+        // with a not-run notice and closes, as a fork worker revokes.
+        Revoke,
+        // NET-7: answers every request with a not-run notice.
+        NotRun,
+        // NET-11: on its first connection, writes a kept reply of this many
+        // bytes and a revoke's notice in one write, waits until the next
+        // request has arrived, and closes without reading it; later
+        // connections keep.
+        RevokeCoalesced(usize),
     }
 
     struct TestCallee {
@@ -2443,6 +2659,7 @@ mod reuse_tests {
     }
 
     fn callee(behaviour: Callee) -> TestCallee {
+        use std::os::fd::AsRawFd;
         let dir = std::env::temp_dir().join(format!("mlc-reuse-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2461,17 +2678,47 @@ mod reuse_tests {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { return };
                 accepts.fetch_add(1, Ordering::SeqCst);
-                if behaviour != Callee::Pong {
+                if !matches!(behaviour, Callee::Pong | Callee::RevokeCoalesced(_)) {
                     conns.lock().unwrap().push(conn.try_clone().unwrap());
                 }
                 let (runs, eofs) = (runs.clone(), eofs.clone());
+                let first = accepts.load(Ordering::SeqCst) == 1;
+                let mut served = 0;
                 std::thread::spawn(move || loop {
                     let mut header = [0u8; PKT_HEADER_SIZE];
                     if conn.read_exact(&mut header).is_err() {
                         eofs.fetch_add(1, Ordering::SeqCst);
                         return;
                     }
+                    if behaviour == Callee::NotRun || (behaviour == Callee::Revoke && served == 1) {
+                        let mut notice = PacketHeader::ping().to_bytes();
+                        notice[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_NOT_RUN.to_le_bytes());
+                        let _ = conn.write_all(&notice);
+                        return;
+                    }
+                    served += 1;
                     runs.fetch_add(1, Ordering::SeqCst);
+                    if let (Callee::RevokeCoalesced(size), true) = (behaviour, first) {
+                        let mut reply = PacketHeader::ping();
+                        reply.length = (size - PKT_HEADER_SIZE) as u64;
+                        let mut bytes = reply.to_bytes().to_vec();
+                        bytes[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_KEEP.to_le_bytes());
+                        bytes.resize(size, 0);
+                        let mut notice = PacketHeader::ping().to_bytes();
+                        notice[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_NOT_RUN.to_le_bytes());
+                        bytes.extend_from_slice(&notice);
+                        conn.write_all(&bytes).unwrap();
+                        let mut peek = [0u8; PKT_HEADER_SIZE];
+                        loop {
+                            let n = unsafe {
+                                libc::recv(conn.as_raw_fd(), peek.as_mut_ptr() as *mut c_void, PKT_HEADER_SIZE, libc::MSG_PEEK)
+                            };
+                            if n <= 0 || n as usize == PKT_HEADER_SIZE {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
                     if behaviour == Callee::DieAfterRead {
                         let _ = conn.shutdown(std::net::Shutdown::Both);
                         return;
@@ -2484,7 +2731,7 @@ mod reuse_tests {
                         unsafe { libc::free(pong as *mut c_void) };
                         return;
                     }
-                    let keep = behaviour == Callee::Keep && mode_of(&header) & MODE_KEEP != 0;
+                    let keep = matches!(behaviour, Callee::Keep | Callee::Revoke) && mode_of(&header) & MODE_KEEP != 0;
                     let mut reply = PacketHeader::ping().to_bytes();
                     if keep {
                         reply[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_KEEP.to_le_bytes());
@@ -2609,6 +2856,113 @@ mod reuse_tests {
         }
         assert!(freed, "the callee saw the connection end while the child lived");
         let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    #[test]
+    fn a_not_run_reply_on_a_kept_connection_is_retried_once() {
+        let t = callee(Callee::Revoke);
+        assert_eq!(call(&t), Ok(0));
+        assert_eq!(call(&t), Ok(0), "the revoked call was not retried");
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 2);
+        assert_eq!(t.runs.load(Ordering::SeqCst), 2, "the call ran once");
+        assert_eq!(cached_connections(), 1);
+        drop_cached_connections();
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    // NET-11: a revoke's notice read with the kept reply in front of it,
+    // whole or in part, ends the connection, so the next call is not sent
+    // on a connection whose callee will never read it.
+    #[test]
+    fn a_notice_read_behind_a_kept_reply_ends_the_connection() {
+        let mut failed = Vec::new();
+        for size in [PKT_HEADER_SIZE, 4064, 4065, 4095, 4096, 4097, 9000] {
+            let t = callee(Callee::RevokeCoalesced(size));
+            let got = (call(&t), call(&t), t.runs.load(Ordering::SeqCst), t.accepts.load(Ordering::SeqCst));
+            if got != (Ok(0), Ok(0), 2, 2) {
+                failed.push(format!("reply of {size} bytes: (first, second, runs, accepts) = {got:?}"));
+            }
+            drop_cached_connections();
+            let _ = std::fs::remove_dir_all(&t.dir);
+        }
+        assert!(failed.is_empty(), "the call after a notice read behind a kept reply:\n{}", failed.join("\n"));
+    }
+
+    // NET-11: nothing follows a request, so one with bytes behind it is
+    // refused, not run.
+    #[test]
+    fn a_request_with_bytes_behind_it_is_refused() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut two = PacketHeader::ping().to_bytes().to_vec();
+        two.extend_from_slice(&PacketHeader::ping().to_bytes());
+        (&theirs).write_all(&two).unwrap();
+        use std::os::fd::AsRawFd;
+        let got = unsafe { read_request(ours.as_raw_fd()) };
+        assert!(matches!(got, Err(ReadFailure::Io(_))), "a request with bytes behind it was read");
+    }
+
+    // NET-11: bytes queued before the peer's end closes are read before its
+    // end of file, even when the peer left bytes of ours unread.
+    #[test]
+    fn queued_bytes_are_read_before_the_end_of_a_closed_peer() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut notice = PacketHeader::ping().to_bytes();
+        notice[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_NOT_RUN.to_le_bytes());
+        (&theirs).write_all(&notice).unwrap();
+        (&ours).write_all(&PacketHeader::ping().to_bytes()).unwrap();
+        drop(theirs);
+        use std::os::fd::AsRawFd;
+        let got = unsafe { read_packet_raw(ours.as_raw_fd(), Wait::Forever, true) };
+        let Ok(read) = got else { panic!("the queued notice was not read before the reset") };
+        assert!(unsafe { is_not_run(read.packet) });
+        unsafe { libc::free(read.packet as *mut c_void) };
+    }
+
+    #[test]
+    fn a_not_run_reply_on_a_fresh_connection_is_an_error() {
+        let t = callee(Callee::NotRun);
+        let got = call(&t);
+        assert!(matches!(&got, Err(m) if m.contains("not-run")), "{got:?}");
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 1, "a fresh connection's notice was retried");
+        assert_eq!(cached_connections(), 0);
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    // NET-7: a request's keep bit is recorded and cleared as it is read.
+    #[test]
+    fn a_request_read_records_and_clears_its_keep_bit() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut req = PacketHeader::ping().to_bytes();
+        req[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_KEEP.to_le_bytes());
+        (&theirs).write_all(&req).unwrap();
+        use std::os::fd::AsRawFd;
+        let fd = ours.as_raw_fd();
+        let got = unsafe { read_request(fd) }.ok().unwrap();
+        assert_eq!(mode_of(unsafe { std::slice::from_raw_parts(got, PKT_HEADER_SIZE) }), 0);
+        unsafe { libc::free(got as *mut c_void) };
+        assert!(request_asked_keep(fd));
+        assert!(!take_replied_kept(fd), "nothing was replied");
+        (&theirs).write_all(&PacketHeader::ping().to_bytes()).unwrap();
+        let got = unsafe { read_request(fd) }.ok().unwrap();
+        unsafe { libc::free(got as *mut c_void) };
+        assert!(!request_asked_keep(fd), "the last request's ask carried over");
+    }
+
+    /// A request that fails to read on a held descriptor is not taken for
+    /// the one before it, whose failures would then name its reply.
+    #[test]
+    fn a_request_that_fails_to_read_forgets_the_one_before() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        use std::os::fd::AsRawFd;
+        let fd = ours.as_raw_fd();
+        (&theirs).write_all(&PacketHeader::ping().to_bytes()).unwrap();
+        let got = unsafe { read_request(fd) }.ok().unwrap();
+        unsafe { libc::free(got as *mut c_void) };
+        assert_eq!(REQUEST.with(|r| r.get().fd), fd);
+        (&theirs).write_all(&[0u8; PKT_HEADER_SIZE]).unwrap();
+        assert!(unsafe { read_request(fd) }.is_err(), "a header with no magic was read");
+        assert_eq!(REQUEST.with(|r| r.get().fd), -1, "the failed read kept the last request's descriptor");
+        assert!(failure_since_request(fd).is_none());
     }
 
     #[test]

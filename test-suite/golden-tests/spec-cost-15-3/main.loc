@@ -1,0 +1,17 @@
+-- Spec COST-15 condition 1: a bracket on a receiver that is no list on the wire
+-- runs in a pool that has its instance.
+module main (first)
+import root-py
+
+
+
+
+instance Indexable Pr where
+  source Py from "h.py" ("h_at" as __access_index__)
+newtype Pr a = (a, a)
+type Py => (Pr a) = "tuple[$1,$1]" a
+instance Packable (a, a) (Pr a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+
+first :: Pr Int -> Int
+first m = .[0] m

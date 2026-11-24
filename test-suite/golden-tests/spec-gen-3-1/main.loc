@@ -1,0 +1,24 @@
+-- GEN-3: the legacy container strings mean the default kind, with a
+-- deprecation warning; the bare kind word means the same without one.
+module main (viaPy, viaCpp, viaR)
+
+import root-py (idpy)
+import root-cpp (idcpp, Int, Str)
+import root-r (idr)
+
+record P where
+  x :: Int
+  s :: Str
+
+record Py => P = "dict"
+record Cpp => P = "struct"
+record R => P = list
+
+viaPy :: P -> P
+viaPy p = idpy p
+
+viaCpp :: P -> P
+viaCpp p = idcpp p
+
+viaR :: P -> P
+viaR p = idr p

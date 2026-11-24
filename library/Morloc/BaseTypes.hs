@@ -44,6 +44,7 @@ module Morloc.BaseTypes
   , istreamVar
   , ostreamVar
   , cellVar
+  , collectVar
   , tryVar
   , tryOkCtor
   , tryErrCtor
@@ -59,7 +60,6 @@ module Morloc.BaseTypes
   , handleStorageType
   , handleStorageTypeF
   , patternChainVar
-  , patternAccessibleClass
   , extractPatternMethod
   , patternChainGrammarVersion
   , unitU
@@ -90,7 +90,7 @@ module Morloc.BaseTypes
 
 import Data.Word (Word8)
 import Morloc.Data.Text (Text, pretty)
-import Morloc.CodeGenerator.Namespace (TypeF (..), FVar (..), CVar (..))
+import Morloc.CodeGenerator.Namespace (TypeF (..), TArg (..), FVar (..), CVar (..))
 import Morloc.Namespace.Prim (ClassName (..), TVar (..))
 import Morloc.Namespace.Type (Type (..), TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
@@ -213,6 +213,12 @@ ostreamVar = TV "OStream"
 cellVar :: TVar
 cellVar = TV "Cell"
 
+-- | @newtype Collect a = Unit@, what a streaming command returns
+-- (STRM-7). Produced only by the expansion of @collect and @stdout, and
+-- erased to unit after typechecking.
+collectVar :: TVar
+collectVar = TV "Collect"
+
 -- | @data Try e a = Err e | Ok a@, declared in the @internal@ stdlib module
 -- and named here so the compiler can give fallible intrinsics a result type
 -- and recognise one in the auto-require pass. Nothing about it is built in:
@@ -291,7 +297,7 @@ mlcKindOStream = 2
 -- (@reject_non_list_stream_schema@ in @morloc-runtime/stream.rs@).
 handleStorageType :: TVar -> Type -> Type
 handleStorageType v a
-  | v == ostreamVar || v == istreamVar = AppT (VarT list) [a]
+  | v == ostreamVar || v == istreamVar = AppT (VarT list) [TyA a]
   | v == ifileVar                      = a
   | otherwise                          = a
 
@@ -302,7 +308,7 @@ handleStorageType v a
 handleStorageTypeF :: TVar -> TypeF -> TypeF
 handleStorageTypeF v a
   | v == ostreamVar || v == istreamVar =
-      AppF (VarF (FV list (CV ""))) [a]
+      AppF (VarF (FV list (CV ""))) [TyA a]
   | v == ifileVar = a
   | otherwise     = a
 
@@ -314,8 +320,6 @@ handleStorageTypeF v a
 patternChainVar :: TVar
 patternChainVar = TV "PatternChain"
 
-patternAccessibleClass :: TVar
-patternAccessibleClass = TV "PatternAccessible"
 
 extractPatternMethod :: Text
 extractPatternMethod = "__extract_pattern__"

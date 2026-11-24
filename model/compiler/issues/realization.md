@@ -5,15 +5,16 @@ found reviewing /work/plans/realization-cost-model.md and since. The
 objective is COST-1 (crossings by depth, then switches, then language
 preference, then size).
 
-- **A 4-tuple built in a do-block is refused at realization.** [reproduced,
-  2026-10-28] Regression after 0.109.0, where the test passed. biolib's
-  convert test (convert/test/main.loc:243, `let gRows = map (\g -> (.id g,
-  .name g, .biotype g, .txs g)) (geneRows roots)` compared with `@show` to a
-  literal) fails `morloc typecheck --realize` with "Could not resolve type
-  applied variable 'Tuple4'" (TypeEval.hs) in convert-cpp and convert-rust,
-  although root-cpp and root-rust map Tuple4. A small program with the same
-  lambda and comparison realizes. Repro: `cd lib/biolib/convert-cpp &&
-  morloc typecheck --realize test.loc` with convert installed.
+- **Remaining gaps around values a pool cannot hold.** [read 2026-11-04]
+  COST-15 condition 1 is not yet a limit before comparison. A value a
+  pool only relays is a packet (Serialize.hs `inferHeld`,
+  `heldSerial`, `letState`), but the universal-inference branches
+  (`prepareArg`, `contextArg`, `boundArg` on a `Left` typemap entry) have
+  no index to check with and still infer the native type. A real native
+  use of an unmapped type fails "Could not resolve type applied variable"
+  (TypeEval.hs) naming no language. `letWrap.wrapAsNeeded` returns the
+  body unchanged for a native request on an untyped serial slot. biolib's
+  convert test (convert/test/main.loc:243, Py Tuple4) was not re-run.
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
@@ -37,21 +38,14 @@ preference, then size).
   implementation that is functional data (`handleOne`) and the language of
   a named lambda (`pinNamedLambda`), each by its own rule. One predicate
   both consult would keep them from drifting apart.
-- **A function argument that LambdaEval inlines is placed for where it is
-  built, not where it runs.** [read, 2026-10-25] A lambda argument is collapsed in its parent's
-  language, but `applyLambdas` (after collapse) substitutes an argument used
-  at most once at its reference, where the scorer priced it; a closure that
-  survives (used twice, forwarded to a recursion, put in a container) is
-  priced by the scorer as living where its body is cheapest, though it
-  lives where it is built. Reducing calls of single-lambda terms before
-  scoring (normalizePop1) cut the differences from 31 to 14 but broke
-  collapse's invariant that a lambda takes its builder's language
-  (closure-conformance `mkE "abcde"`). Candidate fix: collapse an inlined
-  argument at its reference site, and score a surviving closure's
-  references per build language, memoized on the bound tables.
-  Placement after normalization (Realize.hs `placeNormalized`) places the
-  inlined argument where it runs; the choice of implementation is still
-  made at the build site.
+- **A function argument that LambdaEval inlines has its implementation
+  chosen where it is built, not where it runs.** [read, 2026-10-25]
+  Placement after normalization (Realize.hs `placeNormalized`) places an
+  argument `applyLambdas` inlines where it runs, but the choice of
+  implementation is still made at the build site. Reducing calls of
+  single-lambda terms before scoring (normalizePop1) broke collapse's
+  invariant that a lambda takes its builder's language
+  (closure-conformance `mkE "abcde"`).
 - **A crossing recursion given both a function made by host code and a
   value its pool cannot hold is refused.** [reproduced, 2026-10-26] Such a
   recursion keeps its serial entry (Express.hs `allHeld`: callers of a
@@ -65,11 +59,15 @@ preference, then size).
   pyBoxValue (walk n g (pyMkBox 0)))`; should print 60 for `run 3`.
 - **A copy of a recursive function given a host-made function is built in
   the host's language without checking that it can hold its values.**
-  [read, 2026-10-26] HostProvenance.hs `makeCopy` (`relangRoot`) sets the
+  [reproduced 2026-11-02: a tail recursion copied into C++, carrying a
+  Python-only record, emits C++ naming an undeclared `Box` (g++ fails);
+  `inferType` in a compiled language resolves an undeclared record to its
+  morloc name instead of failing; briefs/A7-deep.md] [read, 2026-10-26] HostProvenance.hs `makeCopy` (`relangRoot`) sets the
   copy's manifold to the host's language; a parameter or body value of a
   type the host's language cannot hold (a record mapped only to Python, in
   C++) then fails at the pool's compile or as a compiler bug at `pinTable`,
-  instead of as a located refusal. Spec gap beside COST-11 and HOST-9: what
+  instead of as a located refusal (COST-15 conditions 1 and 2 conflict
+  here). Spec gap beside COST-11 and HOST-9: what
   a program must do when the host's language cannot hold a value computed
   from a host-made function.
 - **A stage entry's body is expressed under the stage entry's own id.**
@@ -89,7 +87,8 @@ preference, then size).
   a manifold language its tree's table does not offer (Realize.hs
   `pinTable`). `pickLanguage` can also return a recursion head's language
   that the node's table lacks (its `hostedWith` fallback), which collapse
-  then cannot build. No witness yet.
+  then cannot build. No witness yet. COST-15 condition 5 holds only if
+  these cannot happen.
 - **The realizer's placements are checked only against themselves.**
   [read, 2026-10-25] COST-11. No test enumerates the placements of a small
   tree to confirm the DP finds the least; no test compares the crossings
@@ -98,24 +97,22 @@ preference, then size).
   pin a placement directly (PlacementTests.hs was planned). The consistency
   check of `typecheck -v --realize` runs over every golden program
   (spec-cost-11-1).
-- **A bracket step through an instance is never placed in a pool.**
-  [read, 2026-10-21] Realize gives a PatCall only its ambient languages (Realize.hs:911),
-  so a pure `f m = .[0] m` on a receiver that is not a list on the wire
-  (a newtype over a tuple with a sourced `Indexable` instance) stays on the
-  nexus, which refuses it ("needs its instance, which no language here can
-  call") although a pool could run it. Placement should require a language
-  that has the instance whenever the receiver is not a list or IFile.
-- **The nexus brackets a newtype over a list natively.** [read, 2026-10-21]
-  Gap in PAT-5. `newtype Deque a = List a` with its own `Indexable`
-  instance is a list on the wire, so the nexus indexes it as a list while a
-  pool calls the instance; the two agree only if the instance means list
-  indexing (true of stdlib `Vector`). Needs a ruling: an instance on a
-  list-represented newtype must agree with its representation, or such
-  brackets must go to a pool.
+- **A surviving map intrinsic resolves its instance again at code generation.**
+  [read, 2026-11-07] Express (`IntrinsicS IntrMap`) and EffectBoundary
+  `functorMapSource` call the resolver on the realized type instead of reading
+  evidence Typecheck selected and dropped, so one use is selected twice. Not
+  reproduced as a wrong selection. Store evidence on the node, as patterns do.
+- **Every bracket chain's map use is fully checked, then dropped.** [read,
+  2026-11-07, not measured] Treeify adds a `map` use to each `.[:]` chain;
+  `checkInstances` checks it on every lenient pass and `resolveInstances` then
+  discards it when the intrinsic stays. Compile time on many chains: measure.
+- **A plugin language's root map starts a pool.** [read, 2026-11-07, not run]
+  `Instances.nativeServes` lists root and vector modules of the four stdlib
+  languages; a plugin's `root-foo` is a method use: correct output, but a pool
+  where the ruling wants none, with nothing failing when a language is missed.
 - **An argument computable in the caller is computed by a callback.**
-  [reproduced, 2026-10-23] A cut is a subtree (Express.hs, the cross-pool
-  AppS clause ~1674-1688, and PatCall ~1616, eta ~1714, expressContainer
-  ~2347): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
+  [reproduced, 2026-10-23] A cut is a subtree (Express.hs `expressPolyExpr`: the
+  cross-pool AppS, PatS and eta clauses; `expressContainer`, Express.hs:2178): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
   calls back into Python for the inner `inc x`, two round trips where one
   would do; `inc (add (inc x) (inc y))` takes three. A `where` value used
   only inside the foreign argument is placed there too. EVAL-1/2 permit
@@ -124,12 +121,3 @@ preference, then size).
   and is reached only through strict positions (no conditional arm, lambda
   or `@try` region). Open in COST-13: whether EVAL-3 lets such a value be
   computed in the caller's pool.
-
-- **Instance resolution cannot compare Nat-dimensioned types.** [reproduced,
-  2026-10-24] Collapse resolves instances by type before cost (COST-15)
-  only when a term's implementations differ in type, because
-  `compatibleType` does not match Nat-dimensioned types: resolving `pack`
-  in golden tensor-comprehensive fails "No matching implementation found
-  for 'pack' at type ((Int, Int), Vector 6 Real) -> Matrix 2 3 Real"
-  (vector-comprehensive likewise). Implementations of differing
-  Nat-dimensioned types would hit the same failure.

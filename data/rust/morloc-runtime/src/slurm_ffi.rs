@@ -215,9 +215,12 @@ pub(crate) unsafe fn submit_morloc_slurm_job(
     // Parent
     libc::close(pipefd[1]);
 
-    let mut buf = [0u8; 64];
-    let nread = libc::read(pipefd[0], buf.as_mut_ptr() as *mut c_void, 63);
-    libc::close(pipefd[0]);
+    let output = {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        let mut out = Vec::new();
+        std::fs::File::from_raw_fd(pipefd[0]).read_to_end(&mut out).map(|_| out)
+    };
 
     let mut status: i32 = 0;
     libc::waitpid(pid, &mut status, 0);
@@ -226,19 +229,29 @@ pub(crate) unsafe fn submit_morloc_slurm_job(
         set_errmsg(errmsg, &MorlocError::Other("sbatch exited with error".into()));
         return 0;
     }
-    if nread <= 0 {
-        set_errmsg(errmsg, &MorlocError::Other("Failed to read sbatch output".into()));
-        return 0;
-    }
-
-    let output_str = std::str::from_utf8(&buf[..nread as usize]).unwrap_or("");
-    match output_str.trim().parse::<u32>() {
-        Ok(job_id) => job_id,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other("Failed to parse job ID from sbatch output".into()));
+    let output = match output {
+        Ok(o) => String::from_utf8_lossy(&o).into_owned(),
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to read sbatch output: {e}")));
+            return 0;
+        }
+    };
+    match sbatch_job_id(&output) {
+        Some(job_id) => job_id,
+        None => {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "Failed to parse a job ID from sbatch output: {:?}", output.trim()
+            )));
             0
         }
     }
+}
+
+/// The job id `sbatch --parsable` prints: its last line, `<id>` or
+/// `<id>;<cluster>`, after any warnings.
+fn sbatch_job_id(output: &str) -> Option<u32> {
+    let last = output.lines().map(str::trim).filter(|l| !l.is_empty()).last()?;
+    last.split(';').next()?.trim().parse().ok()
 }
 
 /// A variable the nexus exports to every pool it spawns.
@@ -499,5 +512,21 @@ mod resource_tests {
             sbatch_resource_args(&all),
             ["--mem=32G", "--time=1-01:01:01", "--cpus-per-task=8", "--gres=gpu:2"]
         );
+    }
+}
+
+#[cfg(test)]
+mod sbatch_output_tests {
+    use super::sbatch_job_id;
+
+    // NET-11: the whole of sbatch's output is read, and the id is its last line.
+    #[test]
+    fn the_job_id_is_the_last_line_of_sbatchs_output() {
+        assert_eq!(sbatch_job_id("12345\n"), Some(12345));
+        assert_eq!(sbatch_job_id("12345;cluster-a\n"), Some(12345));
+        let warned = format!("{}\nsbatch: warning: a long warning line\n67890\n", "x".repeat(200));
+        assert_eq!(sbatch_job_id(&warned), Some(67890));
+        assert_eq!(sbatch_job_id(""), None);
+        assert_eq!(sbatch_job_id("Submitted batch job 5\n"), None);
     }
 }

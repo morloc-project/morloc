@@ -3,6 +3,24 @@
 Programs that typecheck and fail later, rejections with no location, and
 literal and record gaps. Reproduced on 0.109.0 unless marked.
 
+- [read, 2026-11-04] An over-application through an unsolved result is
+  checked by rewriting `f xs1 xs2` to `(f xs1) xs2` and checking that from
+  the context before `f` was synthesized (Typecheck.hs `overApplied`, APP-4),
+  so `f` is synthesized twice. A flat chain (`format "a" 1 2 3`) costs one
+  extra synthesis of the head; a head that is itself such an application
+  doubles the work at each level, `2^d` for `d` nested over-applied heads.
+  Candidate: continue from the synthesized head and apply its result to
+  the rest.
+- [reproduced, 2026-11-05] Typechecking a composition chain grows
+  superlinearly: `r = (id . id . ... . id) 42` takes 0.2 s at 200 links, 0.6
+  s at 400 and 28 s at 1600 (installed 0.112.0 and dev alike). The unit test
+  "long non-tuple composition chain stays linear" checks 200 links under a
+  1 s timeout, so it passes only on a quiet machine.
+- [read, 2026-11-05] A lambda with more parameters than its expected
+  arrow group (Typecheck.hs checkE LamS, third case) checks the remaining
+  parameters as `AnnoS i i (LamS rest body)`, reusing the outer lambda's
+  index, so an annotation on the outer lambda (`(\x y -> x + y :: Int ->
+  Int -> Int)`) would be applied again to the inner one. Not reproduced.
 - **Unreduced Rec expression not equal to itself.** [reproduced] Violates
   TEQ-4. `newtype Frame (r :: Rec); select, mySelect :: l@[Str] -> Frame r
   -> Frame (Restrict r l); mySelect l t = select l t` fails "Cannot compare
@@ -14,12 +32,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   `Frame {x = Int}`: "Cannot compare Rec expressions"). The tick form
   `['x]` works. Open: should `["x"]` at kind List be read as `['x]` or be
   rejected at the signature?
-- **Missing column found at code generation.** [reproduced] Violates TAB-3.
-  `oops = getCol "poop" census` (census a `Table 2 {state = Str, pop =
-  Int}`): typecheck gives `Vector 2 {state=Str, pop=Int}."poop"`; make fails
-  "The type of this term is not determined: nothing in the program fixes
-  'a'" at the export list, not naming the column. table/main.loc's comment
-  on getCol claims a compile-time error.
 - **Sort key checked at run time.** [reproduced] Violates TAB-3. `byPop =
   sortRows [("poop", False)] census` builds; `./sort byPop` fails "Invalid
   sort key column: No match for FieldRef.Name(poop)" and prints the whole
@@ -30,8 +42,7 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (`f :: (Member "q" (Keys r)) => Frame r -> Int` at `Frame {x = Int}`),
   `Disjoint: shared element(s) 'x'`. An overlap through `+` is located.
 - **Rejections located at the export list.** [reproduced] Violates DIAG-2
-  (location of the construct): every make-time failure above, and a list
-  or record table column (`t :: Table 2 {xs =
+  (location of the construct): a list or record table column (`t :: Table 2 {xs =
   [Int]}`, accepted by typecheck, refused by make), point at
   `main.loc:1:14`. See model/compiler/issues/typecheck-output.md.
 - **Exported method error.** [reproduced] Violates MOD-2 and MOD-10 in
@@ -46,14 +57,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   fails "No instance found for Packable::pack / Are you missing a top-level
   type signature?" although one is present; `:: Vector 6 Real` on the list
   passes. Gap: SIG-4 open; the hint is wrong either way.
-- **Literal in a point-free section ignores a `Real` context.**
-  [reproduced] Violates LIT-2. `divTwo :: [Real] -> [Real]; divTwo = map
-  (2 /)` fails "expected: [Real] -> [Real], inferred: a Int -> a Int";
-  `divTwo xs = map (\x -> 2 / x) xs`, `half x = x / 2`, `w :: Real; w = 1`
-  and `[1, 0xff, 2.5] :: [Real]` all work.
-- Manual stale: the Packable mismatch error no longer prints compiler
-  internals, but types-custom-types.asc quotes the old message. [not
-  re-verified 2026-10-31]
 - **`@collect (psmap f (@next s))` leaves the element type unsolved.**
   [reproduced, 0.109.0] With `f :: Str -> Real`, `s :: IStream Str` and
   `import parallel-cpp`, `morloc make` fails "cannot serialize unknown type
@@ -90,32 +93,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
-- **A class variable that only a constraint mentions.** [reproduced,
-  2026-10-18, 0.109.0] Violates POLY-6 and DIAG-2. In `f :: C a => Int ->
-  Str`, nothing at any call can fix `a`, but the signature is accepted and
-  `typecheck` passes every caller; what happens next depends on the body
-  and on how many instances are in scope:
-  - `class Gen a where gen :: Int -> [a]`, `render :: Gen a => Int -> Str;
-    render n = showList (gen n)`, `useIt n = render n`. With only `instance
-    Gen Int` in scope, `make` builds and `./prog useIt 5` prints `"[5]"`: the
-    sole instance is chosen though nothing chose it. Add `instance Gen Str`
-    and `make` fails "The type of this term is not determined: nothing in
-    the program fixes 'a'" at `gen n`. An instance added by an unrelated
-    import changes a working program into a rejected one.
-  - The same with a body that calls a library function: `ingest :: C a =>
-    Int -> Str -> Str -> <IO> (); ingest l i o = saveSource l o (readFormat
-    i)` fails at `@open` inside the library's `saveSource`, not at
-    `ingest`.
-  - Two-parameter class: `class Conv f a where conv :: f -> [a]`; `size ::
-    Conv f a => f -> Int; size x = length (conv x)` fails in typecheck with
-    "This definition needs Conv f (a) but its signature does not declare it
-    (the signature's constraints and their superclasses give Conv f a)",
-    which reads as a missing constraint the signature visibly has. The
-    message should say `a` is undetermined.
-  - `count :: Named a => Int -> Int; count n = n + 0` (no method used)
-    builds silently.
-  CLS-18 (ruled 2026-10-29) makes this an error at the signature, naming
-  the variable; the code deviates. Re-reproduced 2026-10-31 (`count`).
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is
@@ -128,32 +105,14 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   name, worded backwards) carry no location (DIAG-2; /work/plans/model-audit-2026-10-21/repro/A/op/o8.loc,
   /work/plans/model-audit-2026-10-21/repro/A/mod/m2).
 - **Internal names in record and constructor errors.** [reproduced,
-  2026-10-21] `g p = .c p` on `record P {a, b}` fails "expected: a []
-  [(c, b)] ... Error in NamU with conflicting open keysets ... hint: 'P' is
-  a newtype"; it should name the missing field. `f x = match x | Foo = 1 |
+  2026-10-21] `f x = match x | Foo = 1 |
   (Bar n) = n` with no signature fails "'Foo' is not a constructor of
   *x`1560@1_x1" (SUM-6 (b) promises a request for a signature). Repro:
   /work/plans/model-audit-2026-10-21/repro/C/rec/getbad.loc, /work/plans/model-audit-2026-10-21/repro/C/sum/sum6.loc.
-- **A class obligation through a type alias is not covered.**
-  [reproduced, 2026-10-30, not bisected] With `type Model k v = [(k, v)]`,
-  `modelStep :: Ord k => ... ; ... without k xs <> [(k, v)] ...` fails
-  "This definition needs Semigroup (Model k Int) but its signature does
-  not declare it", though `[a]` has a Semigroup instance. Repro:
-  /work/tests/sumtypes/07-persistent-redblack/core/rbtree/main.loc:265.
 - **`let` signatures do not parse.** [reproduced, 2026-10-21] Gap in
   POLY-4, which rules `where` signatures: `let g :: a -> a` fails
   "unexpected '::'".
   Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4d.
-- **Literal defaulting exports a constrained generic at Int.**
-  [reproduced, 2026-10-21] Violates SIG-5 and CLS-18 (no defaulting).
-  `f :: Integral a => a -> a; f x = x + x` is skipped with a warning, but
-  `f x = x + 1` is exported at Int with no warning: `f 1.5` fails
-  "expected integer for Int", while `g y = f y` at Real gives 2.5. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
-- **SIG-4's premise is stale.** [reproduced, 2026-10-21] It says
-  inference fails for a point-free use of class methods; `g = (+)` and
-  `concatTo = fold (<>)` build and run unsigned. Only constructor matching
-  still fails, with "'Ci' is not a constructor of *s`1591@1_x1" rather than
-  a request for a signature (SIG-4 (a)). Repro: /work/plans/model-audit-2026-10-21/repro/D/sig4, sig4b.
 - **EVAL-5's candidates miss what the code does.** [reproduced,
   2026-10-21] An unused `let` is computed (`let y = boom x in x` fails),
   an unused `where` is not, and a used `let` is placed at its use, so an
@@ -168,14 +127,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   containers, so plain lists have no `++`. Gap in collections.md: no item
   says how lists are appended.
 
-- **An application through a type variable that stands for a function is
-  rejected.** [reproduced, 2026-10-27] Awaits APP-4 (open): under its
-  candidate (a), with APP-1 (`a -> b -> c` and `a -> (b -> c)` are one
-  type), it is well typed. `first2 :: [Int -> Int -> c] -> Int -> c` and
-  `d3 :: Int -> Int -> Int -> Int`: `first2 [d3] x 7` is refused with
-  "Invalid function application of type: [Int -> Int -> a] -> Int -> a",
-  while `apply1 (first2 [d3] x) 7` builds and runs. With `c = Int -> Int`
-  the three-argument application is well typed.
 - **Silent drops left in existential merging.** [read, 2026-11-01] Gaps
   under REC-5, COLL-7 and PAT-1, found reviewing 2617a9e4d; none reproduced
   as a wrong result. In Typecheck/Internal.hs:
@@ -194,3 +145,105 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
     is already solved;
   - the comment on `accumulatedRecords`' short circuit says merges write
     keys into the ExistG entry; no code does.
+- **A native form that leaves out a phantom parameter names no form.**
+  [reproduced 2026-11-04] Violates DIAG-1. `newtype Q a b = [b]` with
+  `"std::vector<$1>" b` fails "Could not reduce type in broadest scope"
+  (CodeGenerator/Infer.hs:544) with no form named.
+- **`{x=?Int}` does not parse.** [reproduced 2026-11-02] `=?` lexes as one
+  operator ("expected one of: '=', '::'"), and the typecheck printer writes
+  `{x=?Int}`, which cannot be read back.
+- **A do-block final of unsolved type is not run.** [reproduced
+  2026-11-02] `f = (\h -> do h 2) pyLog` against `<IO> ()` fails "inferred
+  <> (<IO> Unit)": the block is built as a nested suspension. Same class as
+  the EFF-8 entry: an existential's shape is decided before it is solved.
+- **A record literal against a record alias fails.** [reproduced
+  2026-11-02] `f :: Int -> R; f n = {x = n}` fails: `instantiate`'s alias
+  arms recurse into `instantiate`, skipping the closed-row bridge only
+  `subtype` applies. ALIAS-11's "Code: conforms" is stale.
+- **A curried head under `@collect` loses a type.** [reproduced
+  2026-11-02, Python only] `score x = @collect (prod inc x)` fails
+  "cannot serialize unknown type variable: b"; the `\k ->` form builds.
+- [reproduced, 2026-11-06] A getter takes an effectful receiver without
+  checking the field: with `getR :: Int -> <IO> R`, `bad :: Int -> Str;
+  bad x = .zzz (getR x)` typechecks although `R` has no `zzz`, because the
+  suspension solves the selector's open record variable. `bad :: Int -> Int;
+  bad x = .a (getR x)` builds and fails at run time with `'functools.partial'
+  object is not subscriptable`. The same receiver through a bracket or a
+  setter is rejected.
+- [reproduced, 2026-11-06] The plain getter typechecks its receiver twice
+  (`synthE` PatGet: `synthG`, then `checkG` on the same expression), so time
+  is exponential in nested getters: `bad x = .a (step (.a (step ... x)))`
+  takes 2.6 s at depth 12 and exceeds 25 s at depth 14. The index rule reuses
+  its synthesized receiver.
+- [reproduced, 2026-11-06] Surplus arguments to a getter make it a setter:
+  `bad :: R -> R; bad r = .a r 5` compiles as an update returning a record,
+  and with a function field `.f (mkr k) 5` is rejected while `(.f (mkr k)) 5`
+  runs, against APP-1 (`applyPattern` decides by argument count; only the
+  setter syntax should build a setter).
+- **A record applied to a variable does not match a class variable.**
+  [reproduced, 2026-11-07, also on b05f877b5] With `class Other f where other ::
+  f a -> Str`, `record Box a where val :: [a]`, `instance Other Box` and
+  `mkB :: [a] -> Box a`, the definition `k :: [a] -> Str; k xs = other (mkB
+  xs)` fails "Type mismatch: expected: a b, inferred: Box a". The same call at a
+  ground type (`other (mkB [n])` with `n :: Int`) and a `newtype Box a = [a]` in
+  place of the record both work. Spec gap or defect against CLS-2: a record is a
+  type constructor like any other.
+- **A literal at a constrained variable fails inside the body at some
+  instances.** [reproduced, 2026-11-07, installed 0.112.0] Violates SIG-1.
+  `inc :: Numeric a => a -> a; inc x = x + 1` passes the check against its
+  signature (`literalAtRigid`), and used at `Vector 3 Real` (vector-py's
+  `instance Numeric a => Numeric (Vector n a)`) is refused at the literal in
+  its body: "Numeric literal cannot have type Vector 3 Real". The signature
+  admits a type its body does not. Bound up with the literal ruling (PLAN
+  item 4 of /work/plans/typecheck-once).
+- **A Set variable in a signature is never instantiated.** [reproduced,
+  2026-11-07, installed 0.112.0] Violates POLY-1. With `type Tags (s :: Set)`,
+  `size :: Tags s -> Int` and `mkA :: Int -> Tags (Keys {a = Int})`, the
+  definition `f :: Int -> Int; f k = size (mkA k)` fails "expected: Tags s,
+  inferred: Tags {"a"} ... Type mismatch fall through". Typecheck/Internal.hs
+  `renameWithMap` freshens Nat, Str, Rec, List and effect variables per use
+  but not Set variables (there is no Set collector), and the subtype rules do
+  not take the signature's `s` for a Set expression.
+- **A type mismatch can print two variables as one.** [reproduced,
+  2026-11-07] Spec gap in diagnostics.md. `both :: Tag u -> Tag u -> Int; q ::
+  Tag s -> Tag t -> Int; q a b = both a b` reports "expected: Tag a, inferred:
+  Tag a ... a <: a": each side's variables are renamed for display on their
+  own, so `s` and `t` both print as `a`, and the message cannot show which
+  variables collided.
+
+- **A definition whose tree cannot be collected is left ungeneralized
+  silently.** [read, 2026-11-08, c3a7b3bb3] library/Morloc/Frontend/Generalize.hs
+  ~118-121: when `definitionTree`/`referenced` raises a program error, `visit`
+  only prints it under `-v` ("not generalized ... could not be collected")
+  and goes on. The user's error is lost, and the definition is expanded at
+  each use, where the failure shows up later in a less specific form, or
+  never if the definition is unused. Also, the doc comment "The unsigned
+  top-level terms a definition's tree expands." appears twice (~156-158).
+- **A NUM-10 default that conflicts is dropped silently.** [read,
+  2026-11-08, c3a7b3bb3] library/Morloc/Frontend/Typecheck.hs ~161:
+  `defaultNumeric`'s `solveTo` discards a `Left` from `solveExist` and keeps
+  gamma, so an existential that NUM-10 says to default, but that cannot
+  be solved to Int or Real, stays unsolved without a message. The failure
+  surfaces later as an unrelated ambiguity error, or not at all.
+- **Outside shadow mode, a definition the instantiated check refuses
+  fails the build, even where checking at the key accepts it.** [read,
+  2026-11-08, c3a7b3bb3] library/Morloc/Frontend/Specialize.hs ~406: the
+  fallback to checking at the key runs only when the result still holds an
+  existential. The shadow mode (`MORLOC_SHADOW_ELABORATE`) reports exactly
+  this divergence, so the case occurs. That mode also ships in the
+  compiler and changes which tree is compiled when it is set (~99): the
+  generated code depends on an environment variable.
+- **Every compile typechecks every imported module.** [read, 2026-11-08,
+  c3a7b3bb3] library/Morloc.hs ~91: each `morloc make` and `typecheck`
+  validates every signed definition and instance body of every imported
+  module, and infers every unsigned definition, where before only the root
+  module's were checked. Generalize collects a definition's tree two or
+  three times. Compile time then grows with the stdlib, not the program;
+  measure it and consider caching per module.
+- [reproduced, 2026-11-15] Violates OPT-3. A setter on a receiver whose
+  type is not yet known when the setter is checked (a lambda parameter)
+  records the new value's type as the field's (`{x=Int, ...}`), so a `?Int`
+  field set from an `Int` is rejected once the receiver turns out to be the
+  record: `record R where x :: ?Int`, then `g r n = (\l -> (.(.x = n) l, l))
+  r` with `g :: R -> Int -> (R, R)` fails "Cannot compare types ?Int and
+  Int"; the same setter on a typed receiver (`f r n = .(.x = n) r`) passes.

@@ -1,0 +1,23 @@
+-- Imported signed definitions are elaborated once per type, not expanded into
+-- each use. An imported mutually recursive pair exported under an alias keeps
+-- its back-edges; a definition met again through an instance at a smaller
+-- type (list equality comparing elements that are lists) is admitted.
+module main (evenPy, evenCpp, nestedPy, nestedCpp, nestedNePy)
+import root-py
+import root-cpp
+import .parity (isEven as even)
+
+evenPy :: Int -> Bool
+evenPy n = even n
+
+evenCpp :: Int -> Bool
+evenCpp n = even n
+
+nestedPy :: [[Int]] -> Bool
+nestedPy xs = xs == [[1, 2], [3]]
+
+nestedCpp :: [[Int]] -> Bool
+nestedCpp xs = xs == [[1, 2], [3]]
+
+nestedNePy :: [[[Int]]] -> Bool
+nestedNePy xs = xs != [[[1]], [[2, 3]]]

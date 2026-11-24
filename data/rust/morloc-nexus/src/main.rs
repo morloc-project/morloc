@@ -23,6 +23,7 @@ mod schemas;
 mod sources;
 mod serve_help;
 mod parse_arg;
+mod env_path;
 mod sigrm;
 mod stdio_bridge;
 mod stdio_server;
@@ -89,6 +90,25 @@ pub(crate) fn custody_stop(status: u8) {
     unsafe { morloc_custody_stop_all(status) };
 }
 
+// LIFE-6: before anything else reaches libmorloc, refuse one of another build
+// than this nexus; then `--build-id` prints its id, which the installed
+// bindings record at init, and the pools are told it, replacing any inherited.
+fn require_build() {
+    extern "C" {
+        fn morloc_build_id() -> u64;
+    }
+    let loaded = unsafe { morloc_build_id() };
+    if let Some(why) = morloc_runtime_types::build_skew(loaded, Some(morloc_runtime_types::BUILD_ID), None) {
+        eprintln!("Error: {why}");
+        std::process::exit(morloc_runtime_types::EXIT_BUILD_SKEW);
+    }
+    if std::env::args().nth(1).as_deref() == Some("--build-id") {
+        println!("{loaded:016x}");
+        std::process::exit(0);
+    }
+    crate::process::set_startup_env(morloc_runtime_types::BUILD_ID_ENV, format!("{loaded:016x}"));
+}
+
 fn main() {
     // Ignore SIGPIPE process-wide so a reader that closes early (e.g.
     // `morloc view | head`, `... | less` quit before EOF) surfaces as an EPIPE
@@ -97,6 +117,15 @@ fn main() {
     // `file`/`view` and the early-exit flags short-circuit before that, so it
     // must be set up front to cover them too.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+
+    // A command-line argument is text (BASE-5); `std::env::args` panics on
+    // one that is not, so every argument is checked once, here.
+    for arg in std::env::args_os().skip(1) {
+        if arg.to_str().is_none() {
+            eprintln!("Error: an argument is not valid UTF-8: {:?}", arg);
+            std::process::exit(2);
+        }
+    }
 
     // `morloc-nexus --abi-version`: print the ABI/wire-format contract version
     // and exit. Checked as the first argument (a real program runs through the
@@ -114,6 +143,7 @@ fn main() {
         println!("morloc-nexus {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
+    require_build();
 
     // A nexus started by another nexus (a multi-output child, a served
     // daemon) ends when that nexus ends. Its own children get its own
@@ -363,6 +393,17 @@ fn main() {
     if let Some(ref dir) = manifest.tmpdir {
         crate::process::set_startup_env("MORLOC_TMPDIR", dir);
     }
+    // The environment the program was built in supplies its pools'
+    // interpreters and tools, whatever PATH it was started with (PKG-17).
+    if let Some(ref prefix) = manifest.build.env_prefix {
+        match env_path::with_env_bin_first(std::env::var_os("PATH"), std::path::Path::new(prefix)) {
+            Some(path) => crate::process::set_startup_env("PATH", path),
+            None => {
+                eprintln!("The environment prefix '{}' recorded in this program cannot be put on PATH", prefix);
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Propagate nexus + manifest absolute paths to pools. SLURM remote
     // dispatch (libmorloc.so::remote_call) needs MORLOC_NEXUS_PATH to
@@ -452,9 +493,6 @@ fn main() {
     if config.quiet {
         crate::process::set_startup_env("MORLOC_QUIET", "1");
     }
-    if let Some(z) = config.stdout_compression {
-        crate::process::set_startup_env("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
-    }
     if let Some(n) = config.debug_cache_depth {
         crate::process::set_startup_env("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
     }
@@ -471,6 +509,13 @@ fn main() {
         crate::process::set_startup_env("MORLOC_CODE_CHECKS", "1");
     } else {
         crate::process::remove_startup_env("MORLOC_CODE_CHECKS");
+    }
+    // FMT-10: a program built to skip the UTF-8 check skips it in every pool,
+    // and a program run inside it does not inherit that.
+    if manifest.unsafe_skip_utf8_check {
+        crate::process::set_startup_env("MORLOC_PROGRAM_SKIPS_UTF8_CHECK", "1");
+    } else {
+        crate::process::remove_startup_env("MORLOC_PROGRAM_SKIPS_UTF8_CHECK");
     }
 
     // Resolve the per-run identity now so pools inherit a fully-published
@@ -558,8 +603,7 @@ fn main() {
     if config.mcp_flag {
         let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
         if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
-            eprintln!("Error: {}", e);
-            process::clean_exit(1);
+            process::exit_after_start_failure(&e);
         }
         process::install_recovery_context(
             sockets.clone(),
@@ -629,8 +673,7 @@ fn main() {
         }
         let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
         if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
-            eprintln!("Error: {}", e);
-            process::clean_exit(1);
+            process::exit_after_start_failure(&e);
         }
 
         // Install the recovery context so the pool_check_fn callback can
@@ -666,6 +709,16 @@ fn main() {
                 set_render_output(&mut config, t.kind);
             } else {
                 apply_value_form(&mut config, &manifest.commands[idx], format_explicit);
+            }
+            // FMT-10: the last input of this hidden command, which is not a
+            // user interface, is the output the stage saved, read as the
+            // program's own when it lies where a stage saves it; the
+            // arguments before it stay data from outside.
+            if let Some(Ok(saved)) = inputs.last().map(|p| std::ffi::CString::new(p.as_str())) {
+                extern "C" {
+                    fn mlc_trust_stage_file(path: *const std::ffi::c_char) -> i32;
+                }
+                unsafe { mlc_trust_stage_file(saved.as_ptr()) };
             }
             // Each input is a file the stage wrote, read as the manifest
             // says its argument is read (see `stageReplayArgs` in the
@@ -723,7 +776,7 @@ fn main() {
                 let (fd, schema) = match &parent.stream {
                     Some(stream) => {
                         let path = stage::stream_path(&dir);
-                        let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+                        let file = stage::create_private(&path).unwrap_or_else(|e| {
                             eprintln!("Error: {}: {}", path, e);
                             process::clean_exit(1);
                         });
@@ -784,8 +837,7 @@ fn main() {
         let to_start: Vec<usize> = (0..manifest.pools.len()).collect();
         if !to_start.is_empty() {
             if let Err(e) = process::start_daemons(&mut sockets, &to_start) {
-                eprintln!("Error: failed to start pools for call-packet dispatch: {}", e);
-                process::clean_exit(1);
+                process::exit_after_start_failure(&format!("failed to start pools for call-packet dispatch: {e}"));
             }
         }
         run_call_packet(&config, &tmpdir);
@@ -999,8 +1051,6 @@ fn daemon_exit_code() -> i32 {
 }
 
 /// Run the multi-program router daemon.
-/// Scans the exe directory (one exe/<name>/manifest.json per installed
-/// program) and serves them all via HTTP/TCP/Unix.
 fn run_router(config: &dispatch::NexusConfig) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
@@ -1115,6 +1165,7 @@ fn stop_frontend_children() {
 fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     use std::ffi::{c_char, c_void, CString};
     use std::ptr;
+    dispatch::publish_stdout_level(config);
 
     extern "C" {
         fn read_binary_file(
@@ -1199,23 +1250,35 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     // Structural check on the bytes we just read from the shared FS. A
     // torn or corrupted call packet would otherwise propagate into the
     // pool dispatch as garbage offsets / lengths and crash the worker.
-    {
+    // FMT-10: the file could have been written by anyone, so every argument
+    // is rewritten to be read as data from outside; an inline one goes by a
+    // file of this process's own.
+    let admitted = {
         let slice = unsafe { std::slice::from_raw_parts(call_packet, packet_size) };
-        if let Err(e) = morloc_runtime_types::packet::validate_packet(slice) {
+        let mut spill = |i: usize, arg: &[u8]| -> Result<String, morloc_runtime_types::error::MorlocError> {
+            use std::io::Write;
+            let path = format!("{}/call-arg-{}.pkt", tmpdir.trim_end_matches('/'), i);
+            stage::create_private(&path)
+                .and_then(|mut f| f.write_all(arg))
+                .map_err(|e| morloc_runtime_types::error::MorlocError::Other(format!("{}: {}", path, e)))?;
+            Ok(path)
+        };
+        let admitted = morloc_runtime_types::packet::call_as_outside(slice, &mut spill);
+        unsafe { libc::free(call_packet as *mut c_void) };
+        admitted.unwrap_or_else(|e| {
             eprintln!(
                 "Error: call packet '{}' is malformed: {}",
                 packet_path, e
             );
-            unsafe { libc::free(call_packet as *mut c_void) };
             process::clean_exit(1);
-        }
-    }
+        })
+    };
 
     // Send to pool and receive response
     let mut result_packet = unsafe {
-        send_and_receive_over_socket(socket_c.as_ptr(), call_packet, &mut errmsg)
+        send_and_receive_over_socket(socket_c.as_ptr(), admitted.as_ptr(), &mut errmsg)
     };
-    unsafe { libc::free(call_packet as *mut c_void) };
+    drop(admitted);
     if result_packet.is_null() || !errmsg.is_null() {
         let msg = if !errmsg.is_null() {
             let s = unsafe { std::ffi::CStr::from_ptr(errmsg) }.to_string_lossy().into_owned();

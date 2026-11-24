@@ -11,7 +11,6 @@ source Py from "f.py" ("py_use_box" as pyUseBox)
 record PyBox where
   --' The function
   f :: Int -> Int
-record Py => PyBox = "dict"
 
 --' Apply the function in a record, in Python
 pyUseBox :: PyBox -> Int

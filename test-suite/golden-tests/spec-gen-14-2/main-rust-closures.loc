@@ -1,0 +1,21 @@
+-- GEN-14: a function held inside a container field of a generated record
+-- cannot yet cross into or out of a Rust pool, so the program is refused
+-- with an error naming the field, rather than failing in rustc.
+module main (mkOps)
+
+import root-rust
+import root-py
+
+record Ops where
+  fs :: [Int -> Int]
+  n :: Int
+
+source Rust from "ops.rs" ("addOne", "sumOps")
+addOne :: Int -> Int
+sumOps :: Ops -> Int
+
+source Py from "ops.py" ("pyid")
+pyid :: a -> a
+
+mkOps :: Int -> Int
+mkOps x = sumOps (pyid {fs = [addOne], n = x})

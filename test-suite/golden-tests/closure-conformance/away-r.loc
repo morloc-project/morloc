@@ -3,10 +3,6 @@ module (*)
 import .harness
 import root-r
 
-record R => Holder = "list"
-record R => Caller = "list"
-record R => Purer = "list"
-
 source R from "hosts.R"
   ( "away_ident" as identAway
   , "away_bump" as bumpAway

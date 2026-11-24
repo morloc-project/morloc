@@ -15,8 +15,6 @@ import root-py
 record Box a where
   it :: a
 
-record Py => Box = "dict"
-
 source Py from "box.py" ("f", "g")
 f :: Box Int -> Int
 g :: Box Str -> Int

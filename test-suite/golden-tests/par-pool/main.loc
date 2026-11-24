@@ -1,0 +1,41 @@
+-- The C++ pool's parallel helpers (WPOOL): nested calls from every span; a
+-- failure on a helper keeps its trace for the caller's @try; a forked child
+-- whose span fails while a helper holds the job's lock exits; helpers get a
+-- pool worker's signal mask, not their caller's; the helper count stays under
+-- the ceiling and falls back to the CPUs once idle.
+module main (nested, labels, forkFailUnderLock, helperMask, helperCount)
+
+import root-cpp
+import parallel-cpp
+
+source Cpp from "src.hpp" ("boomOnHelper", "forkFailUnderLock", "helperMask", "helperCount")
+
+boomOnHelper :: Int -> Int
+forkFailUnderLock :: Int -> Str
+helperMask :: Int -> Str
+helperCount :: Int -> Str
+
+fourWorkers :: ParOpts
+fourWorkers = .(.workers = 4, .chunkSize = 1, .chunking = FixedChunks) defaultParOpts
+
+threeWorkers :: ParOpts
+threeWorkers = .(.workers = 3, .chunkSize = 1, .chunking = FixedChunks) defaultParOpts
+
+square :: Int -> Int
+square x = x * x
+
+sumOfSquares :: Int -> Int
+sumOfSquares x = sum (pmapWith threeWorkers square (range 0 x))
+
+--' Sum squares in nested parallel maps
+nested :: Int -> [Int]
+nested n = pmapWith fourWorkers sumOfSquares (range 0 n)
+
+down :: Int -> Int
+down n
+  ? n == 0 = boomOnHelper n
+  : 1 + down (n - 1)
+
+--' Fail on a helper three calls deep
+labels :: Int -> Try Str [Int]
+labels n = @try (pmapWith fourWorkers down (map (const 2) (range 0 n)))

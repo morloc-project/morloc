@@ -18,16 +18,6 @@
   gains a rule rejecting inline record types at the signature, and the
   manual's pattern chapter and existing programs using them must change.
 
-- **A generic Rust struct cannot carry a phantom parameter.** [read] Gap in
-  NATIVE-3. A record whose parameter no field uses, mapped to a generic
-  struct (`record Rust => Loc k = "Loc<$1>"`), needs the struct to use `k`,
-  which Rust allows only through a field such as `PhantomData<K>`; the
-  generated reader (CodeGenerator/Pools/CAbi/Members/RustPrinter.hs
-  `printRecordImpls`, `Self { .. }` from the schema's fields) has no value
-  for that field, so the pool does not compile. Mapping such a record to a
-  non-generic struct works (one impl serves every instantiation). Open:
-  fill fields the schema does not name with `Default::default()`, or
-  document the non-generic form as the way.
 - **Closure fields of a templated Rust record share one wire schema across
   instantiations.** [read] Rust.hs `generateRustStructs` harvests each
   record's crossing closure fields keyed by (general record name, field), so
@@ -35,17 +25,6 @@
   `R Int` and `R Str` with both crossing, reflects both instantiations'
   closure fields with whichever schema was harvested last. Key the harvest
   by instantiation. Not reproduced.
-- **A phantom parameter still needs a Python form when a Python function
-  takes the record.** [reproduced] 82a8d98b lets a record with a phantom
-  parameter pass through a pool without a language form for the parameter,
-  but a record literal `{pos = 7} :: Loc Tag` that a Python-sourced function
-  takes, where `Tag` has only a Rust form, fails at the literal: "Could not
-  resolve type for variable 'Tag'". The Python form `record Py => (Loc k) =
-  "dict" k` never uses `k`. Repro: lib/biolib/rnaseq/notes/repros/
-  phantom-py-arg/ (`morloc make -o phantom main.loc`; drop `pyPos` from `f`
-  and it builds). Seen in the bio suite, whose checks run in Python on
-  `Mapping Transcript Genome` values.
-
 - **TEQ-4 contradicts the code's field-order rule.** [reproduced] TEQ-4
   (proposed) says `{x = Int, y = Str} == {y = Str, x = Int}`; c74060f6
   made field order part of a Rec, and `Frame {x,y}` vs `Frame {y,x}` is
@@ -55,16 +34,6 @@
   a conversion between a record and an anonymous type in another order,
   which is sound under either answer; (b) would replace that rejection
   with an inserted reordering.
-- **A record literal in Python or R needs a native form.** [reproduced,
-  2026-10-21] Violates NATIVE-3 (Python and R need no native definition).
-  `record P = P { a :: Int, b :: Str }; lit n = inc { b = "z", a = n }`
-  under root-py or root-r fails at make "No concrete py type for record
-  'P'" when the program also uses a setter (`.(.a = 5) p`); getters and
-  setters alone build, and so does the literal with only getters
-  (reproduced 2026-10-31); `record Py => P = "dict"` fixes it.
-  Cause: CodeGenerator/Infer.hs:878 (`namesRecord`) throws for every
-  language. This is also why the manual writes `record Py` lines
-  (manual.md). Repro: /work/plans/model-audit-2026-10-21/repro/C/rec/set-py.loc, nolit-py.loc.
 - **Recursive records: SUM-4 contradicts ALIAS-7, and the code splits the
   difference.** [reproduced, 2026-10-21] SUM-4 makes a cycle of records
   and aliases alone an error; ALIAS-7 (ruled) allows a guarded recursive
@@ -76,3 +45,106 @@
 - **A JSON record argument with unknown keys is accepted.** [reproduced,
   2026-10-21] `'{"a":1,"b":"x","c":4}'` for `P {a, b}` runs in py, cpp and
   r; a missing key is refused. No item covers extra keys on input.
+
+- [reproduced, 2026-11-05] Violates REC-4: comparing two bare record
+  literals (`{x = 1} == {x = 2}`) is refused at the `==`, not at the
+  literal, with "No matching implementation found for '==' at type Record
+  -> Record -> Bool"; the error should say a bare record literal needs a
+  named record type.
+- **spec-rec-4-1 passes on another rule's rejection.** [reproduced, 2026-11-07,
+  installed 0.112.0] Its program is refused by CLS-18 at the use of `same`
+  ("nothing fixes record_2 in Same (a [] [...])"), before Typecheck.hs
+  `rejectInstanceTypedRecords` runs, so the REC-4 check and its message are
+  untested and the error is not at the literal as REC-4 requires. Instance
+  selection never fixes an open class argument (Instances.hs `resolve` returns
+  Undetermined first), so only Packable improvement (CLS-20) can reach the REC-4
+  check. The message also shows the internal name `record_2`.
+- **A C++ template handle cannot be built from a braced list.** [read,
+  2026-11-16] Deviates from CPP-6 (lang-cpp.md), which gives `R{{...}}` as
+  a handle's construction form. A template handle takes its fields only
+  through `template <class F> requires std::is_same_v<F, R_fields<T>>`:
+  a non-template constructor from `R_fields<T>` makes deciding whether `R<T>`
+  can be moved instantiate `R_fields<T>`, which holds `std::optional<R<T>>`,
+  a cycle g++ rejects. So `R<int>{{...}}` does not compile and a source
+  writes `R<int>(R_fields<int>{...})`. Non-template handles take both.
+- **A public Rust `data` type is not checked for names it cannot import.**
+  [speculative, 2026-11-16] GEN-10. Rust.hs planRustPublic adds every
+  eligible variant and enum to the names a public record may hold, but
+  never checks a variant's own arms, so a public variant whose arm holds a
+  pool-private record is written into the type files and the standalone
+  `morloc types` crate would name a type it lacks. Reproduce with a
+  variant arm holding a record with a sourced field.
+- **A record woven without the monadic walk skips the host convention.**
+  [read, 2026-11-16] Possible deviation from GEN-8. Only the two monadic
+  walks of concrete inference apply the host convention to a built record
+  (CodeGenerator/Infer.hs, `hostConvention` at its two call sites). A
+  record built by the pure weave keeps suspension-typed fields as written,
+  so a C++ or Rust record reached only through weave would hold a
+  suspension where the convention gives a value. Reachable, by reading,
+  through a phantom-Nat alias over a record (the weave steps the alias to
+  its expansion) and through a Packable whose unpacked form is a record
+  (Serial.hs resolvePacker). Not reproduced. Resolved by stage P2 of
+  /work/plans/nominal-types, which makes weave monadic.
+- **A self-containing `data` instance is named from its spelling.**
+  [speculative, 2026-11-16] Possible deviation from GEN-9. `Rose ?X` with
+  `type X = Rose ?X`, the same with `type Y = Rose ?Y`, and
+  `Rose ?(Rose ?X)` may be one morloc type, but they get different native
+  names (Infer.hs instanceName and selfContaining, mangled from the written
+  arguments). Needs a probe to check whether the typechecker unifies them.
+- **A record whose arguments hold the record itself does not build in C++
+  or Rust.** [reproduced, 2026-11-16] Violates GEN-1. Gap in GEN-9, which
+  rules a self-containing instance a type of its own, named by its
+  arguments, for `data` only. With `record Box a where v :: Int; w :: a` and `type X
+  = Box ?X`, `trip :: X -> X` builds and round-trips in Python. C++ refuses
+  it with "Recursive type alias `X` has no concrete C++ mapping", which
+  is misleading: Box is a generated record. Rust reaches rustc as E0425.
+  Fix in /work/plans/nominal-types: key the instance with a self-argument
+  (NOM-1) and name it as a self-containing `data` instance is named.
+- **A C++ record mapped to a `$`-free user form takes an argument it cannot
+  resolve as written.** [read, 2026-11-17] Gap in GEN-9. C++ spells every
+  argument of a user form with no `$k` slots (`record Cpp => Box a =
+  "box_t"` is `box_t<int>` at `Box Int`), so its arguments are resolved;
+  TypeEval keeps an argument that is rejected as written, so `Box T` with
+  `T` mapped only in another language reaches g++ as `box_t<T>` instead of
+  a morloc error naming `T`. A Python form that drops an argument the
+  general type holds (`type Py => Tag a = "str"`) likewise does not erase
+  it in Python, which still resolves it.
+- **A Rust self-referential record is not spelled as GEN-1 says.** [read,
+  2026-11-18] Violates GEN-1. GEN-1 gives `pub struct R(pub Arc<RFields>)`;
+  RustPrinter.hs printRustHandle emits
+  `pub struct R(pub ::std::mem::ManuallyDrop<::std::sync::Arc<RFields>>)`,
+  so a source building `R(Arc::new(f))` does not compile (`R::new(f)`
+  does). Fix the code or amend GEN-1 to this spelling and `R::new`.
+- **Languages define no `data` kinds.** [reproduced, 2026-11-18] Violates
+  GEN-2. lang.yaml and LangRegistry.hs TypeKinds hold only record kinds;
+  `data L => D = word` parses as a type alias, so `data Cpp => Shape =
+  variant`, `data Py => Shape = pydantic` and `data Py => Shape = bogus` all
+  fail "Could not resolve type for variable 'variant'", naming no kind and
+  listing none. Python `data` types get no class file. Repro: /work/plans/generated-native-types/audit-repros/d1, d2, d3.
+- **A Rust field named `self`, `super`, `crate` or `Self` crashes the
+  compiler.** [reproduced, 2026-11-18] Violates GEN-5. RustPrinter.hs
+  (rustFieldIdent, about 330) calls `error`; the output is a CallStack
+  naming no type. Repro: /work/plans/generated-native-types/audit-repros/p5self.
+- **A C++ field named like a standard macro reaches g++.** [reproduced,
+  2026-11-18] Violates GEN-5. `record P where errno :: Int` fails in g++
+  ("expected unqualified-id"); Cpp.hs checkFields checks keywords only.
+  Repro: /work/plans/generated-native-types/audit-repros/p5errno.
+- **A Rust type file imports the whole crate root.** [read, 2026-11-18]
+  Violates GEN-6 (a file imports only what its definitions name).
+  Rust.hs rustTypeFiles writes `use crate::*;` atop every type file (and
+  private modules), so a sourced crate-root item outranks a prelude name
+  the file uses unqualified (`Vec`, `String`, `Option`). Not reproduced.
+- **A Rust record named like a prelude type is kept in the pool.** [read,
+  2026-11-18] Gap in GEN-10. Rust.hs planRustPublic `nameOk` keeps a
+  record named `String` or `Vec` (and every record holding it) out of the
+  Rust type files, while C++ makes it public; GEN-10 does not list the
+  case. Repro: /work/plans/generated-native-types/audit-repros/p6opt.
+- **Legacy form warnings are given only in the program's own modules.**
+  [reproduced, 2026-11-18] Gap in GEN-3. Desugar.hs (about 1394) warns of a
+  legacy form (`"dict"`, `"struct"`) in the program's modules, never in an
+  installed package's; GEN-3 does not say which.
+
+- **A generated `data` type with fields and a self-referring record derive
+  no Debug or PartialEq.** [read, 2026-11-20] Their arms and handles are
+  shared nodes, which would need hand-written impls comparing through the
+  node; GEN-8's derive rule leaves them at Clone.

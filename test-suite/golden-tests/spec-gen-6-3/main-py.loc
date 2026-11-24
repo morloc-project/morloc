@@ -1,0 +1,61 @@
+--' Every generated type of the closure exists for a sourced file (GEN-6)
+--'
+--' The sourced file names types the program never uses: a plain record, a
+--' recursive record, an enum, a variant holding a record and a template.
+--' Types that cannot be written alone (a keyword field) are left out.
+module main (fa)
+
+import root-py
+
+record A where
+  x :: Int
+
+record B where
+  y :: Int
+record Py => B = dataclass
+record Py => Outer = dataclass
+record Py => K = dataclass
+record Py => KHolder = pydantic
+
+record T where
+  v :: Int
+  kids :: [T]
+
+record Fn where
+  f :: Int -> Int
+
+record K where
+  int :: Int
+  pass :: Int
+
+data E = Red | Green
+
+data V = Plain | Held B
+
+data Wrap a = Wrap a
+
+record S where
+  self :: Int
+
+data W = Plain2 | Held2 B
+
+record W_Held2 where
+  z :: Int
+
+record Outer where
+  b :: B
+
+record KHolder where
+  k :: K
+
+record H where
+  v :: V
+  w :: Wrap Int
+
+record N where
+  v :: Int
+  next :: ?N
+
+source Py from "f.py" ("fa")
+
+fa :: A -> Int

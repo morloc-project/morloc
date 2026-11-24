@@ -349,13 +349,8 @@ walkStep t StepBracketSlice = case t of
     VarU (TV "Str") -> Right t
     _ -> Left (WalkExpectedSliceable t)
 
--- Build a Tuple type (or a bare type for singleton groups). Multi-child
--- groups produce TupleN with N = length of the child list.
 mkTuple :: [TypeU] -> TypeU
 mkTuple [] = VarU (TV "Unit")
 mkTuple [ty] = ty
-mkTuple tys =
-    let n = length tys
-        tName = "Tuple" <> T.pack (show n)
-    in AppU (VarU (TV tName)) tys
+mkTuple tys = AppU (VarU (BT.tuple (length tys))) tys
 

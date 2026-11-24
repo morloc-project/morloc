@@ -59,10 +59,21 @@ Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs k=1000 n=10
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; k steps carrying `(.0 t, k)` (s = k), q = 2
-Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.632 s, net 0.595 s, per_step 2, u 1190 ns; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.363 s, net 0.303 s, per_step 1, u 1213 ns
+Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.632 s, net 0.595 s, per_step 2, u 1190 ns; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.363 s, net 0.303 s, per_step 1, u 1213 ns; results/2026-11-21-1209-648d2825e+dirty-getter-take: t 0.0673 s, net about 0, per_step 0
 
-The tuple is built from its own projection each step, which a move could
-hand over without copying.
+The tuple is built from its own projection each step; the field is now
+moved out of the slot (OWN-5).
+
+### COPY-8 A loop step reading a field of the value it carries on copies the field
+Intent: proposed
+Bench: copies
+Model: net = s * q * u; k steps of `let u = (.0 t, k) in let ys = .0 u in step (k - 1) u (s + len ys)` (s = k); Rust: a chain of n, q = n; C++: q = 1 before a let naming a reference became one
+Measured: results/2026-11-21-1209-648d2825e+dirty-getter-take: rs k=1000 n=10000: t 0.280 s, net 0.233 s, per_step 10000, u 23.3 ns; cpp k=250000: t 0.0470 s, net about 0, per_step 0
+
+`ys` only reads the field of a value the step passes on. Rust cloned it
+until a let naming a part of a value the frame owns and reads again became
+a reference (golden copy-census-rust letAlias: 0 clones; not yet re-timed);
+a loop that grows the value it carries was quadratic for it.
 
 ### COPY-6 A C++ loop step that reads a value and builds onto it copies the value
 Intent: proposed
@@ -74,3 +85,37 @@ The borrowing read and the keeping read of `rest` are in one step. Before
 C++ read fields in place, the walk inside the step copied each payload it
 read, so q grew with the rest of the chain and the walk was quadratic
 (golden `copy-census-cpp`, `mixedLoop`: 5149 copies at n=100, now 198).
+
+### COPY-7 A fold's growing accumulator costs time linear in the batches
+Intent: proposed
+Bench: fold-growth
+Model: t(b) = c + a*b^p for b batches of 1000 integers appended to one list accumulator; p near 2 means each step copies the accumulator, near 1 that it moves it. rs.fold.val: Rust @fold, step by value; rs.fold.ref: step by reference, which must copy; rs.hof.ref: the Rust stdlib fold; cpp.fold.val: C++ @fold, step by value; rs.fold.mor, cpp.fold.mor: a step written in morloc over the by-value one
+Measured: 2026-11-21-0429-a7de70792+dirty-fold-morloc-step, load 3.2, b = 1000..8000 for the by-value and .mor series and 250..2000 for the others: rs.fold.val.p 0.85, cpp.fold.val.p 1.11, rs.fold.mor.p 1.10, cpp.fold.mor.p 1.03, rs.fold.ref.p 2.84, rs.hof.ref.p 2.76 (near or below 1, the fixed cost of a run still dominates)
+Goal: rs.fold.val.p <= 1.3, cpp.fold.val.p <= 1.3
+
+A step or combine that is a sourced function in the fold's language is
+called by the fold directly, not through a closure, so a step written by
+value is given the slot's accumulator (golden `fold-step-by-value`). A
+step written in morloc that captures nothing is called by the fold
+directly as well, with the accumulator as an owned parameter it passes
+on. A step that captures values still reaches the fold as a closure whose
+parameters are references, and is passed a copy
+(issues/call-and-stream-copies.md). One
+written with `&Vec<i64>` copies it every batch by its own choice. A
+host's fold, such as the stdlib's, calls its function with the
+accumulator by reference (HOST-8), so a step there that grows the
+accumulator copies it every batch; that cost is accepted (ruled
+2026-11-21), and a fold that must move its accumulator is written with
+`@fold`.
+
+### COPY-9 A filter given a batch it may keep moves its survivors
+Intent: ruled 2026-11-24
+Bench: pfilter-move
+Model: allocs = k * q + c; n = 100000 records (a 24-byte name and a 4000-byte body) streamed in batches of 10000, each batch given (`mlc::give`) to `pfilterWith (opts 1) (keepRec pct)`; k the records kept (pct 100: all, pct 1: 1%), q the allocations per kept record inside the batch function, c the rest. `ctl` reads the batch again after the call (`let r = pfilterWith .. b in firstOf r (length b)`), so it must copy (q = 2: the name and the body).
+Measured: 2026-11-23, load 10-16 (not citable; runs c5-base/c5-new and c5-final-base/c5-final-new): before: hi.move.allocs_per_kept 2.005, hi.move.wall 0.41-0.51 s, hi.move.cpu 0.39-0.47 s; after: hi.move.allocs_per_kept 0.0018, hi.move.wall 0.29-0.38 s, hi.move.cpu 0.28-0.33 s, hi.saved.cpu 0.11-0.12 s; lo unchanged
+Goal: hi.move.allocs_per_kept <= 0.05
+
+The batch reaches the filter through a function value held as a
+`std::function` and a do block's manifold parameter, as a stream stage's
+does; the closure's by-value form (OWN-7) passes it to the `&&` overload of
+`pfilterWith` (CPP-1), which compacts it in place.

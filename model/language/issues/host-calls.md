@@ -11,7 +11,13 @@
   `readE path = mapReader gffEntries readGff3 path`, a lambda-defined
   reader, `mapReader (\xs -> xs)` in place of `gffEntries`, and the same
   body with no Python. biolib's bio defines its readers with the path
-  argument for this reason.
+  argument for this reason. [traced 2026-11-02, briefs/A7-deep.md] The
+  refusal follows the term's use count, not placement: with two uses
+  Share.hs binds the function-valued constant once, HostProvenance sees an
+  application of a let binder, and its `AppS` arm reports a stray before
+  looking at the head and never passes the demand on. Fix there (pass a
+  positional demand to the let binder), not by eta-expanding, which would
+  undo the sharing EVAL-3 requires.
 
 - **A point-free source built from a list of sources stops the build when a
   Python call follows its use.** [reproduced, compiler 4443cc47] Internal
@@ -51,3 +57,10 @@
   Python function calling it with two arguments all give the right value,
   since each call is eta-expanded to `f(1)(b)(c)`; the flat path may be
   reachable only through Rust `lcSourcedResult`.
+- **The advice to choose a source can name sources of other instances.**
+  [read, 2026-11-06] HostProvenance.hs `chooseSourceHint` finds the term
+  of the source that made a function by value (`src elem srcs`), and a
+  provenance (`MadeBy`) holds no index, so when that source is a method's
+  and two instances source the same function, the advice lists the
+  languages of both instances' sources, though only the selected
+  instance's can be chosen (HOST-9). Not reproduced.

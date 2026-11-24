@@ -1,0 +1,63 @@
+cppBad FAILED
+C++ produced a Str that is not valid UTF-8 (byte 1 of 4)
+cppBlob FAILED
+C++ produced a Str that is not valid UTF-8 (byte 1 of 4)
+pyBad FAILED
+Python produced a Str that is not valid UTF-8 (byte 1 of 4)
+pyBadArray FAILED
+Python produced a Str that is not valid UTF-8 (byte 1 of 4)
+pySurrogate FAILED
+Python produced a Str that is not valid UTF-8
+rBadVec FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+rBadList FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+rBadRaw FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+rBytes FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+rToPy FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+pyRendered FAILED
+Python produced a Str that is not valid UTF-8 (byte 1 of 4)
+rRendered FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+stagedCpp FAILED
+C++ produced a Str that is not valid UTF-8 (byte 1 of 4)
+stagedR FAILED
+R produced a Str that is not valid UTF-8 (byte 1 of 4)
+"ok\n"
+"aÿb\n"
+pyRendered skipped OK
+pyRendered SAME
+rRendered skipped OK
+rRendered SAME
+packet OK
+fwd 0 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+fwd 1 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+fwdCpp 0 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+fwdCpp 1 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+stagedCpp 1 -a skipped OK
+stagedCpp 1 -a SAME
+stagedCpp 1 -c skipped OK
+stagedCpp 1 -c SAME
+stagedCpp 1 -a -c=skip-cat.out skipped OK
+stagedCpp 1 -a -c=skip-cat.out SAME
+stagedR 1 -a skipped OK
+stagedR 1 -a SAME
+stagedValue 1 -a -b=skip-both.out skipped OK
+stagedValue 1 -a -b=skip-both.out SAME
+cat file SAME
+both file SAME
+fwdArg FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+replay open01 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+replay link01 FAILED
+not valid UTF-8 (byte 1 of 4) in data read from outside
+replay good01 OK
+replay good01 SAME

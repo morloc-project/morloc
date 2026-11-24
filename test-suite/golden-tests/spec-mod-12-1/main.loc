@@ -1,0 +1,10 @@
+-- Spec MOD-12: two terms with different signatures imported unqualified
+-- under one name are refused, though the name is never used.
+module main (g)
+
+import root-py
+import .a
+import .b
+
+g :: Int -> Int
+g x = x

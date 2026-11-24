@@ -1,0 +1,23 @@
+-- GEN-14: `Pair I64` and `Pair Date` are one C++ type, Pair<int64_t>, since
+-- Date is held as an int64_t, but only Date's field converts. One native
+-- type cannot convert a field two ways, so the program is refused, naming
+-- the type. The Rust twin is main-rust.loc.
+module main (both)
+
+import root-cpp
+
+newtype Date = Str
+type Cpp => Date = "int64_t"
+
+instance Packable Str Date where
+  source Cpp from "gen14.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+
+source Cpp from "gen14.hpp" ("dateOf")
+dateOf :: I64 -> Date
+
+both :: I64 -> (Pair I64, Pair Date)
+both x = ({fst = x, snd = x}, {fst = dateOf x, snd = dateOf x})

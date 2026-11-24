@@ -6,7 +6,6 @@ all:
 	./nexus -f jsonl twoSites >> obs.txt 2>> obs.err
 	./nexus -f packet -o s.pkt twoSites 2>> obs.err
 	./nexus total s.pkt >> obs.txt 2>> obs.err
-	./nexus seqRet 7 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err s.pkt

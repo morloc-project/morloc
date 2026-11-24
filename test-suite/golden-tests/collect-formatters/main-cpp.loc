@@ -67,7 +67,7 @@ produceInts sink = do
 --' @render -r/--text=renderInts @stream
 --' @render -R/--text-off=renderIntsOff(@offset) @stream
 --' @render -F/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
-streamInts :: <IO> ()
+streamInts :: <IO> (Collect Int)
 streamInts = @collect produceInts
 
 produceStrs :: ([Str] -> <IO> ()) -> <IO> ()
@@ -80,7 +80,7 @@ produceStrs sink = do
 --' @with -s/--sorted=sortStrs
 --' @with -m/--count=countStrsFile
 --' @render -r/--text=joinStrs @stream
-streamStrs :: <IO> ()
+streamStrs :: <IO> (Collect Str)
 streamStrs = @collect produceStrs
 
 --' Attempt to @close a non-temp path: must fail (not silently remove a file).

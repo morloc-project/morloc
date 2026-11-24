@@ -1,0 +1,44 @@
+-- GEN-9: a record on a cycle through a `data` type (Tree holds
+-- [Choice Tree]) is defined from its declaration: its uses inside the
+-- `data` type's arms agree with it, and the pool marshals it there even
+-- when no Tree crosses on its own. So are two records on one cycle (A
+-- holds D, whose arm holds B, which holds [A]). The other language's twin is
+-- main-rust.loc.
+module main (altCount, roundTrip, abTrip)
+
+import root-cpp
+
+data Choice a = Pick a | Skip
+
+record Tree where
+  label :: Str
+  kids :: [Tree]
+  alts :: [Choice Tree]
+
+data D = Leaf | Node B
+
+record A where
+  d :: D
+  tag :: Str
+
+record B where
+  xs :: [A]
+
+source Cpp from "t.hpp" ("countAll", "same")
+countAll :: [Choice Tree] -> Int
+same :: a -> a
+
+node :: Str -> [Tree] -> [Choice Tree] -> Tree
+node l ks cs = {label = l, kids = ks, alts = cs}
+
+leaf :: Str -> Tree
+leaf x = node x [] []
+
+altCount :: Str -> Int
+altCount x = countAll (.alts (node "r" [leaf x] [Pick (leaf x), Skip, Pick (leaf "b")]))
+
+roundTrip :: Tree -> Tree
+roundTrip t = same t
+
+abTrip :: A -> A
+abTrip a = same a

@@ -1,0 +1,20 @@
+-- A length that occurs only in a signature's result is the function's to
+-- choose (DIM-10). Here the body fixes it, so the definition checked at its
+-- open key holds a narrower type than the key; each use gets its own copy
+-- rather than a shared root, whose boundary would disagree with its body.
+module main (pinnedTwice)
+import root
+import root-py
+import vector-py
+
+source Py from "impl.py" ("mk3", "step", "vlen")
+
+mk3 :: Int -> Vector 3 Int
+step :: Vector n Int -> Vector n Int
+vlen :: Vector n Int -> Int
+
+pinnedN :: Int -> Vector m Int
+pinnedN k = step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (mk3 k))))))))))))))))))))
+
+pinnedTwice :: Int -> Int
+pinnedTwice k = vlen (pinnedN k) + vlen (pinnedN k)

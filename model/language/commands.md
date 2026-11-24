@@ -43,3 +43,15 @@ the command `hello` or the argument `"hello"`, and the manual says the name
 does not end the nexus zone. Either (a) the name is optional and a first
 token equal to it is the name; or (b) the name is never accepted; or (c) it
 is always required.
+
+### CMD-6 Command arguments are parsed and verified according to the statically known type
+Intent: ruled 2026-11-01
+Code: conforms 2026-11-01
+
+The code that reads, parses and checks a command's arguments is part of
+the runtime; a program's author writes none of it. Each argument's type,
+and so its wire schema, is known at compile time (SIG-10), and that schema
+directs the parsing: the input is read in the fixed order its docstring
+directives set (CLI-1, CLI-2), and the loaded value must fit the wire
+schema exactly; a value that does not is rejected before the command runs
+(IFACE-17). Marshalling the value into each language is generated.

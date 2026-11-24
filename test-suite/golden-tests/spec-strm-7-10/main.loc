@@ -1,0 +1,31 @@
+-- STRM-7: a streaming command's signature carries the element type of its
+-- output as `Collect a`. Both arms of `pick` stream `Int`, one from a C++
+-- producer and one from a Python one, so the command crosses pools. The
+-- help and the JSON help show the output as `[Int]`; `morloc typecheck`
+-- shows `Collect Int`. A packet written by `pick` reads back whole.
+
+module main (pick, plain, total)
+
+import root-py
+import root-cpp
+
+source Cpp from "impl.hpp" ("produceCpp", "joinAll")
+source Py from "impl.py" ("produce_py" as producePy, "total")
+
+produceCpp :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+producePy :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+
+--' Every element, comma separated
+joinAll :: [Int] -> Str
+
+--' Sum a list of integers
+total :: [Int] -> Int
+
+--' Stream from C++ or from Python
+--' @render -a/--all=joinAll
+pick :: Bool -> Int -> <IO> (Collect Int)
+pick b n = ? b = @collect (produceCpp n) : @collect (producePy n)
+
+--' Stream from C++ with no actions
+plain :: Int -> <IO> (Collect Int)
+plain n = @collect (produceCpp n)

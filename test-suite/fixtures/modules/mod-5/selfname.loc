@@ -1,0 +1,6 @@
+module m (f)
+
+import .usesm (g)
+
+f :: Int
+f = g

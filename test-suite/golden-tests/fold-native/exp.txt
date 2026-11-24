@@ -1,0 +1,28 @@
+--- emptyCpp ---
+cpp n=0
+--- emptyPy ---
+py n=0
+--- emptyR ---
+r n=0
+--- emptyRust ---
+rust n=0
+--- emptyForkCpp ---
+cpp n=0
+--- emptyForkPy ---
+py n=0
+--- emptyFilePy ---
+py n=0
+--- emptyFileR ---
+r n=0
+--- threadsCpp ---
+cpp n=9080
+--- threadsPy ---
+py n=9080
+--- threadsR ---
+r n=9080
+--- threadsRust ---
+rust n=9080
+--- inplacePy ---
+py 0:20,1:16,2:12,3:8,4:4
+--- lateCpp ---
+cpp n=3 late put failed

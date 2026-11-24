@@ -1,0 +1,5 @@
+module a (*)
+
+import root-py
+
+g :: Int -> Int

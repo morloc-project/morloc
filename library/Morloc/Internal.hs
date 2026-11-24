@@ -53,17 +53,14 @@ module Morloc.Internal
     -- * Stateful mapping
   , statefulMap
   , statefulMapM
+  , statefulTraverseM
   , filterApart
-
-    -- * Length-checked zips (fail on mismatched lengths, indicating compiler bugs)
-  , safeZip
-  , safeZipWith
-  , safeZipWithM
   ) where
 
 import Control.Applicative ((<|>))
 import Control.Monad
 import Control.Monad.IO.Class
+import qualified Control.Monad.State.Strict as CMS
 import Data.Char (isLower, isUpper, toLower)
 import Data.Either
 import Data.Foldable (foldlM, foldrM)
@@ -114,6 +111,12 @@ statefulMap f s0 (x : xs) =
        in (sn, y : ys)
 
 -- | Monadic 'statefulMap'
+-- | 'statefulMapM' over any traversable.
+statefulTraverseM :: (Monad m, Traversable t) => (s -> a -> m (s, b)) -> s -> t a -> m (s, t b)
+statefulTraverseM f s0 t = do
+  (t', s1) <- CMS.runStateT (traverse (\x -> CMS.StateT (fmap (\(s', y) -> (y, s')) . (`f` x))) t) s0
+  return (s1, t')
+
 statefulMapM :: (Monad m) => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
 statefulMapM _ s [] = return (s, [])
 statefulMapM f s (x : xs) = do
@@ -128,24 +131,6 @@ filterApart f (x : xs)
   | f x = (Just x, xs)
   | otherwise = case filterApart f xs of
       (r, xs') -> (r, x : xs')
-
--- | Zip two lists, returning 'Nothing' if lengths differ
-safeZip :: [a] -> [b] -> Maybe [(a, b)]
-safeZip (x : xs) (y : ys) = (:) (x, y) <$> safeZip xs ys
-safeZip [] [] = Just []
-safeZip _ _ = Nothing
-
--- | 'zipWith' returning 'Nothing' if lengths differ
-safeZipWith :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
-safeZipWith f xs ys
-  | length xs == length ys = Just $ zipWith f xs ys
-  | otherwise = Nothing
-
--- | Monadic 'safeZipWith'
-safeZipWithM :: (Monad m) => (a -> b -> m c) -> [a] -> [b] -> m (Maybe [c])
-safeZipWithM f xs ys
-  | length xs == length ys = zipWithM f xs ys |>> Just
-  | otherwise = return Nothing
 
 -- | Piped fmap: @x |>> f == fmap f x@
 infixl 1 |>>

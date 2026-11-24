@@ -29,18 +29,21 @@ Used as a value, each is the function of two `Bool`s it denotes. `&&` is
 
 ### BASE-4 A `Str` value survives every language that can hold it
 Intent: proposed
-Code: conforms 2026-10-21
+Tests: spec-base-4-1
+Code: deviates 2026-11-08 (runtime/issues/strings.md)
 
 A `Str` is a sequence of Unicode characters that may include U+0000. Passed
 to a language that cannot represent it, it is rejected: a literal when the
 program is compiled, a runtime value at the boundary it crosses, as an error
 naming the language and the position of the offending character.
 
-### BASE-5 What a `Str` is a sequence of
-Intent: open
-Code: unaudited
+### BASE-5 A `Str` is a sequence of Unicode characters
+Intent: ruled 2026-11-08
+Code: deviates 2026-11-08 (language/issues/values.md: Str length per language)
 
-Is a `Str` a sequence of Unicode code points, or of bytes? This decides
-whether invalid UTF-8 is a legal `Str`, and whether the length of `"e"` with
-an accent is 1 or 2. Candidates: (a) code points, valid Unicode only;
-(b) bytes, with literals encoded as UTF-8.
+A `Str` is text: a sequence of Unicode code points, held as valid UTF-8.
+Bytes that are not valid UTF-8 are not a `Str`; a value that carries them
+fails where it crosses a boundary (BASE-4). Every operation on a `Str`
+counts in characters, so the length of `"\u00e9"` is 1 in every language.
+Binary data is `Vector n U8`.
+

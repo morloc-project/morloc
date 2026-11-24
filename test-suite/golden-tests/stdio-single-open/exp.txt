@@ -1,5 +1,4 @@
 twoStdin: OK
-twoStdout: OK
 twoStderr: OK
 reopenAfterClose: OK
 allThreeAtOnce: OK

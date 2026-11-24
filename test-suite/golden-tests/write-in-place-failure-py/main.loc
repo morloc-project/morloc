@@ -1,0 +1,111 @@
+-- A Python batch whose encoding fails partway (an element that cannot be
+-- encoded as UTF-8, BASE-5) is absent from the file, whether it failed
+-- after filling several sub-packets or at its first element, and the
+-- stream takes later batches (SLOT-36, SLOT-37). The error reaches the
+-- caller as a Try. A Real given a Python int is written as the nearest
+-- double, and one too large for a double fails its batch. A run of
+-- fixed-width elements that fails after earlier sub-packets of it were
+-- placed is absent too. A batch whose element is Python bytes that are not
+-- UTF-8, given for a Str, is absent the same way, and a batch of I32 arrays
+-- holding a two-dimensional array or a numpy scalar fails as the walk
+-- fails it.
+module main (run, tally, reals, readReals, i8s, countI8s, bytesRun, arrays, arraysWhy, readArrays)
+
+import root
+import root-py
+
+source Py from "batch.py" ("batch_of" as batchOf, "count_tagged" as countTagged, "reals_from_ints" as realsFromInts, "i8_batch" as i8Batch, "bytes_of" as bytesOf, "arrays_of" as arraysOf)
+
+batchOf :: Int -> Int -> Int -> [Str]
+countTagged :: Int -> [Str] -> Int
+realsFromInts :: Bool -> [Real]
+i8Batch :: Int -> Int -> [I8]
+bytesOf :: Int -> Int -> Int -> [Str]
+arraysOf :: Str -> [[I32]]
+
+--' Write five batches, two of which fail; which succeeded
+run :: Str -> <IO> [Bool]
+run path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  a <- @write 0 o (batchOf 1 700 (-1))
+  b <- @write 0 o (batchOf 2 700 650)
+  c <- @write 0 o (batchOf 3 30 (-1))
+  d <- @write 0 o (batchOf 4 700 0)
+  e <- @write 0 o (batchOf 5 700 (-1))
+  @close o
+  [ok a, ok b, ok c, ok d, ok e]
+
+ok :: Try Str () -> Bool
+ok r = match r
+  | (Ok _) = True
+  | (Err _) = False
+
+--' Count the elements of each batch in a written file
+tally :: [Str] -> [Int]
+tally xs = [countTagged 1 xs, countTagged 2 xs, countTagged 3 xs, countTagged 4 xs, countTagged 5 xs, length xs]
+
+--' Write Python ints as Reals; which batches succeeded
+reals :: Str -> <IO> [Bool]
+reals path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  a <- @write 0 o (realsFromInts False)
+  b <- @write 0 o (realsFromInts True)
+  @close o
+  [ok a, ok b]
+
+--' The Reals in a written file
+readReals :: [Real] -> [Real]
+readReals xs = xs
+
+--' Write three I8 batches, the second failing near its end; which succeeded
+i8s :: Str -> <IO> [Bool]
+i8s path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream I8))
+  a <- @write 0 o (i8Batch 5000 (-1))
+  b <- @write 0 o (i8Batch 5000 4500)
+  c <- @write 0 o (i8Batch 3000 (-1))
+  @close o
+  [ok a, ok b, ok c]
+
+--' The number of I8s in a written file
+countI8s :: [I8] -> Int
+countI8s xs = length xs
+
+--' Write three batches given as bytes, the second with bytes that are not UTF-8
+bytesRun :: Str -> <IO> [Str]
+bytesRun path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  a <- @write 0 o (bytesOf 1 700 (-1))
+  b <- @write 0 o (bytesOf 2 700 650)
+  c <- @write 0 o (bytesOf 3 30 (-1))
+  @close o
+  [why a, why b, why c]
+
+why :: Try Str () -> Str
+why r = match r
+  | (Ok _) = "ok"
+  | (Err e) = e
+
+--' Write I32 array batches, two holding what is not a one-dimensional array; why each failed
+arraysWhy :: Str -> <IO> [Str]
+arraysWhy path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I32]))
+  a <- @write 0 o (arraysOf "good")
+  b <- @write 0 o (arraysOf "2d")
+  c <- @write 0 o (arraysOf "scalar")
+  @close o
+  [why a, why b, why c]
+
+--' Write I32 array batches, two holding what is not a one-dimensional array
+arrays :: Str -> <IO> [Bool]
+arrays path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream [I32]))
+  a <- @write 0 o (arraysOf "good")
+  b <- @write 0 o (arraysOf "2d")
+  c <- @write 0 o (arraysOf "scalar")
+  @close o
+  [ok a, ok b, ok c]
+
+--' The arrays in a written file
+readArrays :: [[I32]] -> [[I32]]
+readArrays xs = xs

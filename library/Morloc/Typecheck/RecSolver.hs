@@ -69,6 +69,7 @@ module Morloc.Typecheck.RecSolver
   , mkCanon
   ) where
 
+import Morloc.Data.Zip (zipExact, zipSame)
 import Control.Monad (foldM)
 import Data.List (foldl')
 import Data.Map.Strict (Map)
@@ -267,7 +268,7 @@ groundEq fa fb
       -- Same keys in the same order. Any field whose types are not already
       -- identical becomes an obligation: one of them may be an existential
       -- that only the typechecker can solve.
-      Right mempty { recFieldEqs = [(ta, tb) | ((_, ta), (_, tb)) <- zip fa fb, ta /= tb] }
+      Right mempty { recFieldEqs = [(ta, tb) | ((_, ta), (_, tb)) <- zipSame fa fb, ta /= tb] }
 
 -- | Walk a segment sequence against a fully known field sequence, solving
 -- each row variable from the fields it must span.
@@ -323,16 +324,14 @@ alignPrefix ((k1, t1) : as) ((k2, t2) : bs)
 -- | Both sides still hold row variables. Only a structural match is decided
 -- here; anything else waits for one side to ground out.
 linkSegs :: [RecSeg] -> [RecSeg] -> Either RecError RecSolution
-linkSegs sa sb
-  | length sa /= length sb = Left RecDeferred
-  | otherwise = foldM step mempty (zip sa sb)
+linkSegs sa sb = maybe (Left RecDeferred) (foldM step mempty) (zipExact sa sb)
   where
     step acc (RecGround fa, RecGround fb)
       -- Differing known blocks are not a contradiction: a row variable
       -- elsewhere in the sequence can still absorb the difference.
       | map fst fa == map fst fb =
           Right acc { recFieldEqs = recFieldEqs acc <>
-                        [(ta, tb) | ((_, ta), (_, tb)) <- zip fa fb, ta /= tb] }
+                        [(ta, tb) | ((_, ta), (_, tb)) <- zipSame fa fb, ta /= tb] }
       | otherwise = Left RecDeferred
     step acc (RecTail va, RecTail vb)
       | va == vb = Right acc

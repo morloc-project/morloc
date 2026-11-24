@@ -344,6 +344,13 @@ pub fn serve(
                 );
                 continue;
             }
+            Err(LineError::NotText) => {
+                write_message(
+                    protocol_fd,
+                    &error_response(Value::Null, JSONRPC_PARSE_ERROR, "request line is not valid UTF-8"),
+                );
+                continue;
+            }
             Err(LineError::Io(e)) => {
                 eprintln!("morloc mcp: input read error: {}", e);
                 break;
@@ -646,8 +653,9 @@ impl DispatchCtx {
                     media_result(bytes, &mime, (*resp).result_text, command, &action)
                         .map_err(DispatchError::Call)
                 } else {
-                    let json = cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string());
-                    tool_result_object(&json).map_err(DispatchError::Call)
+                    result_text((*resp).result_json)
+                        .and_then(tool_result_object)
+                        .map_err(DispatchError::Call)
                 }
             } else {
                 let kind = (*resp).error_kind;
@@ -694,7 +702,7 @@ fn too_large(size: usize) -> String {
 const ENVELOPE: usize = 4096;
 
 /// The MCP `result` object for a JSON value: compact text, mirrored into
-/// `structuredContent` when it is an object.
+/// `structuredContent` when it is an object. Only an object is parsed.
 fn tool_result_object(result_json: &str) -> Result<Value, String> {
     let object = result_json.trim_start().starts_with('{');
     let size = json_escaped_len(result_json.as_bytes())
@@ -703,18 +711,174 @@ fn tool_result_object(result_json: &str) -> Result<Value, String> {
     if size > MAX_RESULT_LINE {
         return Err(too_large(size));
     }
-    let parsed: Option<Value> = serde_json::from_str(result_json).ok();
-    let text = parsed
-        .as_ref()
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| result_json.to_string());
+    let parsed: Option<Value> = if object { serde_json::from_str(result_json).ok() } else { None };
+    let text = match &parsed {
+        Some(v) => v.to_string(),
+        None => compact_json(result_json)
+            .or_else(|| serde_json::from_str::<Value>(result_json).ok().map(|v| v.to_string()))
+            .unwrap_or_else(|| result_json.to_string()),
+    };
     let mut result = Map::new();
     result.insert("content".into(), json!([ { "type": "text", "text": text } ]));
-    if let Some(Value::Object(_)) = parsed {
-        result.insert("structuredContent".into(), parsed.unwrap());
+    if let Some(v @ Value::Object(_)) = parsed {
+        result.insert("structuredContent".into(), v);
     }
     result.insert("isError".into(), Value::Bool(false));
     Ok(Value::Object(result))
+}
+
+/// `json` as serde_json writes it after reading it: no whitespace outside
+/// strings, each string in serde_json's escapes, each exponent as `e`
+/// and a sign, and `-0` as `0`. None when a string holds an escape
+/// serde_json would refuse, or an object repeats a key (serde_json keeps
+/// only the last), so the caller takes serde_json's own reading.
+fn compact_json(json: &str) -> Option<String> {
+    let b = json.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut keys: Vec<Option<std::collections::HashSet<Vec<u8>>>> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'"' => {
+                let start = out.len();
+                i = compact_string(b, i + 1, &mut out)?;
+                let mut j = i;
+                while j < b.len() && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b':') {
+                    if let Some(Some(seen)) = keys.last_mut() {
+                        if !seen.insert(out[start..].to_vec()) {
+                            return None;
+                        }
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => i = compact_number(b, i, &mut out),
+            c => {
+                match c {
+                    b'{' => keys.push(Some(std::collections::HashSet::new())),
+                    b'[' => keys.push(None),
+                    b'}' | b']' => {
+                        keys.pop();
+                    }
+                    _ => {}
+                }
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn compact_number(b: &[u8], start: usize, out: &mut Vec<u8>) -> usize {
+    let mut i = start;
+    while i < b.len() && matches!(b[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+        i += 1;
+    }
+    let num = &b[start..i];
+    if num == b"-0" {
+        out.push(b'0');
+        return i;
+    }
+    match num.iter().position(|&c| c == b'e' || c == b'E') {
+        Some(e) => {
+            out.extend_from_slice(&num[..e]);
+            out.push(b'e');
+            if !matches!(num.get(e + 1), Some(b'+') | Some(b'-')) {
+                out.push(b'+');
+            }
+            out.extend_from_slice(&num[e + 1..]);
+        }
+        None => out.extend_from_slice(num),
+    }
+    i
+}
+
+fn compact_string(b: &[u8], mut i: usize, out: &mut Vec<u8>) -> Option<usize> {
+    out.push(b'"');
+    loop {
+        let run = i;
+        while i < b.len() && b[i] != b'"' && b[i] != b'\\' {
+            i += 1;
+        }
+        out.extend_from_slice(&b[run..i]);
+        match b.get(i)? {
+            b'"' => {
+                out.push(b'"');
+                return Some(i + 1);
+            }
+            _ => {
+                let (c, next) = unescape(b, i + 1)?;
+                push_escaped(c, out);
+                i = next;
+            }
+        }
+    }
+}
+
+fn unescape(b: &[u8], i: usize) -> Option<(char, usize)> {
+    let c = match b.get(i)? {
+        b'"' => '"',
+        b'\\' => '\\',
+        b'/' => '/',
+        b'b' => '\u{8}',
+        b'f' => '\u{c}',
+        b'n' => '\n',
+        b'r' => '\r',
+        b't' => '\t',
+        b'u' => {
+            let hi = hex4(b, i + 1)?;
+            return match hi {
+                0xD800..=0xDBFF => {
+                    if b.get(i + 5) != Some(&b'\\') || b.get(i + 6) != Some(&b'u') {
+                        return None;
+                    }
+                    let lo = hex4(b, i + 7)?;
+                    if !(0xDC00..=0xDFFF).contains(&lo) {
+                        return None;
+                    }
+                    Some((char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))?, i + 11))
+                }
+                0xDC00..=0xDFFF => None,
+                _ => Some((char::from_u32(hi)?, i + 5)),
+            };
+        }
+        _ => return None,
+    };
+    Some((c, i + 1))
+}
+
+fn hex4(b: &[u8], i: usize) -> Option<u32> {
+    let s = std::str::from_utf8(b.get(i..i + 4)?).ok()?;
+    if !s.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(s, 16).ok()
+}
+
+fn push_escaped(c: char, out: &mut Vec<u8>) {
+    match c {
+        '"' => out.extend_from_slice(b"\\\""),
+        '\\' => out.extend_from_slice(b"\\\\"),
+        '\n' => out.extend_from_slice(b"\\n"),
+        '\r' => out.extend_from_slice(b"\\r"),
+        '\t' => out.extend_from_slice(b"\\t"),
+        '\u{8}' => out.extend_from_slice(b"\\b"),
+        '\u{c}' => out.extend_from_slice(b"\\f"),
+        c if (c as u32) < 0x20 => {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            out.extend_from_slice(b"\\u00");
+            out.push(HEX[(c as usize) >> 4]);
+            out.push(HEX[(c as usize) & 0xf]);
+        }
+        c => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
 }
 
 /// The MCP `result` object for raw output: raster images and
@@ -833,6 +997,16 @@ fn build_c_sockets(sockets: &[PoolSocket]) -> (Vec<MorlocSocket>, Vec<Vec<CStrin
     (c_sockets, keepalive)
 }
 
+/// A daemon response's result text; `null` when it has none.
+unsafe fn result_text<'a>(p: *const c_char) -> Result<&'a str, String> {
+    if p.is_null() {
+        return Ok("null");
+    }
+    CStr::from_ptr(p)
+        .to_str()
+        .map_err(|e| format!("the daemon's result is not UTF-8 (byte {} is not)", e.valid_up_to()))
+}
+
 fn cstr_to_string(p: *const c_char) -> Option<String> {
     if p.is_null() {
         None
@@ -876,6 +1050,7 @@ fn write_message(protocol_fd: RawFd, msg: &Value) {
 enum LineError {
     Eof,
     TooLong,
+    NotText,
     Io(std::io::Error),
 }
 
@@ -904,8 +1079,7 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
                 if buf.is_empty() {
                     return Some(Err(LineError::Eof));
                 }
-                let s = String::from_utf8_lossy(&buf).into_owned();
-                return Some(Ok(s));
+                return Some(String::from_utf8(buf).map_err(|_| LineError::NotText));
             }
             if let Some(pos) = available.iter().position(|&b| b == b'\n') {
                 if overflow {
@@ -918,8 +1092,7 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
                 if buf.len() > MAX_LINE_BYTES {
                     return Some(Err(LineError::TooLong));
                 }
-                let s = String::from_utf8_lossy(&buf).into_owned();
-                return Some(Ok(s));
+                return Some(String::from_utf8(buf).map_err(|_| LineError::NotText));
             } else {
                 let consumed = available.len();
                 if !overflow {
@@ -980,10 +1153,14 @@ impl Drop for ConnectionSlot {
 // NET-3
 pub(crate) fn connection_slot() -> Option<ConnectionSlot> {
     use std::sync::atomic::Ordering;
-    OPEN_CONNECTIONS
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
-        .ok()
-        .map(|_| ConnectionSlot)
+    let mut n = OPEN_CONNECTIONS.load(Ordering::SeqCst);
+    while n < MAX_CONNECTIONS {
+        match OPEN_CONNECTIONS.compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(ConnectionSlot),
+            Err(cur) => n = cur,
+        }
+    }
+    None
 }
 
 /// A failed accept: with the descriptor table full, wait for one to free
@@ -1241,6 +1418,14 @@ where
                 unsafe { morloc_runtime_types::net_limits::linger_close(fd) };
                 return;
             }
+            Ok(ReadOutcome::Bad(why)) => {
+                use morloc_runtime_types::daemon_error::{error_body, http_status, BAD_REQUEST};
+                let body = error_body(BAD_REQUEST, &why);
+                let _ = writer.write_all(&http_json(http_status(BAD_REQUEST, false) as u16, body.as_bytes(), false));
+                let fd = std::os::unix::io::IntoRawFd::into_raw_fd(writer);
+                unsafe { morloc_runtime_types::net_limits::linger_close(fd) };
+                return;
+            }
             _ => break, // EOF, malformed, or IO error -> close
         };
         let keep_alive = header_get(&req.headers, "connection")
@@ -1285,59 +1470,65 @@ pub(crate) struct HttpRequest {
 /// What one read of a connection gave.
 enum ReadOutcome {
     Request(HttpRequest),
-    /// End of file, or a malformed request line.
+    /// End of file before a request began.
     Closed,
     /// Refused for its size (NET-10): an over-long line or body, or too many
     /// headers.
     TooLarge(&'static str),
+    /// Refused as malformed, with the reason.
+    Bad(String),
 }
 
-/// Read one request from the buffered connection. Every line is size-capped and the body is read incrementally up
-/// to Content-Length, so a hostile Content-Length or header flood cannot force
-/// a large up-front allocation.
+/// Read one request from the buffered connection. Every line is size-capped
+/// and the body is read incrementally up to Content-Length, so a hostile
+/// Content-Length or header flood cannot force a large up-front allocation.
+/// The head is parsed as every server parses it (NET-10).
 fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<ReadOutcome> {
-    let mut line = String::new();
-    match read_capped_line(reader, &mut line)? {
-        LineRead::Eof => return Ok(ReadOutcome::Closed),
-        LineRead::TooLong => return Ok(ReadOutcome::TooLarge("the request line is too long")),
-        LineRead::Ok => {}
-    }
-    let mut it = line.trim_end().split_whitespace();
-    let method = it.next().unwrap_or("").to_string();
-    let path = it.next().unwrap_or("").to_string();
-    if method.is_empty() {
-        return Ok(ReadOutcome::Closed);
-    }
-
-    let mut headers: Vec<(String, String)> = Vec::new();
-    let mut content_length: usize = 0;
+    let mut head: Vec<u8> = Vec::new();
+    let mut lines = 0usize;
     loop {
-        if headers.len() >= MAX_HEADERS {
+        let start = head.len();
+        let n = reader.take(MAX_HEADER_LINE_BYTES).read_until(b'\n', &mut head)?;
+        if n == 0 {
+            if head.is_empty() {
+                return Ok(ReadOutcome::Closed);
+            }
+            return Ok(ReadOutcome::Bad("the connection closed inside the request head".into()));
+        }
+        if head.last() != Some(&b'\n') {
+            if n as u64 >= MAX_HEADER_LINE_BYTES {
+                return Ok(ReadOutcome::TooLarge(if lines == 0 {
+                    "the request line is too long"
+                } else {
+                    "a request header is too long"
+                }));
+            }
+            return Ok(ReadOutcome::Bad("the connection closed inside the request head".into()));
+        }
+        let blank = matches!(&head[start..], b"\r\n" | b"\n");
+        if blank && lines == 0 {
+            // RFC 9112 2.2: an empty line before the request line is ignored.
+            head.clear();
+            continue;
+        }
+        if blank {
+            break;
+        }
+        lines += 1;
+        if lines > MAX_HEADERS {
             return Ok(ReadOutcome::TooLarge("the request has too many headers"));
         }
-        let mut h = String::new();
-        match read_capped_line(reader, &mut h)? {
-            LineRead::Eof => return Ok(ReadOutcome::Closed),
-            LineRead::TooLong => return Ok(ReadOutcome::TooLarge("a request header is too long")),
-            LineRead::Ok => {}
-        }
-        let t = h.trim_end_matches(['\r', '\n']);
-        if t.is_empty() {
-            break; // end of headers
-        }
-        if let Some(i) = t.find(':') {
-            let name = t[..i].trim().to_ascii_lowercase();
-            let val = t[i + 1..].trim().to_string();
-            if name == "content-length" {
-                content_length = val.parse().unwrap_or(0);
-            }
-            headers.push((name, val));
-        }
     }
+    let parsed = match morloc_runtime_types::http_head::parse(&head) {
+        Ok(h) => h,
+        Err(e) if e.too_large => return Ok(ReadOutcome::TooLarge("the request body is larger than this server takes")),
+        Err(e) => return Ok(ReadOutcome::Bad(e.why)),
+    };
 
     // Reject an absurd Content-Length rather than allocate it (same backstop the
     // stdio line cap provides). Read the body incrementally so the buffer grows
     // with the bytes actually received, not the client-declared length.
+    let content_length = parsed.content_length;
     if content_length > MAX_LINE_BYTES {
         return Ok(ReadOutcome::TooLarge("the request body is larger than this server takes"));
     }
@@ -1345,35 +1536,17 @@ fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) ->
     if content_length > 0 {
         on_body(content_length);
         reader.take(content_length as u64).read_to_end(&mut body)?;
+        if body.len() < content_length {
+            return Ok(ReadOutcome::Bad("the connection closed inside the request body".into()));
+        }
     }
+    let path = if parsed.query.is_empty() { parsed.path } else { format!("{}?{}", parsed.path, parsed.query) };
     Ok(ReadOutcome::Request(HttpRequest {
-        method,
+        method: parsed.method.to_string(),
         path,
-        headers,
+        headers: parsed.headers,
         body,
     }))
-}
-
-/// Outcome of a size-capped line read.
-enum LineRead {
-    Ok,
-    Eof,
-    TooLong,
-}
-
-/// Read one line into `buf`, capping the bytes consumed at MAX_HEADER_LINE_BYTES.
-/// A line that reaches the cap without a newline yields `TooLong` (the caller
-/// closes the connection); this bounds both request-line and header allocation.
-fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Result<LineRead> {
-    let n = reader.take(MAX_HEADER_LINE_BYTES).read_line(buf)?;
-    if n == 0 {
-        return Ok(LineRead::Eof);
-    }
-    // Hit the cap without terminating the line -> reject.
-    if !buf.ends_with('\n') && n as u64 >= MAX_HEADER_LINE_BYTES {
-        return Ok(LineRead::TooLong);
-    }
-    Ok(LineRead::Ok)
 }
 
 /// Auth-check, route on method+path, and produce the full HTTP response bytes.
@@ -1751,9 +1924,9 @@ impl Frontend {
                     let action = cstr_to_string((*resp).action).unwrap_or_else(|| "raw".into());
                     Ok(ForwardOk::Media(bytes, mime, (*resp).result_text, action))
                 } else {
-                    Ok(ForwardOk::Json(
-                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
-                    ))
+                    result_text((*resp).result_json)
+                        .map(|t| ForwardOk::Json(t.to_string()))
+                        .map_err(|e| (INTERNAL, e))
                 }
             } else {
                 Err(((*resp).error_kind, cstr_to_string((*resp).error)
@@ -2338,7 +2511,10 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
         use morloc_runtime_types::daemon_error::{error_body, EVAL_NOT_EXPOSED, NOT_FOUND};
         return http_json(404, error_body(NOT_FOUND, EVAL_NOT_EXPOSED).as_bytes(), keep_alive);
     }
-    let body = String::from_utf8_lossy(&req.body);
+    let Ok(body) = std::str::from_utf8(&req.body) else {
+        use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+        return http_json(400, error_body(BAD_REQUEST, "the request body is not valid UTF-8").as_bytes(), keep_alive);
+    };
     let expr: Option<String> = if body.trim_start().starts_with('{') {
         serde_json::from_str::<HashMap<String, Raw>>(&body).ok().and_then(|o| {
             let r = o.get("expr").or_else(|| o.get("expression"))?;
@@ -2804,6 +2980,68 @@ mod tests {
         assert_eq!(r["content"][0]["text"], deep);
     }
 
+    fn text_by_tree(json: &str) -> String {
+        serde_json::from_str::<Value>(json).map(|v| v.to_string()).unwrap_or_else(|_| json.to_string())
+    }
+
+    // The text of a result that is not an object is what reading it into a
+    // tree and writing it back gives.
+    #[test]
+    fn compact_text_is_the_text_of_the_tree() {
+        let cases = [
+            "42", " -0 ", "[-0,-0.0,-0e1]", "1.0", "1E+5", "1e05", "1E-05", "-2.5e-3", "0e0", "-9223372036854775809", "18446744073709551617", "true", "null",
+            "\"\\/tmp:1:False\"", "\"a\\\"b\\\\c\\/d\\n\\r\\t\\b\\f\"",
+            "\"\\u0001\\u001F\\u007f\\u0041\\u00e9\\u2028\"", "\"\\ud83d\\ude00 \u{e9}\u{1F600}\"",
+            "[ 1 , [ ] , { } , { \"a\" : [ \"x\\/y\" , null ] } ]\n",
+            "[{\"name\":\"gene1\",\"start\":10,\"score\":0.37},{\"name\":\"g\\/2\",\"start\":20,\"score\":1e-300}]",
+            "\"\\ud800\"", "\"\\udc00x\"", "\"\\ud800\\u0041\"",
+        ];
+        for json in cases {
+            let want = text_by_tree(json);
+            let got = compact_json(json).unwrap_or_else(|| json.to_string());
+            assert_eq!(got, want, "for {json}");
+        }
+        let mut seed: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let len = (next() % 12) as usize;
+            let s: String = (0..len)
+                .map(|_| char::from_u32((next() % 0x300) as u32).unwrap_or('?'))
+                .collect();
+            let json = format!("[{}, {:?}, \"{}\"]", serde_json::to_string(&s).unwrap(), s, s.replace('\\', "\\/").replace('"', "\\u0022"));
+            if serde_json::from_str::<Value>(&json).is_ok() {
+                assert_eq!(compact_json(&json).unwrap(), text_by_tree(&json), "for {json}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_repeated_key_reads_as_its_tree_writes_it() {
+        for json in [
+            "[{\"a\":1,\"a\":2}]",
+            "[{\"a\":1,\"\\u0061\":2}]",
+            "[{\"a\":{\"b\":1,\"b\":[2]},\"c\":3}]",
+            "[{\"a\":1},{\"a\":2},[{\"a\":3,\"b\":{\"a\":4}}]]",
+        ] {
+            let r = tool_result_object(json).unwrap();
+            assert_eq!(r["content"][0]["text"], text_by_tree(json), "for {json}");
+        }
+        assert!(compact_json("[{\"a\":1},{\"a\":2}]").is_some(), "keys of sibling objects are not repeats");
+    }
+
+    #[test]
+    fn a_string_result_reads_as_its_tree_writes_it() {
+        let r = tool_result_object("\"\\/tmp:1:False\"").unwrap();
+        assert_eq!(r["content"][0]["text"], "\"/tmp:1:False\"");
+        let r = tool_result_object("[\"a\\/b\", 1.50]").unwrap();
+        assert_eq!(r["content"][0]["text"], "[\"a/b\",1.50]");
+    }
+
     #[test]
     fn scalar_result_has_text_only() {
         let r = tool_result_object("42").unwrap();
@@ -3259,6 +3497,29 @@ mod tests {
         let parsed = match read_http_request(&mut slice, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
         assert_eq!(parsed.body, b"HELLO");
         assert_eq!(slice, b"EXTRA"); // remainder preserved
+    }
+
+    #[test]
+    fn read_http_request_refuses_a_head_or_body_it_cannot_read_one_way() {
+        for raw in [
+            &b"POST /mcp HTTP/1.1\r\nContent-Length: 5x\r\n\r\nHELLO"[..],
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 2\r\ncontent-length: 5\r\n\r\nHELLO",
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 9\r\n\r\nHELLO",
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n",
+            b"GET  /health HTTP/1.1\r\n\r\n",
+            b"GET /health\r\n\r\n",
+            b"GET /health HTTP/1.1\r\nHost",
+        ] {
+            let mut slice = raw;
+            assert!(matches!(read_http_request(&mut slice, |_| {}).unwrap(), ReadOutcome::Bad(_)));
+        }
+    }
+
+    #[test]
+    fn read_http_request_reads_a_header_that_is_not_utf8() {
+        let mut slice = &b"\r\nGET /health?x=1 HTTP/1.1\r\nUser-Agent: \xe9t\xe9\r\n\r\n"[..];
+        let parsed = match read_http_request(&mut slice, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
+        assert_eq!((parsed.method.as_str(), parsed.path.as_str()), ("GET", "/health?x=1"));
     }
 
     #[test]

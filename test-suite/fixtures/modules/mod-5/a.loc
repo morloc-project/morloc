@@ -1,0 +1,4 @@
+module (*)
+
+av :: Int
+av = 1

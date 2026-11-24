@@ -1,0 +1,206 @@
+-- OWN-8: a function whose by-reference form returns its argument, or a
+-- part of it, on some paths and a fresh value on others returns a result
+-- lent or owned, so a caller that only reads it copies nothing. Every
+-- function below is recursive, so it is not inlined; each export prints its
+-- result and the payloads copied in the run (Rust, pay.rs, which also
+-- aborts on a read of a moved or destroyed payload).
+--
+--   loopPart      a loop reads a part a recursive accessor returns: no copy
+--   loopWhole     the same, the accessor returning its argument: no copy
+--   loopFresh     the accessor returns a fresh value: no copy
+--   keepsLent     the caller keeps a lent result: one copy
+--   keepsFresh    the caller keeps a fresh result: no copy
+--   movesAfter    the argument is kept after the result's last read: no copy
+--   movesWith     the argument is kept in the expression that reads the
+--                 result; the read runs first (OWN-2): no copy
+--   tmpArg        the argument is a temporary: no copy
+--   strLit        a Str literal argument returned lent, its length read
+--   otherMoves    two lent parameters, one returnable; the other is kept
+--                 while the result is read: no copy
+--   returnedMoves the same, the returnable one kept with the read, which
+--                 runs first: no copy
+--   mixed         a non-tail recursion returns an accessor's result over
+--                 its own: its value is right
+--   scalarArg     an accessor of an Int, which is passed by value, so never
+--                 lent: its value is right
+--   takeAfter     a field of the argument is read after the result, so it
+--                 is not taken while the result may be lent: its value is
+--                 right
+--   takeFirst     the same, the field read first
+--   condPart      a function that is not recursive, whose body is a
+--                 conditional returning a constructor field of its
+--                 argument or a fresh value, read where the argument is
+--                 read after: no copy
+--   condFresh     the same, the fresh arm taken: no copy
+--   condLoop      the same function called from a loop: no copy
+--   condKeeps     the caller keeps its lent result: one copy
+--   condMoves     a part of the argument is kept after the result's last
+--                 read: no copy
+--   condWhole     the conditional returns the argument itself: no copy
+--   condTwo       the arms are two parameters, both read after: no copy
+--   condTwoMoves  the same, one parameter kept after the read: no copy
+module main (loopPart, loopWhole, loopFresh, keepsLent, keepsFresh, movesAfter, movesWith, tmpArg, strLit, otherMoves, returnedMoves, mixed, scalarArg, takeAfter, takeFirst, condPart, condFresh, condLoop, condKeeps, condMoves, condWhole, condTwo, condTwoMoves)
+
+import root
+import root-rust
+
+newtype Pay = Int
+type Rust => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Rust from "pay.rs" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Rust from "pay.rs" ("mkp", "keyp", "census", "slen")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+census :: Int -> (Int, Int)
+slen :: Str -> Int
+
+record R where
+  p :: Pay
+  k :: Int
+
+record H where
+  q :: Pay
+  z :: Int
+
+hold :: Pay -> H
+hold v = {q = v, z = 1}
+
+part :: Int -> R -> Pay
+part j x = ? j > 1 = part (j - 2) x : ? j > 0 = .p x : mkp 0
+
+whole :: Int -> Pay -> Pay
+whole j x = ? j > 1 = whole (j - 2) x : ? j > 0 = x : mkp 0
+
+walkPart :: Int -> Int -> R -> Int -> Int
+walkPart j i x acc
+  ? i == 0 = acc + .k x
+  : walkPart j (i - 1) x (acc + keyp (part j x))
+
+walkWhole :: Int -> Int -> Pay -> Int -> Int
+walkWhole j i x acc
+  ? i == 0 = acc
+  : walkWhole j (i - 1) x (acc + keyp (whole j x))
+
+loopPart :: Int -> (Int, Int)
+loopPart n = census (walkPart 1 3 {p = mkp n, k = 1} 0)
+
+loopWhole :: Int -> (Int, Int)
+loopWhole n = census (walkWhole 3 3 (mkp n) 0)
+
+loopFresh :: Int -> (Int, Int)
+loopFresh n = census (walkWhole 2 3 (mkp n) 0)
+
+keepsLent :: Int -> (Int, Int)
+keepsLent n = census (let x = mkp n in let h = hold (whole 1 x) in keyp (.q h) + keyp x)
+
+keepsFresh :: Int -> (Int, Int)
+keepsFresh n = census (let x = mkp n in let h = hold (whole 0 x) in keyp (.q h) + keyp x)
+
+movesAfter :: Int -> (Int, Int)
+movesAfter n = census (let x = mkp n in let r = whole 1 x in let a = keyp r in a + keyp (.q (hold x)))
+
+movesWith :: Int -> (Int, Int)
+movesWith n = census (let x = mkp n in let r = whole 1 x in keyp r + keyp (.q (hold x)))
+
+tmpArg :: Int -> (Int, Int)
+tmpArg n = census (keyp (whole 1 (mkp n)))
+
+sget :: Int -> Str -> Str
+sget j s = ? j > 1 = sget (j - 2) s : ? j > 0 = s : "none"
+
+strLit :: Int -> Int
+strLit n = slen (sget n "a string long enough to live on the heap")
+
+pick2 :: Int -> Pay -> Pay -> Pay
+pick2 j a b = ? j > 1 = pick2 (j - 2) a b : ? j > 0 = a : mkp (keyp b)
+
+otherMoves :: Int -> (Int, Int)
+otherMoves n = census (let a = mkp n in let b = mkp 1 in let r = pick2 1 a b in keyp r + keyp (.q (hold b)))
+
+returnedMoves :: Int -> (Int, Int)
+returnedMoves n = census (let a = mkp n in let b = mkp 1 in let r = pick2 1 a b in keyp r + keyp (.q (hold a)) + keyp b)
+
+nest :: Int -> Pay -> Pay
+nest j x = ? j > 0 = whole 1 (nest (j - 1) x) : x
+
+mixed :: Int -> (Int, Int)
+mixed n = census (let x = mkp n in keyp (nest 2 x) + keyp x)
+
+iget :: Int -> Int -> Int
+iget j x = ? j > 1 = iget (j - 2) x : ? j > 0 = x : 0
+
+scalarArg :: Int -> Int
+scalarArg n = iget 3 (n + 40) + iget 3 (n + 1)
+
+mkR :: Pay -> Int -> R
+mkR v i = {p = v, k = i}
+
+spin :: Int -> Int
+spin n = sum (map (\v -> keyp v) [mkp n])
+
+takeAfter :: Int -> (Int, Int)
+takeAfter n = census (let x = mkR (mkp n) 1 in let r = part 1 x in keyp r + keyp (.p x) + spin 0)
+
+takeFirst :: Int -> (Int, Int)
+takeFirst n = census (let x = mkR (mkp n) 1 in let r = part 1 x in keyp (.p x) + keyp r)
+
+data Bx = Bx Pay Int | NoBox
+
+boxPay :: Bx -> Pay
+boxPay b = match b
+  | (Bx q _) = q
+  | NoBox = mkp 0
+
+readBox :: Bx -> Int
+readBox b = match b
+  | (Bx q k) = keyp q + k
+  | NoBox = 0
+
+record HB where
+  w :: Bx
+  t :: Int
+
+holdB :: Bx -> HB
+holdB v = {w = v, t = 1}
+
+-- a match in the body keeps these from being inlined
+cbox :: Int -> Bx -> Pay
+cbox j x = ? j > 0 = boxPay x : mkp 0
+
+condPart :: Int -> (Int, Int)
+condPart n = census (let x = Bx (mkp n) 1 in keyp (cbox 1 x) + readBox x + spin 0)
+
+condFresh :: Int -> (Int, Int)
+condFresh n = census (let x = Bx (mkp n) 1 in keyp (cbox 0 x) + readBox x + spin 0)
+
+walkBox :: Int -> Int -> Bx -> Int -> Int
+walkBox j i x acc
+  ? i == 0 = acc + readBox x
+  : walkBox j (i - 1) x (acc + keyp (cbox j x))
+
+condLoop :: Int -> (Int, Int)
+condLoop n = census (walkBox 1 3 (Bx (mkp n) 1) 0)
+
+condKeeps :: Int -> (Int, Int)
+condKeeps n = census (let x = Bx (mkp n) 1 in let h = hold (cbox 1 x) in keyp (.q h) + readBox x)
+
+condMoves :: Int -> (Int, Int)
+condMoves n = census (let x = Bx (mkp n) 1 in let r = cbox 1 x in let a = keyp r in a + readBox (.w (holdB x)))
+
+cwhole :: Int -> Bx -> Bx
+cwhole j x = ? j > 0 = x : (match x | (Bx _ k) = Bx (mkp k) k | NoBox = NoBox)
+
+condWhole :: Int -> (Int, Int)
+condWhole n = census (let x = Bx (mkp n) 1 in readBox (cwhole 1 x) + readBox x + spin 0)
+
+cpick :: Int -> Bx -> Bx -> Pay
+cpick j a b = ? j > 0 = boxPay a : boxPay b
+
+condTwo :: Int -> (Int, Int)
+condTwo n = census (let a = Bx (mkp n) 1 in let b = Bx (mkp 1) 1 in keyp (cpick 1 a b) + readBox a + readBox b + spin 0)
+
+condTwoMoves :: Int -> (Int, Int)
+condTwoMoves n = census (let a = Bx (mkp n) 1 in let b = Bx (mkp 1) 1 in let r = cpick 0 a b in let c = keyp r in c + readBox (.w (holdB b)) + readBox a)

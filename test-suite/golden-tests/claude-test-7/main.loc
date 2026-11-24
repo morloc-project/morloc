@@ -17,9 +17,7 @@ record SalesRecord where
   price :: Real
   region :: Str
 
-record Py => SalesRecord = "dict"
 record Cpp => SalesRecord = "SalesRecord"
-record R => SalesRecord = "list"
 
 -- Summary statistics record
 record Summary where
@@ -30,10 +28,6 @@ record Summary where
   minVal :: Real
   maxVal :: Real
 
-record Py => Summary = "dict"
-record Cpp => Summary = "struct"
-record R => Summary = "list"
-
 -- Category summary
 record CategorySummary where
   category :: Str
@@ -41,9 +35,7 @@ record CategorySummary where
   itemCount :: Int
   avgPrice :: Real
 
-record Py => CategorySummary = "dict"
 record Cpp => CategorySummary = "CategorySummary"
-record R => CategorySummary = "list"
 
 -- Python data generation and I/O
 source Py from "data_io.py" ("generateSalesData", "formatReport")

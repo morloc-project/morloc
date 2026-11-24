@@ -39,7 +39,7 @@ a signature, never a language-native name.
 
 ### INTR-5 `@version`, `@compiled` and `@datafile` are fixed when the program is built
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (issues/values.md)
 
 `@datafile p` is the installed location of data file `p`, or `p` unchanged
 when the program is not installed.
@@ -56,11 +56,14 @@ a result, such as logging.
 
 ### INTR-7 `@eq` and `@le` compare wire values
 Intent: ruled 2026-10-18
-Tests: spec-intr-7-1, spec-intr-7-2, spec-intr-7-3, spec-intr-7-4, spec-intr-7-5
-Code: conforms 2026-10-18
+Tests: spec-intr-7-1, spec-intr-7-2, spec-intr-7-3, spec-intr-7-4, spec-intr-7-5, spec-intr-7-6
+Code: conforms 2026-11-03
 
 `@eq a b :: Bool` and `@le a b :: Bool` take two values of one type and
 compare them as DERIV-3 orders them, in whichever language or in the nexus.
+The type must be known where the program is compiled, and its wire form may
+hold no function, suspension, stream, file handle or table; otherwise the
+use is a compile-time error.
 
 ### INTR-8 `@show` and `@hash` depend only on the wire value
 Intent: proposed
@@ -68,3 +71,12 @@ Code: conforms 2026-10-21
 
 A value gives the same `@show` text and the same `@hash` in every language.
 
+### INTR-9 An intrinsic given more arguments than it takes applies its result to the rest
+Intent: proposed
+Tests: spec-intr-9-1, spec-intr-9-2, spec-intr-9-3, spec-intr-9-4, spec-intr-9-5, spec-intr-9-6
+Code: conforms 2026-11-04
+
+`@i x1 ... xn y1 ... ym`, where `@i` takes n arguments, is
+`(@i x1 ... xn) y1 ... ym`: it typechecks only where the intrinsic's
+result is a function of the remaining arguments (APP-4), and is otherwise
+a located type error.

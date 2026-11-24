@@ -8,16 +8,14 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Aggregates all core namespace modules ('Prim', 'Type', 'Expr', 'State') into
-a single import for frontend code. Also provides expression tree traversals
-('mapExpr', 'mapExprM') and state-index copying ('copyState').
+a single import for frontend code, and provides state-index copying
+('copyState').
 -}
 module Morloc.Frontend.Namespace
   ( module Morloc.Namespace.Prim
   , module Morloc.Namespace.Type
   , module Morloc.Namespace.Expr
   , module Morloc.Namespace.State
-  , mapExpr
-  , mapExprM
   , isGeneric
   , copyState
   , newIndex
@@ -37,36 +35,6 @@ import Morloc.Namespace.Type
 isGeneric :: Text -> Bool
 isGeneric = isTypeVariableName
 
--- | Bottom-up map over the 'Expr' layer of an 'ExprI' tree.
-mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
-mapExpr f = g
-  where
-    g (ExprI i (ModE v xs)) = ExprI i . f $ ModE v (map g xs)
-    g (ExprI i (AssE v e es)) = ExprI i . f $ AssE v (g e) (map g es)
-    g (ExprI i (LstE es)) = ExprI i . f $ LstE (map g es)
-    g (ExprI i (TupE es)) = ExprI i . f $ TupE (map g es)
-    g (ExprI i (AppE e es)) = ExprI i . f $ AppE (g e) (map g es)
-    g (ExprI i (NamE rs)) = ExprI i . f $ NamE [(k, g e) | (k, e) <- rs]
-    g (ExprI i (LamE vs e)) = ExprI i . f $ LamE vs (g e)
-    g (ExprI i (AnnE e ts)) = ExprI i . f $ AnnE (g e) ts
-    g (ExprI i e) = ExprI i (f e)
-
--- | Monadic bottom-up map over the 'Expr' layer of an 'ExprI' tree.
-mapExprM :: (Monad m) => (Expr -> m Expr) -> ExprI -> m ExprI
-mapExprM f = g
-  where
-    g (ExprI i (ModE v xs)) = ExprI i <$> (mapM g xs >>= f . ModE v)
-    g (ExprI i (AssE v e es)) = ExprI i <$> ((AssE v <$> g e <*> mapM g es) >>= f)
-    g (ExprI i (LstE es)) = ExprI i <$> (mapM g es >>= f . LstE)
-    g (ExprI i (TupE es)) = ExprI i <$> (mapM g es >>= f . TupE)
-    g (ExprI i (AppE e es)) = ExprI i <$> ((AppE <$> g e <*> mapM g es) >>= f)
-    g (ExprI i (NamE rs)) = do
-      es' <- mapM (g . snd) rs
-      ExprI i <$> f (NamE (zip (map fst rs) es'))
-    g (ExprI i (LamE vs e)) = ExprI i <$> (g e >>= f . LamE vs)
-    g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
-    g (ExprI i e) = ExprI i <$> f e
-
 {- | Copy all index-keyed state entries from @oldIndex@ to @newIndex@.
 Used when a module is re-indexed (e.g., after merging duplicate imports).
 -}
@@ -85,10 +53,14 @@ copyState oldIdx newIdx = do
       , stateManifoldCounter = stateManifoldCounter s
       , stateDepth = stateDepth s
       , stateSignatures = updateGMap (stateSignatures s)
-      , stateTypeclasses = stateTypeclasses s
+      , stateInstances = stateInstances s
       , stateConcreteTypedefs = stateConcreteTypedefs s
       , stateGeneralTypedefs = stateGeneralTypedefs s
       , stateNewtypeHeaders = stateNewtypeHeaders s
+      , stateTypeHomes = stateTypeHomes s
+      , stateGeneratedClasses = stateGeneratedClasses s
+      , stateGeneratedData = stateGeneratedData s
+      , stateModulePackages = stateModulePackages s
       , stateExportTypes = stateExportTypes s
       , stateSources = updateGMap (stateSources s)
       , stateAnnotations = updateMap (stateAnnotations s)
@@ -120,7 +92,6 @@ copyState oldIdx newIdx = do
       , stateWrapperSpecs = stateWrapperSpecs s
       , stateRebuild = stateRebuild s
       , stateBuildParentDir = stateBuildParentDir s
-      , stateClassDefs = stateClassDefs s
       , stateEffects = stateEffects s
       , stateLangRegistry = stateLangRegistry s
       , stateExportGroups = stateExportGroups s
@@ -133,6 +104,7 @@ copyState oldIdx newIdx = do
       , stateHoldCache = stateHoldCache s
       , stateUndeterminedSites = stateUndeterminedSites s
       , stateSkippedGeneric = stateSkippedGeneric s
+      , stateRootUnsigned = stateRootUnsigned s
       , stateStageEntries = stateStageEntries s
       , stateStageContext = stateStageContext s
       , stateRecStages = stateRecStages s
@@ -151,17 +123,22 @@ copyState oldIdx newIdx = do
       , stateProjectRoot = stateProjectRoot s
       , stateEnvSpecLangs = stateEnvSpecLangs s
       , stateEvalMode = stateEvalMode s
+      , stateEnvPrefix = stateEnvPrefix s
+      , stateGuestObjects = stateGuestObjects s
+      , stateGuestLinkFlags = stateGuestLinkFlags s
       , stateAllowLocalModules = stateAllowLocalModules s
       , stateAutoInstall = stateAutoInstall s
       , stateSnapshot = stateSnapshot s
       , stateEvalSandbox = stateEvalSandbox s
       , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
+      , stateUnsafeSkipUtf8Check = stateUnsafeSkipUtf8Check s
       , stateInlineSize = stateInlineSize s
       , stateNoShm = stateNoShm s
       , stateTmpdir = stateTmpdir s
       , stateDebugTrace = stateDebugTrace s
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
+      , stateRecordAncestors = stateRecordAncestors s
       , stateVariantAncestors = stateVariantAncestors s
       , stateVariantArgsResolving = stateVariantArgsResolving s
       }

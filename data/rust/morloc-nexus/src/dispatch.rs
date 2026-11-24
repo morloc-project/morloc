@@ -2,6 +2,7 @@
 //! pool (remote command) or by evaluating its expression in-process (pure
 //! command), and print the result.
 
+use morloc_runtime_types::schema::{Schema, SerialType};
 use crate::manifest::{Check, Command, Manifest, SourceAtom};
 pub use morloc_manifest::cli_value::{
     build_list_config_json, is_float_list, is_float_scalar, maybe_float_special_to_json,
@@ -82,8 +83,8 @@ pub struct NexusConfig {
     pub debug_recursion_cap: Option<u32>,
     /// zstd level for packet output; 0 is no compression.
     pub compression_level: u8,
-    /// `-z` as given, if it was; published to pools as
-    /// `MORLOC_STDOUT_COMPRESSION_LEVEL`.
+    /// `-z` as given, if it was: the level stdout batches are written at
+    /// for packet output (SLOT-33); also passed on to staged replays.
     pub stdout_compression: Option<u8>,
     /// Every served module: the union of `mcp_programs` and `api_programs`.
     pub programs: Vec<String>,
@@ -295,11 +296,11 @@ pub fn dispatch_command_parsed(
 ) {
     crate::runlog::record_command(&cmd.name);
     crate::runlog::emit_prologue();
+    publish_stdout_level(config);
 
     if !cmd.is_pure() {
         if let Err(e) = process::start_daemons(sockets, &cmd.needed_pools) {
-            eprintln!("Error: {}", e);
-            process::clean_exit(1);
+            process::exit_after_start_failure(&e);
         }
     }
 
@@ -743,9 +744,13 @@ fn run_remote_command(
     }
     // A shared-memory result's donated reference is this process's now (SHM-8).
     extern "C" {
-        fn morloc_inherit_reply(packet: *const u8);
+        fn mlc_inherit_reply(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> i32;
     }
-    unsafe { morloc_inherit_reply(full_packet.as_ptr()) };
+    let mut inherit_err: *mut std::ffi::c_char = std::ptr::null_mut();
+    if unsafe { mlc_inherit_reply(full_packet.as_ptr(), &mut inherit_err) } != 0 {
+        let msg = process::take_c_errmsg(inherit_err).unwrap_or_else(|| "unknown error".into());
+        crate::runlog::die_with_error(&format!("the result could not be read: {}", msg));
+    }
 
     if reply_is_pipe_closed(&full_packet) {
         process::exit_broken_pipe();
@@ -823,14 +828,86 @@ fn is_ifile_schema(schema: &str) -> bool {
     schema.starts_with('F')
 }
 
-/// An `IFile` argument given by path must name an existing file. It is
-/// opened only when the command runs, where an error no longer says which
-/// argument or path it came from.
+/// Every `IFile` in an argument, wherever its type holds one, must name an
+/// existing file. It is opened only when the command runs, where an error
+/// no longer says which argument or path it came from. A value given as raw
+/// JSON is passed as is (IFACE-17).
 fn check_ifile_arg(arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> Result<(), String> {
-    let (ArgValue::Value(token), Some(_)) = (arg_val, arg_def.general_schema_str().filter(|s| is_ifile_schema(s))) else {
+    use morloc_runtime_types::schema::parse_schema;
+    let Some(schema_str) = arg_def.general_schema_str() else {
         return Ok(());
     };
-    let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
+    if !schema_str.contains('F') {
+        return Ok(());
+    }
+    let Ok(schema) = parse_schema(schema_str) else {
+        return Ok(());
+    };
+    let mut paths = Vec::new();
+    match arg_val {
+        ArgValue::Value(token) => token_ifile_paths(&schema, token, false, &mut paths),
+        ArgValue::Many { tokens, literal } => {
+            if let Some(elem) = schema.parameters.first().filter(|_| schema.serial_type == SerialType::Array) {
+                for t in tokens {
+                    token_ifile_paths(elem, t, *literal, &mut paths);
+                }
+            }
+        }
+        ArgValue::Group { grp_val, fields, .. } => {
+            if let Some(v) = grp_val {
+                token_ifile_paths(&schema, v, false, &mut paths);
+            }
+            for (field, token) in schema.parameters.iter().zip(fields) {
+                if let Some(t) = token {
+                    token_ifile_paths(field, t, false, &mut paths);
+                }
+            }
+        }
+        _ => {}
+    }
+    paths.iter().try_for_each(|p| check_ifile_path(p))
+}
+
+/// The IFile paths of one command-line token of type `s`: a bare IFile is
+/// its path (JSON-quoted unless `literal`), anything else is JSON.
+fn token_ifile_paths(s: &Schema, token: &str, literal: bool, out: &mut Vec<String>) {
+    if s.serial_type == SerialType::IFile {
+        out.push(if literal { token.to_string() } else { serde_json::from_str::<String>(token).unwrap_or_else(|_| token.to_string()) });
+    } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(token) {
+        json_ifile_paths(s, &v, out);
+    }
+}
+
+/// The IFile paths a JSON value of type `s` holds.
+fn json_ifile_paths(s: &Schema, v: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (s.serial_type, v) {
+        (SerialType::IFile, Value::String(p)) => out.push(p.clone()),
+        (SerialType::Array, Value::Array(xs)) => {
+            if let Some(e) = s.parameters.first() {
+                xs.iter().for_each(|x| json_ifile_paths(e, x, out));
+            }
+        }
+        (SerialType::Optional, x) if !x.is_null() => {
+            if let Some(e) = s.parameters.first() {
+                json_ifile_paths(e, x, out);
+            }
+        }
+        (SerialType::Tuple, Value::Array(xs)) => {
+            s.parameters.iter().zip(xs).for_each(|(p, x)| json_ifile_paths(p, x, out));
+        }
+        (SerialType::Map, Value::Object(m)) => {
+            for (k, p) in s.keys.iter().zip(&s.parameters) {
+                if let Some(x) = m.get(k) {
+                    json_ifile_paths(p, x, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_ifile_path(path: &str) -> Result<(), String> {
     if path == "-" {
         return Err(
             "an IFile cannot be read from stdin ('-'): it needs a seekable file. \
@@ -838,9 +915,11 @@ fn check_ifile_arg(arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> Result
                 .to_string(),
         );
     }
-    std::fs::metadata(&path)
-        .map(|_| ())
-        .map_err(|e| format!("cannot open IFile '{}': {}", path, e))
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_dir() => Err(format!("cannot open IFile '{}': it is a directory", path)),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("cannot open IFile '{}': {}", path, e)),
+    }
 }
 
 /// Save a parent-layout argument packet at the parent's position `arg`
@@ -1270,7 +1349,9 @@ pub(crate) fn print_result_c(
     // A command that streamed to stdout and then returns a value prints the
     // completed stream first.
     crate::custody_finish(true);
-    crate::stdio_server::finish_stdout();
+    if !crate::stdio_server::finish_stdout() {
+        process::clean_exit(1);
+    }
 
     // A stage saves the result for the actions, and prints it only when
     // stdout wants the command's own output.
@@ -1869,11 +1950,13 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
     }
 
     let result_relptr = unsafe { abs2rel(result, &mut errmsg) };
+    if let Some(msg) = process::take_c_errmsg(errmsg) {
+        crate::runlog::die_with_error(&format!("evaluation result is not in shared memory: {}", msg));
+    }
     let result_packet = unsafe { make_standard_data_packet(result_relptr, c_return_schema) };
 
     if result_packet.is_null() {
-        eprintln!("Error: failed to create result packet");
-        process::clean_exit(1);
+        crate::runlog::die_with_error("could not build the packet for the evaluation result");
     }
 
     extern "C" {
@@ -1961,6 +2044,34 @@ mod tests {
         let ok = check_ifile_arg(&ArgValue::Value(file.to_string_lossy().into()), &positional("F3af8"));
         std::fs::remove_file(&file).unwrap();
         assert!(ok.is_ok(), "{:?}", ok);
+    }
+
+    #[test]
+    fn each_ifile_of_a_many_list_is_checked() {
+        let list = serde_json::to_string(&["/no/such/a.mlc"]).unwrap();
+        let err = check_ifile_arg(&ArgValue::Value(list), &positional("aF3af8")).unwrap_err();
+        assert!(err.contains("/no/such/a.mlc"), "{}", err);
+        let err = check_ifile_arg(&ArgValue::Value("[\"-\"]".into()), &positional("aF3af8")).unwrap_err();
+        assert!(err.contains("stdin"), "{}", err);
+        assert!(check_ifile_arg(&ArgValue::Value("[\"-\"]".into()), &positional("as")).is_ok());
+        let many = ArgValue::Many { tokens: vec!["/no/such/b.mlc".into()], literal: true };
+        let err = check_ifile_arg(&many, &positional("aF3af8")).unwrap_err();
+        assert!(err.contains("/no/such/b.mlc"), "{}", err);
+    }
+
+    #[test]
+    fn an_ifile_anywhere_in_an_argument_is_checked() {
+        let missing = "\"/no/such/c.mlc\"";
+        assert!(check_ifile_arg(&ArgValue::Value(missing.into()), &positional("?F3af8")).is_err());
+        assert!(check_ifile_arg(&ArgValue::Value("null".into()), &positional("?F3af8")).is_ok());
+        let nested = "[[\"/no/such/d.mlc\"]]";
+        assert!(check_ifile_arg(&ArgValue::Value(nested.into()), &positional("aaF3af8")).is_err());
+        let record = "{\"f\":\"/no/such/e.mlc\",\"k\":1}";
+        let err = check_ifile_arg(&ArgValue::Value(record.into()), &positional("m21fF3af81ki4")).unwrap_err();
+        assert!(err.contains("/no/such/e.mlc"), "{}", err);
+        let dir = std::env::temp_dir();
+        let err = check_ifile_arg(&ArgValue::Value(dir.to_string_lossy().into()), &positional("F3af8")).unwrap_err();
+        assert!(err.contains("directory"), "{}", err);
     }
 
     #[test]
@@ -2080,5 +2191,23 @@ mod tests {
         assert!(res.is_err());
         let checks = vec![Check::Path("rwc".into())];
         assert!(apply_checks("/tmp/anything", &checks).is_err());
+    }
+}
+
+/// SLOT-33: stdout batches are compressed only for output whose frames the
+/// nexus forwards (packets, voidstar); every other form decodes them, so
+/// they travel uncompressed.
+pub(crate) fn publish_stdout_level(config: &NexusConfig) {
+    extern "C" {
+        fn mlc_set_stdout_level(level: u8, errmsg: *mut *mut std::ffi::c_char) -> i32;
+    }
+    let level = match crate::stdio_server::output_format() {
+        OutputFormat::Packet | OutputFormat::VoidStar => config.stdout_compression.unwrap_or(255),
+        _ => 0,
+    };
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    if unsafe { mlc_set_stdout_level(level, &mut err) } != 0 {
+        let msg = crate::process::take_c_errmsg(err).unwrap_or_else(|| "unknown error".into());
+        crate::runlog::die_with_error(&format!("cannot record the stdout compression level: {}", msg));
     }
 }

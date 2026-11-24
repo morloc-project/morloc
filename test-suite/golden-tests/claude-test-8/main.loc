@@ -29,18 +29,12 @@ record Document where
   tokens :: [Str]
   wordCount :: Int
 
-record Py => Document = "dict"
-record Cpp => Document = "struct"
-record R => Document = "list"
-
 -- Word frequency record
 record WordFreq where
   word :: Str
   count :: Int
 
-record Py => WordFreq = "dict"
 record Cpp => WordFreq = "WordFreq"
-record R => WordFreq = "list"
 
 -- Sentiment scores
 record Sentiment where
@@ -48,10 +42,6 @@ record Sentiment where
   negative :: Real
   neutral :: Real
   overall :: Real
-
-record Py => Sentiment = "dict"
-record Cpp => Sentiment = "struct"
-record R => Sentiment = "list"
 
 -- Python tokenization and I/O
 source Py from "text_processing.py" ("createDocument", "tokenizeText", "getSampleText")

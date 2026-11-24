@@ -19,8 +19,11 @@ module Morloc.CodeGenerator.Realize
   ( realityCheck
   , removeVarS
   , placeNormalized
+  , evidenceProblem
   ) where
 
+import Data.Foldable (toList)
+import Morloc.Data.Zip (indexed, zip3Same, zipSame)
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue, isValueWith)
 import Morloc.CodeGenerator.HostProvenance (HostLimit (..), planHostFunctions, sameTermSources)
@@ -38,14 +41,18 @@ import Data.Graph (SCC (..), stronglyConnComp)
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.CodeGenerator.Infer as Infer
+import qualified Morloc.BaseTypes as BT
+import qualified Morloc.Frontend.Instances as FI
+import qualified Morloc.TypeEval as TE
+import Morloc.Typecheck.Internal (getterMethods, indexMethods, sliceMethods)
 
 -- | How the placement listing names a node that has no name of its own.
 nodeKind :: ExprS g f c -> MT.Text
 nodeKind e = case e of
   AppS {} -> "application"
+  PatS {} -> "application"
   LamS {} -> "lambda"
   LstS {} -> "list"
   TupS {} -> "tuple"
@@ -62,8 +69,33 @@ nodeKind e = case e of
   BndS v -> unEVar (displayName v)
   LetBndS v -> unEVar (displayName v)
   CallS v -> "call " <> unEVar (displayName v)
-  ExeS (SrcCall src) -> unEVar (displayName (srcAlias src))
+  ExeS (SrcCall (Idx _ src)) -> unEVar (displayName (srcAlias src))
   _ -> "value"
+
+-- | The languages a step served by an instance can run in: those whose pools
+-- can call the selected instances. Only a pool can call one, so the step leaves
+-- the nexus (PAT-5), unless the receiver is a list on the wire and native
+-- list access does what the instance does.
+instanceLanguages :: Path -> Scope -> InstanceEnv -> Indexed Type -> PatEvidence -> PatApp a -> [Lang]
+instanceLanguages library scope env (Idx _ ft) pev app = case (ft, app, patReceiver pev) of
+  (FunT (_ : r : _) _, PatIndex _ _, Just ev) -> onReceiver indexMethods r ev
+  (FunT (_ : _ : _ : r : _) _, PatSlice {}, Just ev) -> onReceiver sliceMethods r ev
+  (FunT ins _, PatGet _ bs _, Just ev) | r : _ <- drop (length bs) ins -> onReceiver getterMethods r ev
+  _ -> []
+  where
+    onReceiver methods r ev = case FI.evidenceMethod methods ev of
+      Just m
+        | isList (TE.wireParentRoot scope (type2typeu r)) && FI.nativeServes library env ev m -> []
+        | otherwise ->
+            [ l
+            | l <- langsOf ev m
+            , and [l `elem` langsOf b (EV "__to_index__") | Just b <- patBounds pev]
+            ]
+      Nothing -> []
+    isList t = extractKey t == BT.list
+    langsOf ev m = case FI.methodImpls FI.usePolicy env ev m of
+      Right impls -> unique [srcLang src | ImplSource _ (Idx _ src) <- impls]
+      Left _ -> []
 
 -- | One line per named call of a realized tree, its arguments and body
 -- indented beneath it, with the language its implementation runs in. @*@
@@ -88,7 +120,7 @@ placementLinesAt = go
       AppS f@(AnnoS _ (Idx _ headLang) _) xs | Just v <- callName f ->
         listed headLang (name v) : concatMap (go (depth + 1) (Just headLang)) (definition f <> xs)
       VarS v (One body) -> entry (name v) : below (definition' body)
-      ExeS (SrcCall src) -> [entry (name (srcAlias src))]
+      ExeS (SrcCall (Idx _ src)) -> [entry (name (srcAlias src))]
       CallS v -> [entry ("call " <> name v)]
       LetBndS v | moved -> [entry (name v)]
       BndS v | moved -> [entry (name v)]
@@ -106,7 +138,7 @@ placementLinesAt = go
 
     callName :: AnnoS g One c -> Maybe EVar
     callName (AnnoS _ _ (VarS v _)) = Just v
-    callName (AnnoS _ _ (ExeS (SrcCall src))) = Just (srcAlias src)
+    callName (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just (srcAlias src)
     callName (AnnoS _ _ (CallS v)) = Just (EV ("call " <> unEVar (displayName v)))
     callName _ = Nothing
 
@@ -124,6 +156,7 @@ realityCheck ::
     , [AnnoS (Indexed Type) One (Indexed Lang)]
     )
 realityCheck es = do
+  mapM_ checkEvidence es
   names <- MM.gets stateSpecNames
   let isSpec (AnnoS _ _ (VarS v _)) = Set.member v names
       isSpec _ = False
@@ -510,6 +543,53 @@ realize tables pins s0 = do
       else return []
   realizeWithRegistry registry tables pins langs s0
 
+-- | CLS-2, CLS-16: a method use reaches realization with the evidence of
+-- the one instance its use selected, never a signature's assumption, and
+-- with only implementations selected for that instance.
+checkEvidence :: AnnoS (Indexed Type) Many Int -> MorlocMonad ()
+checkEvidence root = do
+  GMap idmap sigmap <- MM.gets stateSignatures
+  let methodClass i = case Map.lookup i idmap >>= (`Map.lookup` sigmap) of
+        Just (Polymorphic cls _ _) -> Just cls
+        _ -> Nothing
+  sequence_
+    [ MM.throwCompilerBugAt gi $ "realize: the use of" <+> squotes (pretty v) <+> problem
+    | AnnoS (Idx gi _) ci (VarS v (Many evs alts@(_ : _))) <- annoNodes root
+    , Just problem <- [evidenceProblem (methodClass ci) evs (map fst alts)]
+    ]
+
+-- | What is wrong with a use, given the class of the method it uses (if its
+-- signature is a method's), its evidence, and the instance each of its
+-- implementations was selected for.
+evidenceProblem :: Maybe ClassName -> [Evidence] -> [Maybe InstanceKey] -> Maybe MDoc
+evidenceProblem sigClass evs tags
+  | any givenIn evs = Just "carries a signature's constraint as its evidence"
+  | otherwise = case unique (maybeToList sigClass <> map ikClass (catMaybes tags)) of
+      [] -> Nothing
+      [cls] -> case unique [maybe (Left ()) Right (evidenceInstance ev) | ev <- evs, evidenceClass ev == Just cls] of
+        [Left ()] | all isNothing tags -> Nothing
+        [Right key] | all (== Just key) tags -> Nothing
+        [] -> Just "has no instance"
+        [_] -> Just "has an implementation not selected for its instance"
+        _ -> Just "has the evidence of several instances"
+      _ -> Just "has implementations of several classes"
+  where
+    givenIn (EvGiven _) = True
+    givenIn (EvInstance _ _ ctx) = any givenIn ctx
+    givenIn (EvDerived _ _) = False
+    evidenceClass (EvInstance k _ _) = Just (ikClass k)
+    evidenceClass (EvDerived c _) = Just c
+    evidenceClass (EvGiven _) = Nothing
+
+sameImplementation :: Source -> Source -> Bool
+sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
+
+-- | The source an implementation calls, if it is a source call.
+sourceOf :: AnnoS g f c -> Maybe Source
+sourceOf (AnnoS _ _ (ExeS (SrcCall (Idx _ src)))) = Just src
+sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
+sourceOf _ = Nothing
+
 -- | What a boundary from one language to another costs: nothing within a
 -- language, a switch within a pool, one crossing between pools (COST-3).
 boundaryScore :: LangRegistry -> Lang -> Lang -> Score
@@ -528,6 +608,8 @@ data Ctx = Ctx
   { ctxHeads :: [(EVar, Lang)]
   , ctxCopies :: Map EVar (Scored, Lang)
   , ctxCopyLog :: IORef (Map Int (Map Int (Maybe Lang)))
+  , ctxFolds :: Map EVar Lang
+  -- ^ fold handles in scope, each with its fold's language
   }
 
 -- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
@@ -590,7 +672,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       scored <- maybe (return scored0) (pinRoot scored0) (pinWork pins)
       hostCulprit scored
       copyLog <- MM.liftIO (newIORef Map.empty)
-      e@(AnnoS g li x) <- collapseAnnoS (Ctx (pinHeads pins) Map.empty copyLog) ctx scored
+      e@(AnnoS g li x) <- collapseAnnoS (Ctx (pinHeads pins) Map.empty copyLog Map.empty) ctx scored
       copies <- MM.liftIO (readIORef copyLog)
       checkPlacement copies s0' scored ctx e
       case (li, ctx) of
@@ -725,7 +807,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       -- The arguments of an application reach only the lambdas its head
       -- binds them with ('boundArgs' follows the same chain).
       let rstat = if passesApplied e then rstat0 else rstat0 {rApplied = []}
-      (e', Idx ci' table) <- scoreExpr rstat (e, ci)
+      (e', Idx ci' table) <- scoreExpr rstat (atNodeType t e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
       held <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
@@ -831,8 +913,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     heldTypes _ (LetS _ (AnnoS (Idx j boundT) _ _) _) _
       | holdsCallable boundT = Just (j, [boundT])
     heldTypes gidx e t = (,) gidx <$> case e of
-      ExeS (PatCall _) -> Just (componentTypes t)
-      AppS (AnnoS (Idx _ ft) _ (ExeS (PatCall _))) _ -> Just (componentTypes ft)
+      PatS (Idx _ ft) _ _ _ -> Just (componentTypes ft)
       -- a call of a function value runs wherever it is placed
       AppS (AnnoS (Idx _ ft) _ (BndS _)) _ -> Just (componentTypes ft)
       AppS (AnnoS (Idx _ ft) _ (LetBndS _)) _ -> Just (componentTypes ft)
@@ -860,7 +941,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       return (TupS xs', orAmbient i rstat best)
     scoreExpr rstat (NamS rs, i) = do
       (xs, best) <- componentsOf (NamS rs) rstat (map snd rs)
-      return (NamS (zip (map fst rs) xs), orAmbient i rstat best)
+      return (NamS (zipSame (map fst rs) xs), orAmbient i rstat best)
     scoreExpr rstat (LamS vs x, i) = do
       x' <- scoreAnnoS (updateRState vs rstat) x
       return (LamS vs x', Idx i (scoresOf x'))
@@ -882,7 +963,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
           bound = boundArgs f
           pairss =
             [ (if loopsOver f then runsDeeper else id) (kid x')
-            | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
+            | (k, x'@(AnnoS (Idx _ t) _ _)) <- indexed xs'
             , not (k < bound && isCallableType t)
             ]
       -- A head has no ambient language: it is placed by its own
@@ -894,21 +975,30 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
             [] -> [(l, mempty) | l <- rLangs rstat]
             table -> table
       return (AppS f' xs', Idx i (scoreApp headTable pairss))
+    scoreExpr rstat (PatS fg fi ev app, i) = do
+      xs' <- traverse (scoreAnnoS rstat {rLangs = [], rApplied = []}) app
+      scope <- MM.getGeneralScope
+      env <- MM.gets stateInstances
+      library <- MM.asks configLibrary
+      let ambient = [(l, mempty) | l <- rLangs rstat]
+          headTable = case instanceLanguages library scope env fg ev app of
+            [] -> ambient
+            ls -> [(l, callScore registry l) | l <- ls]
+      return (PatS fg (Idx fi []) ev xs', Idx i (scoreApp headTable (map kid (toList xs'))))
     -- non-recursive expressions
     -- A literal is built wherever it is used (COST-11).
     scoreExpr _ (UniS, i) = return (UniS, Idx i [])
     scoreExpr _ (NullS, i) = return (NullS, Idx i [])
-    scoreExpr rstat (VarS v (Many xs), i) = do
+    scoreExpr rstat (VarS v (Many ev xs), i) = do
       (xs', best) <- scoreAlternatives v rstat xs
-      return (VarS v (Many xs'), Idx i best)
+      return (VarS v (Many ev xs'), Idx i best)
     -- A parameter bound to no function value is data the caller passes
     -- in, read wherever it is used (COST-3).
     scoreExpr rstat (BndS v, i) = do
       case Map.lookup v (rBndVars rstat) of
         Just scores -> return (BndS v, Idx i scores)
         Nothing -> return (BndS v, Idx i [])
-    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
-    scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
+    scoreExpr _ (ExeS x@(SrcCall (Idx _ src)), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
     scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
     scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
     scoreExpr _ (LogS x, i) = return (LogS x, Idx i [])
@@ -1001,6 +1091,30 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     scoreExpr rstat (LabelS k x, i) = do
       x' <- scoreAnnoS rstat x
       return (LabelS k x', Idx i (scoresOf x'))
+    -- A gather follows its consumer: reaching its producer counts below
+    -- every crossing, so a consumer in another language takes the stream
+    -- through a file rather than as one value.
+    scoreExpr rstat (IntrinsicS IntrGather [f], i) = do
+      f' <- scoreAnnoS rstat f
+      scopes <- MM.gets stateConcreteTypedefs
+      let k = kid f'
+          langs = unique (rLangs rstat <> map fst (kidTable k) <> map (LR.poolOf registry) (Map.keys scopes))
+          best
+            | null (kidTable k) = [(l, mempty) | l <- rLangs rstat]
+            | otherwise = [(l, soften (reachKid l k)) | l <- langs]
+      return (IntrinsicS IntrGather [f'], Idx i best)
+    -- A fold follows its step, where its slots are held natively. Its
+    -- producer puts once per batch (F4), so reaching it counts as a
+    -- gather's producer does: below every crossing.
+    scoreExpr rstat (IntrinsicS IntrFold xs, i) = do
+      xs' <- mapM (scoreAnnoS rstat) xs
+      let (held, producer) = splitAt 3 (map kid xs')
+          reach l = mconcat [soften (reachKid l k) | k <- producer, not (null (kidTable k))]
+          base
+            | all (null . kidTable) held = [(l, mempty) | l <- rLangs rstat]
+            | otherwise = scoreApp [] held
+          best = [(l, s <> reach l) | (l, s) <- base]
+      return (IntrinsicS IntrFold xs', Idx i best)
     scoreExpr rstat (IntrinsicS intr xs, i) = do
       xs' <- mapM (scoreAnnoS rstat) xs
       let Idx _ langScores = zipLang i rstat
@@ -1020,6 +1134,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       | otherwise = [(l1, s1 <> mconcat (map (reachKid l1) placed)) | (l1, s1) <- scores]
       where
         placed = filter (not . null . kidTable) kids
+
+    soften :: Score -> Score
+    soften (Score u c w p z) = Score u [] (w + sum c) p z
 
     -- A function or suspension passed to a sourced function, or to a shared
     -- specialization whose body is placed on its own, may be called many
@@ -1044,7 +1161,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     sourcedHead :: AnnoS (Indexed Type) Many c -> Bool
     sourcedHead (AnnoS _ _ e) = case e of
       ExeS (SrcCall _) -> True
-      VarS _ (Many xs@(_ : _)) -> all sourcedHead xs
+      VarS _ xs@(Many _ (_ : _)) -> all sourcedHead xs
       LabelS _ x -> sourcedHead x
       CoerceS _ x -> sourcedHead x
       _ -> False
@@ -1052,8 +1169,8 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     -- The sources of a head's implementations.
     headSources :: AnnoS (Indexed Type) Many c -> [Source]
     headSources (AnnoS _ _ e) = case e of
-      ExeS (SrcCall src) -> [src]
-      VarS _ (Many ys) -> concatMap headSources ys
+      ExeS (SrcCall (Idx _ src)) -> [src]
+      VarS _ ys -> concatMap headSources ys
       LabelS _ x -> headSources x
       CoerceS _ x -> headSources x
       _ -> []
@@ -1086,7 +1203,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     boundArgs :: AnnoS (Indexed Type) Many c -> Int
     boundArgs (AnnoS _ _ e) = case e of
       LamS vs body -> length vs + boundArgs body
-      VarS _ (Many ys@(_ : _)) -> minimum (map boundArgs ys)
+      VarS _ (Many _ ys@(_ : _)) -> minimum (map (boundArgs . snd) ys)
       LetS _ _ body -> boundArgs body
       LabelS _ x -> boundArgs x
       CoerceS _ x -> boundArgs x
@@ -1113,7 +1230,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     sourceLangs = unique . map srcLang . headSources
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
-    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat mempty))
+    zipLang i (rLangs -> langs) = Idx i [(l, mempty) | l <- langs]
 
     scoresOf :: AnnoS a Many (Indexed [(Lang, Score)]) -> [(Lang, Score)]
     scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
@@ -1124,17 +1241,17 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     scoreAlternatives ::
       EVar ->
       RState ->
-      [AnnoS (Indexed Type) Many Int] ->
-      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
+      [(Maybe InstanceKey, AnnoS (Indexed Type) Many Int)] ->
+      MorlocMonad ([(Maybe InstanceKey, AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))], [(Lang, Score)])
     scoreAlternatives v rstat xs00 = do
       -- rescoring a placement keeps only the implementation collapse chose
       xs0 <- case rForced rstat of
         Nothing -> return xs00
-        Just kept -> case [x | x@(AnnoS _ j _) <- xs00, Map.member j kept] of
+        Just kept -> case [x | x@(_, AnnoS _ j _) <- xs00, Map.member j kept] of
           [] -> MM.throwCompilerBug $ "rescoring a placement: no implementation of" <+> pretty v <+> "was built"
           chosen -> return chosen
-      xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
-      let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
+      xs1 <- mapM (traverse (fmap repeated . scoreAnnoS rstat)) xs0
+      let pairs = minPairs (concat [xs' | (_, AnnoS _ (Idx _ xs') _) <- xs1])
       -- rescoring keeps one implementation, but the term is still reached
       -- from every language the placement uses
       let langs = unique (map fst pairs <> rForcedLangs rstat)
@@ -1239,20 +1356,27 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
     tableDoc (Idx _ ss) =
       list [pretty l <> ":" <> pretty (renderScore (Just sc)) | (l, sc) <- ss]
 
+    -- A wrapping cast converts to the type its node is realized at; the
+    -- target the typechecker recorded may still hold the newtype's
+    -- parameters.
+    atNodeType t (CoerceS (CoerceNewtype Wrap _) x) = CoerceS (CoerceNewtype Wrap (type2typeu t)) x
+    atNodeType _ x = x
+
     -- The newtype a cast converts: the argument's type when unwrapping, the
     -- result's when wrapping.
-    castHead :: CastDir -> TypeU -> Type -> TVar
-    castHead Unwrap _ argT = extractKey (type2typeu argT)
-    castHead Wrap target _ = extractKey target
+    castHead :: CastDir -> TypeU -> Type -> TypeU
+    castHead Unwrap _ argT = type2typeu argT
+    castHead Wrap target _ = target
 
     -- These languages with the program's pool languages, and those of them
-    -- where a cast of newtype @n@ changes no value: @n@ declares no form
-    -- there (NEWT-7).
-    castLangs :: TVar -> [Lang] -> MorlocMonad ([Lang], [Lang])
+    -- where a cast of newtype type @n@ changes no value: no form is declared
+    -- there for @n@ (NEWT-7).
+    castLangs :: TypeU -> [Lang] -> MorlocMonad ([Lang], [Lang])
     castLangs n langs = do
       scopes <- MM.gets stateConcreteTypedefs
       let candidates = unique (langs <> map (LR.poolOf registry) (Map.keys scopes))
-      allowed <- filterM (\l -> not . Map.member n <$> MM.getConcreteScope l) candidates
+      gscope <- MM.getGeneralScope
+      allowed <- filterM (\l -> (\cs -> not (TE.declaresFormAt cs gscope n)) <$> MM.getConcreteScope l) candidates
       return (candidates, allowed)
 
     -- A placement that cannot be realized, above every one that can.
@@ -1278,43 +1402,27 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
-    collapseExpr _ _ _ (VarS v (Many []), Idx i _) =
+    collapseExpr _ _ _ (VarS v (Many _ []), Idx i _) =
       MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
-    -- Select one implementation for the given term
-    -- CLS-2 first, where the implementations' types differ: those whose
-    -- type matches the use best; then the least by COST-1, ties going to the
-    -- preferred language (COST-16). Two different sources of one type still
-    -- tied are an error; definitions in morloc that tie are interchangeable
-    -- (REAL-1) and the first is taken.
-    collapseExpr heads (Idx _ gt) l1 (VarS v (Many xs), Idx i _) = do
-      typed <- case xs of
-        (AnnoS (Idx _ t0) _ _ : _)
-          | any (\(AnnoS (Idx _ t) _ _) -> t /= t0) xs -> resolveInstances gt xs
-        _ -> return xs
-      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [(cost l1 l2 s, fst (preferred l2)) | (l2, s) <- ss]) typed
-      (x, lang) <- case minXs of
-        [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
-        (y@(AnnoS (Idx _ ty) _ _) : _)
-          | length (List.nubBy sameImplementation (mapMaybe sourceOf minXs)) <= 1 -> handleOne y
-          -- implementations of different types are instance resolution's
-          -- to separate, and a type left open is reported where it is used
-          | any (\(AnnoS (Idx _ t) _ _) -> t /= ty) minXs -> handleOne y
+    -- Select one implementation for the given term: the least by COST-1,
+    -- ties going to the preferred language (COST-16). A method's
+    -- implementations are the selected instance's (CLS-2). Two different
+    -- sources still tied are an error; definitions in morloc that tie are
+    -- interchangeable (REAL-1) and the first is taken.
+    collapseExpr heads _ l1 (VarS v (unMany -> xs), Idx i _) = do
+      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [(cost l1 l2 s, fst (preferred l2)) | (l2, s) <- ss]) xs
+      (x, lang) <- case (minXs, List.nubBy sameImplementation (mapMaybe sourceOf minXs)) of
+        ([], _) -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
+        (y : _, srcs)
+          | length srcs <= 1 -> handleOne y
           | otherwise ->
               MM.throwSourcedError i $
                 "Ambiguous implementations of" <+> squotes (pretty (displayName v)) <> ":"
-                  <> "\n" <> indent 2 (vsep (map describe (List.nubBy sameImplementation (mapMaybe sourceOf minXs))))
+                  <> "\n" <> indent 2 (vsep (map describe srcs))
                   <> "\nEach is placed equally well (COST-1). Remove all but one from scope,"
                   <+> "by importing fewer modules."
       return (VarS v (One x), Idx i lang)
       where
-        sameImplementation :: Source -> Source -> Bool
-        sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
-
-        sourceOf :: AnnoS g f c -> Maybe Source
-        sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
-        sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
-        sourceOf _ = Nothing
-
         describe :: Source -> MDoc
         describe src = pretty (srcLang src) <+> pretty (srcName src) <+> maybe "" (\pth -> "from" <+> pretty pth) (srcPath src)
 
@@ -1334,87 +1442,6 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
                 _ -> heads
           x' <- collapseAnnoS heads' newLang x
           return (x', newLang)
-
-        -- The implementations whose type matches the use best: the most
-        -- specific instance, at the nearest link of the use's alias chain.
-        resolveInstances ::
-          Type ->
-          [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
-          MorlocMonad [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])]
-        resolveInstances gt' xs' = do
-          gscope <- MM.getGeneralScope
-          -- A candidate matches at the first link of the alias chain its
-          -- head is compatible with, so a nearer alias wins and a sibling
-          -- alias never matches.
-          let chain = gt' : List.unfoldr (fmap (\t -> (t, t)) . reduceStep gscope) gt'
-              matched =
-                [ (lvl, type2typeu t, x)
-                | x@(AnnoS (Idx _ t) _ _) <- xs'
-                , Just lvl <- [List.findIndex (`compatibleType` t) chain]
-                ]
-              -- Equally specific heads are separated by the chain link they
-              -- matched; incomparable maxima overlap.
-              maxima = mostSpecific [h | (_, h, _) <- matched]
-              best = [(lvl, h, x) | (lvl, h, x) <- matched, any (equivalent h) maxima]
-              nearest = [(h, x) | (lvl, h, x) <- best, lvl == minimum [l | (l, _, _) <- best]]
-          case nearest of
-            [] ->
-              MM.throwSourcedError i $
-                "No matching implementation found for" <+> squotes (pretty (displayName v))
-                  <+> "at type" <+> pretty gt'
-            -- one head, possibly sourced several times (duplicate imports)
-            ((h0, _) : rest) | all (equivalent h0 . fst) rest -> return (map snd nearest)
-            -- The use's type holds an unsolved variable, so the overlap is
-            -- not judged and the nearest candidates are kept.
-            _ | containsUnk gt' -> return (map snd nearest)
-            _ ->
-              MM.throwSourcedError i $
-                "Ambiguous instances for" <+> squotes (pretty (displayName v))
-                  <+> "at type" <+> pretty gt' <> ":"
-                  <> "\n" <> indent 2 (vsep (map pretty maxima))
-                  <> "\nEach matches, and none is more specific than the others."
-                  <> "\nDeclare an instance for their common specialization to"
-                  <+> "disambiguate, or remove one of them."
-
-        -- One alias-reduction step: the head first, else the leaves.
-        reduceStep :: Scope -> Type -> Maybe Type
-        reduceStep gscope t =
-          typeOf <$> (TE.reduceType gscope (type2typeu t) <|> TE.reduceTypeLeaves gscope (type2typeu t))
-
-        -- Structural equality with UnkT (an unsolved generic) as wildcard.
-        compatibleType :: Type -> Type -> Bool
-        compatibleType (UnkT _) _ = True
-        compatibleType _ (UnkT _) = True
-        compatibleType (VarT v1) (VarT v2) = v1 == v2
-        compatibleType (FunT as1 r1) (FunT as2 r2) =
-          length as1 == length as2
-            && all (uncurry compatibleType) (zip as1 as2)
-            && compatibleType r1 r2
-        compatibleType (AppT h1 ps1) (AppT h2 ps2) =
-          compatibleType h1 h2
-            && length ps1 == length ps2
-            && all (uncurry compatibleType) (zip ps1 ps2)
-        compatibleType (NamT o1 n1 ps1 rs1) (NamT o2 n2 ps2 rs2) =
-          o1 == o2 && n1 == n2
-            && length ps1 == length ps2
-            && all (uncurry compatibleType) (zip ps1 ps2)
-            && length rs1 == length rs2
-            && all (\((k1,v1),(k2,v2)) -> k1 == k2 && compatibleType v1 v2) (zip rs1 rs2)
-        compatibleType (OptionalT t1) (OptionalT t2) = compatibleType t1 t2
-        compatibleType (EffectT e1 t1) (EffectT e2 t2) = e1 == e2 && compatibleType t1 t2
-        compatibleType (NatLitT n1) (NatLitT n2) = n1 == n2
-        -- An erased Nat placeholder matches any Nat literal.
-        compatibleType NatVoidT (NatLitT _) = True
-        compatibleType (NatLitT _) NatVoidT = True
-        compatibleType NatVoidT NatVoidT = True
-        compatibleType t1 t2 = t1 == t2
-
-    ----- NOTE: Some cases are inseperable, the code above does not
-    ----- account for this, which may allow incorrect code to be
-    ----- generated.
-    -- xs' ->  MM.throwSystemError
-    --   $ "no rule to separate the following sourced functions of type" <+> parens (pretty gt)":\n"
-    --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
     -- Propagate downwards
     -- A lambda is a value built where it appears, so it lives in its
@@ -1449,6 +1476,10 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
           f' <- collapseHead heads lang f
           xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
           return (AppS f' xs', Idx i lang)
+    collapseExpr heads _ l1 (PatS fg (Idx fi _) ev app, Idx i ss) = do
+      lang <- pickLanguage heads l1 (toList app) ss
+      app' <- traverse (collapseAnnoS heads lang) app
+      return (PatS fg (Idx fi lang) ev app', Idx i lang)
     -- Propagate data
     collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
@@ -1460,11 +1491,10 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       return (TupS xs', Idx i lang)
     collapseExpr heads _ l1 (e@(NamS rs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 (map snd rs) ss
-      xs' <- mapM (collapseElement heads e lang . snd) rs
-      return (NamS (zip (map fst rs) xs'), Idx i lang)
+      rs' <- mapM (traverse (collapseElement heads e lang)) rs
+      return (NamS rs', Idx i lang)
     -- collapse leaf expressions
-    collapseExpr _ _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
-    collapseExpr _ _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
+    collapseExpr _ _ _ (ExeS x@(SrcCall (Idx _ src)), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
     collapseExpr _ _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
     collapseExpr _ _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
     collapseExpr _ _ lang (NullS, Idx i _) = return (NullS, Idx i lang)
@@ -1536,6 +1566,19 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       lang <- pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
       return (LabelS k x', Idx i lang)
+    -- A put runs where its fold's slots are (FOLD-1).
+    collapseExpr heads _ l1 (IntrinsicS IntrFold [ini, step, comb, f], Idx i ss) = do
+      lang <- pickLanguage heads l1 [ini, step, comb] ss
+      held <- mapM (collapseAnnoS heads lang) [ini, step, comb]
+      let heads' = case (lang, f) of
+            (Just l, AnnoS _ _ (LamS [h] _)) -> heads {ctxFolds = Map.insert h l (ctxFolds heads)}
+            _ -> heads
+      f' <- collapseAnnoS heads' lang f
+      return (IntrinsicS IntrFold (held <> [f']), Idx i lang)
+    collapseExpr heads _ _ (IntrinsicS IntrFoldPut xs@[_, AnnoS _ _ (BndS h), _], Idx i _)
+      | Just l <- Map.lookup h (ctxFolds heads) = do
+          xs' <- mapM (collapseAnnoS heads (Just l)) xs
+          return (IntrinsicS IntrFoldPut xs', Idx i (Just l))
     collapseExpr heads _ l1 (IntrinsicS intr xs, Idx i ss) = do
       lang <- pickLanguage heads l1 xs ss
       xs' <- mapM (collapseAnnoS heads lang) xs
@@ -1589,9 +1632,9 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])
     pinNamedLambda lang x@(AnnoS g (Idx i ss) e) = case e of
       LamS _ _ -> AnnoS g (Idx i (pinScores ss)) e
-      VarS v (Many alts)
+      VarS v alts
         | any isNamedLambda alts ->
-            AnnoS g (Idx i (pinScores ss)) (VarS v (Many (map (pinNamedLambda lang) alts)))
+            AnnoS g (Idx i (pinScores ss)) (VarS v (fmap (pinNamedLambda lang) alts))
       _ -> x
       where
         pinScores ss0 = case minimumMay [cost (Just lang) l2 s2 | (l2, s2) <- ss0] of
@@ -1632,14 +1675,14 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
 
     isNamedLambda :: AnnoS g Many c -> Bool
     isNamedLambda (AnnoS _ _ (LamS _ _)) = True
-    isNamedLambda (AnnoS _ _ (VarS _ (Many alts))) = any isNamedLambda alts
+    isNamedLambda (AnnoS _ _ (VarS _ alts)) = any isNamedLambda alts
     isNamedLambda _ = False
 
     -- The head of an application, before collapse, is a sourced function
     -- however it is named: every alternative of the term is a source call.
     isSourcedMany :: AnnoS (Indexed Type) Many c -> Bool
     isSourcedMany (AnnoS _ _ (ExeS (SrcCall _))) = True
-    isSourcedMany (AnnoS _ _ (VarS _ (Many xs))) = not (null xs) && all isSourcedMany xs
+    isSourcedMany (AnnoS _ _ (VarS _ xs)) = not (null xs) && all isSourcedMany xs
     isSourcedMany _ = False
 
     -- The head of an application is a sourced function, reached directly or
@@ -1729,10 +1772,11 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         f _ (AnnoS g (Idx i (Just lang)) e') = do
           e'' <- case e' of
             (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
+            (PatS fg (Idx fi _) ev app) -> PatS fg (Idx fi lang) ev <$> traverse (f lang) app
             (LamS vs x) -> LamS vs <$> f lang x
             (LstS xs) -> LstS <$> mapM (f lang) xs
             (TupS xs) -> TupS <$> mapM (f lang) xs
-            (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
+            (NamS rs) -> NamS <$> mapM (traverse (f lang)) rs
             UniS -> return UniS
             NullS -> return NullS
             (VarS v (One x)) -> VarS v . One <$> f lang x
@@ -1851,18 +1895,18 @@ reopenSources :: Map Int HostLimit -> AnnoS (Indexed Type) Many Int -> MorlocMon
 reopenSources limits n@(AnnoS g ci e)
   | Map.null limits = return n
   | otherwise = AnnoS g ci <$> case e of
-      AppS f@(AnnoS fg@(Idx fgi ft) _ (ExeS (SrcCall src))) xs
+      AppS f@(AnnoS fg@(Idx fgi ft) _ (ExeS (SrcCall isrc@(Idx _ src)))) xs
         | Map.member ci limits
         , FunT ins out <- ft
         , not (holdsCallable out)
         , not (any givenFunction ins) -> do
-            others <- sameTermSources src
+            others <- sameTermSources isrc
             alts <- mapM (\s -> (\gi k -> AnnoS (Idx gi ft) k (ExeS (SrcCall s))) <$> newIndex fgi <*> MM.getCounter) others
             xs' <- mapM (reopenSources limits) xs
             hd <-
               if null alts
                 then return f
-                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many (f : alts)))) <$> MM.getCounter
+                else (\k -> AnnoS fg k (VarS (srcAlias src) (Many [] (map ((,) Nothing) (f : alts))))) <$> MM.getCounter
             return (AppS hd xs')
       _ -> mapExprSM (reopenSources limits) e
   where
@@ -1898,7 +1942,7 @@ renameShadowing names (AnnoS g c e) = AnnoS g c <$> case e of
   LetBndS v -> return (LetBndS (Map.findWithDefault v v names))
   LamS vs b -> do
     vs' <- mapM fresh vs
-    LamS vs' <$> renameShadowing (foldr (uncurry Map.insert) names (zip vs vs')) b
+    LamS vs' <$> renameShadowing (foldr (uncurry Map.insert) names (zipSame vs vs')) b
   LetS v a b -> do
     a' <- renameShadowing names a
     v' <- fresh v
@@ -1916,8 +1960,9 @@ unrealized (AnnoS g (Idx i _) e) = AnnoS g i $ case e of
   UniS -> UniS
   NullS -> NullS
   BndS v -> BndS v
-  VarS v (One x) -> VarS v (Many [unrealized x])
+  VarS v (One x) -> VarS v (Many [] [(Nothing, unrealized x)])
   AppS f xs -> AppS (unrealized f) (map unrealized xs)
+  PatS fg (Idx fi _) ev app -> PatS fg fi ev (fmap unrealized app)
   LamS vs x -> LamS vs (unrealized x)
   LstS xs -> LstS (map unrealized xs)
   TupS xs -> TupS (map unrealized xs)
@@ -1985,7 +2030,7 @@ stagePoints :: AnnoS (Indexed Type) Many Int -> Map EVar Int
 stagePoints = go
   where
     go (AnnoS _ _ e) = case e of
-      VarS v (Many alts) ->
+      VarS v (unMany -> alts) ->
         Map.unions (Map.fromList [ (v, length vs) | a <- alts, Just vs <- [staged v a] ] : map go alts)
       _ -> Map.unions (foldExprS (\x -> [go x]) e)
     staged v (AnnoS (Idx _ (FunT ts _)) _ (LamS vs body@(AnnoS _ _ be)))
@@ -2143,6 +2188,9 @@ extractExpr exports (AppS f xs) = do
   results <- mapM (extractFromTree exports) xs
   let (xs', xHelperLists) = unzip results
   return (AppS f' xs', fHelpers ++ concat xHelperLists)
+extractExpr exports (PatS fg fc ev app) = do
+  results <- traverse (extractFromTree exports) app
+  return (PatS fg fc ev (fmap fst results), concatMap snd results)
 extractExpr exports (LamS vs e) = do
   (e', helpers) <- extractFromTree exports e
   return (LamS vs e', helpers)
@@ -2155,9 +2203,8 @@ extractExpr exports (TupS xs) = do
   let (xs', helperLists) = unzip results
   return (TupS xs', concat helperLists)
 extractExpr exports (NamS rs) = do
-  results <- mapM (extractFromTree exports . snd) rs
-  let (vals', helperLists) = unzip results
-  return (NamS (zip (map fst rs) vals'), concat helperLists)
+  results <- mapM (traverse (extractFromTree exports)) rs
+  return (NamS [(k, v) | (k, (v, _)) <- results], concatMap (snd . snd) results)
 extractExpr exports (LetS v e1 e2) = do
   (e1', h1) <- extractFromTree exports e1
   (e2', h2) <- extractFromTree exports e2
@@ -2379,11 +2426,11 @@ etaExpandCallS isLet gi t c v captured = do
   let widenedT = widenFunType t (map snd captured)
       forwardBnds =
         [ AnnoS (Idx bgi ty) c (BndS n)
-        | (bgi, n, ty) <- zip3 freshBndGis freshNames visibleIns
+        | (bgi, n, ty) <- zip3Same freshBndGis freshNames visibleIns
         ]
       capturedBnds =
         [ AnnoS (Idx cgi ty) c (if isLet n then LetBndS n else BndS n)
-        | (cgi, (n, ty)) <- zip capturedGis captured
+        | (cgi, (n, ty)) <- zipSame capturedGis captured
         ]
       callHead = AnnoS (Idx callGi widenedT) c (CallS v)
       appNode  = AnnoS (Idx appGi (wrapEffect visibleOut)) c

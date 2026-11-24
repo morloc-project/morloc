@@ -16,30 +16,33 @@ on 0.109.0 unless marked.
   /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n10/noinst2.loc.
   NEWT-4 asks which forms a binding can build without an instance; nothing
   records that today.
-- **C++ cannot send or receive a sum type whose arm holds a Packable.**
-  [reproduced, 2026-10-29] Violates NATIVE-9. `mk :: Int -> Try Str (Set
-  Int)` from Python into a C++ `size :: Try Str (Set Int) -> Int` does not
-  build: "the `data` type Try_7b5513 is used with two field types for its
-  constructor Ok: (std::set<int>) and (std::vector<int>)". The wire form of
-  the variant is given the native variant's name
-  (library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs, `rawDoc` and
-  `collectCppVariants`), so the decoded and native forms collide. Writer
-  intrinsics avoid this by leaving such a value to the variant's own
-  marshaller, which unpacks only its outer type, so in C++ `@show`,
+- **C++ cannot write a sum type whose arm holds a Packable below the top
+  of a value.** [reproduced, 2026-11-16] Violates NATIVE-9. In C++ `@show`,
   `@hash` or `@save` of a value holding such a sum type below its top
-  (`[Try Str (Set Int)]`, a record with a `Try Str (Set Int)` field) still
-  reaches the runtime in native form and fails "no marshaller for a value of
-  this C++ type". Python and R take it apart at every level.
+  (`[Try Str (Set Int)]`, a record with a `Try Str (Set Int)` field)
+  reaches the runtime in native form and fails "no marshaller for a value
+  of this C++ type (schema type 14)": writer intrinsics leave the value to
+  the variant's own marshaller, which unpacks only its outer type. Repro:
+  `showNested n = @show (wrapList (mk n))` with Python `mk :: Int -> Try
+  Str (Set Int)` and C++ `wrapList :: a -> [a]`. A sum type at the top now
+  crosses (its native and unpacked forms are distinct template instances,
+  `Try<std::string, std::set<int>>` and `Try<std::string,
+  std::vector<int>>`), except a `data` instance holding a function, which
+  is a type of its own named by its arguments, so its native and unpacked
+  forms still share a name and collide ("used with two field types").
+  Python and R take it apart at every level.
 - **An R set of compound elements is not sorted.** [read, 2026-10-29]
   Violates COLL-6. set-r sorts a set of scalars before it is sent, but
   leaves a set of tuples or records in the order it was built, since R has
   no ordering of them that matches C++ and Python, so `@hash` and `@eq` of
   equal `Set (Int, Str)` values built in different orders can differ.
-- **A recursive record with a Packable field is rebuilt at its top level
-  only.** [read, 2026-10-28] Violates NATIVE-9. A back-reference
-  (`SerialRec`) counts as serializable, so `record Tree where tags :: Set
-  Int; kids :: [Tree]` received or read is rebuilt at its top level and its
-  `kids` are decoded straight into their type, with no packer for `tags`.
+  [reproduced 2026-11-02, briefs/A5-B4.md] set-r/R/set.R:30-37
+  `morloc_unpackSet` returns any non-scalar set unsorted. Needs a ruling beyond the set-r sort: `Set (Set Int)` (the outer unpack
+  runs before the inner ones, so it sorts unsorted lists) and `Set Color`
+  from an R source returning the enum as character (sorted by name, not
+  tag) cannot be ordered without the element schema. Options: give
+  Packable functions the element schema, unpack inner-first, or refuse
+  these element types in R sets at compile time.
 - **A Python Vector built by library code has numpy's default dtype.**
   [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
   however the program builds it. vector-py's `map`
@@ -63,17 +66,10 @@ on 0.109.0 unless marked.
   reaches the decoder. Seen with Python `List U8 = "bytes"`, now refused by
   NATIVE-7; R's `List U8 = "raw"` works only because rmorloc routes every
   U8 array to raw.
-- **Comparison on `data` with fields.** [reproduced] Violates SUM-5.
-  `data Shape = Circle Real | Rect Real Real | Dot`, `lt a b = a < b`,
-  `eq a b = a == b`. Python is correct. R: `==` works, `<` fails at run
-  time "comparison of these types is not implemented" (root/main.loc:28).
-  C++: `==` and `<` fail to build (root-cpp core.hpp:682, :687, `morloc_le`
-  and `morloc_eq`: "no match for operator<=/operator==" on `Shape`). Enum-only `data Color = Red | Green |
-  Blue` works in all three.
 - **Table column sum fails in Python.** [reproduced] Violates WIRE-1.
   Census table built with `addCol`; `summarize t = fold (+) 0 (getCol "pop"
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:890, py_size_step; still so on 0.110.1). The
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:960-963, py_size_step: MORLOC_INT requires PyLong_Check). The
   manual shows `54585374`.
 - **No rule forbids a sourced function mutating its argument.** [read] A
   gap in EVAL-7. In Python a morloc value read twice is one shared object,
@@ -88,20 +84,25 @@ on 0.109.0 unless marked.
   "pathlib.Path"`, Py `mk :: Str -> Path` returning `pathlib.Path(s)`, Cpp
   caller `u s = unpack (mk s)`: builds with no warning; running `u
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
-  PosixPath (pymorloc.c:929)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
-- **An unmapped record passed to a sourced C++ function does not compile.**
-  [reproduced, 2026-10-21] Violates NATIVE-4; contradicts NATIVE-3.
-  `record P where x :: Int; y :: Real`, no `record Cpp =>`, sourced
-  `getx :: P -> Int` (`template <class T> int getx(const T& p)`),
-  `f p = getx p`: g++ fails "pool.cpp:137: 'P' was not declared in this
-  scope". With no sourced function (`f p = .x p`) the same record builds
-  and runs in C++ and Rust, so a struct is generated on one path only,
-  though NATIVE-3 (ruled) requires a user struct. Either reject naming P
-  and Cpp, or always generate (#66). Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/b.loc, a.loc, c.loc.
+  PosixPath (pymorloc.c:1000)" [reproduced 2026-11-14]. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
 - **A Python record class form is accepted and ignored.** [reproduced,
-  2026-10-21] Gap in NATIVE-5 (open). `record Py => P = "MyCls"` builds;
-  the Python function receives a `dict`. No candidate answer describes a
-  silent drop. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
+  2026-10-21] Gap in GEN-11, which rules user class forms a future feature
+  (2026-11-18). `record Py => P = "MyCls"` builds; the Python function
+  receives a `dict`, with no warning that the form is not used. The golden object-1-py passes only
+  because its function is an identity and the output is JSON. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
+- **Reading a field of a Python `object` emits attribute access on a dict.**
+  [read, 2026-11-15, not reproduced] Violates GEN-11. genericRecordAccessor
+  (Grammars/Translator/Generic.hs:768-769) emits `.f` for `NamObject`, but
+  pymorloc builds the value as a dict, so `.f p` on an `object Py` record
+  should fail at run time. object-1-py never reads a field.
+- **Python equality of class records is the class's, not morloc's.**
+  [read, 2026-11-15] Gap in GEN-11. root-py core.py `morloc_eq` compares
+  dicts field by field through itself, so a dict record's fields compare
+  as morloc values (a list equals a tuple, numpy fields compare
+  elementwise); a dataclass or pydantic record falls to its class's `==`,
+  which compares fields with Python `==` and type. Fix in root-py: compare
+  class records field by field like dicts (not done: root-py had another
+  session's uncommitted edits on master, 2026-11-15).
 - **Out-of-range list index gives a wrong value in C++ and R.**
   [reproduced, 2026-10-21] Violates COLL-3 (same result in every language);
   every COLL-4 candidate excludes a silent wrong value. With a pool-computed
@@ -110,12 +111,23 @@ on 0.109.0 unless marked.
   (R drop-index); an `[Int]` fails "Cannot pack NA or NaN into MORLOC_INT".
   C++ `.[5]` on 3 elements returns garbage (`1`); `.[-1]` on `[]` is
   SIGSEGV. Python and the nexus raise "index out of range"; Rust throws.
-  Cause: root-cpp core.hpp:72-77 `morloc_at` has no bound check; root-r
-  R/core.R:207-216 adds `length(xs)` and indexes `xs[i + 1]`. Repro:
+  Cause: root-cpp core.hpp:73-78 `morloc_at` has no bound check; root-r
+  R/core.R:224-234 adds `length(xs)` and indexes `xs[i + 1]`. Repro:
   /work/plans/model-audit-2026-10-21/repro/C/coll/i-r.loc, /work/plans/model-audit-2026-10-21/repro/C/num/get-cpp.loc.
+- **The C++ `Deque` overload of `morloc_at` wraps no negative index and
+  checks no bound.** [read, 2026-11-14] Latent COLL-3 violation. root-cpp
+  core.hpp:591-593 returns `xs[*oi]`, so index -1 reads `xs[-1]`
+  (undefined behaviour), where the vector overload (:73-78) wraps
+  negatives. No program reaches it today: no stdlib module declares
+  `Indexable Deque` (only `Indexable List`, root-cpp main.loc:196-197).
+  Fix it with the vector overload, or delete it.
 - **`size` of a `Str` counts code points in Python and R, bytes in C++ and
-  Rust.** [reproduced, 2026-10-21] BASE-5 is open, but the languages
-  disagree today (COLL-3). `slen s = size s` on U+00E9: 1 in py and r, 2 in
+  Rust.** [reproduced, 2026-10-21] Violates BASE-5, ruled 2026-11-08: a
+  `Str` is text and its length is in characters (bytes belong in
+  `Vector n U8`). C++ `morloc_size` is `x.size()` (root-cpp/core.hpp:331),
+  Rust `String::len` (root-rust/core.rs:239-241). Every stdlib `Str` operation
+  (index, slice, take, drop, reverse, split positions) needs the same
+  audit (COLL-3). `slen s = size s` on U+00E9: 1 in py and r, 2 in
   cpp and rust. Repro: /work/plans/model-audit-2026-10-21/repro/C/num/, /work/plans/model-audit-2026-10-21/repro/C/lit/nul.loc.
 - **R drops `Null` values from a `Map Str ?v`.** [reproduced, 2026-10-21]
   Violates OPT-1. `optmap xs = pack xs` (`[(Str, ?Int)] -> Map Str ?Int`,
@@ -139,44 +151,73 @@ on 0.109.0 unless marked.
   optionals and need rewriting). Languages also disagree on a value:
   `fromNull :: a -> ?a -> a` at `a = ?Int` with `state2 :: ?(?Int) -> Str`,
   `state2 (fromNull (Null :: ?Int) Null)` is present-with-inner-absent in
-  C++ and Rust and absent in Python.
+  C++ and Rust and absent in Python. Likewise a generic `safeHead :: [a] ->
+  ?a` at `[?Int]` on `[null, 2]`: a C++ `isNull` of the result is false,
+  Python's true (OPT-7); spec-opt-7-1 leaves the C++ form out for this.
 - **R integer rules with no item.** [reproduced, 2026-10-21] The
-  2026-10-16 R integer ruling makes `[U8]` an R `raw` and truncates
-  fractional doubles at integer slots; no item records either.
+  2026-10-16 R integer ruling truncates fractional doubles at integer
+  slots; no item records it.
 - **Number rules with no item.** [reproduced, 2026-10-21] Gaps in
   numbers.md.
   - Real division by zero: `1.0 / 0.0` is `inf` in cpp, r and rust, an
     error "float division by zero" in py (likewise `//`). Candidates: IEEE
     everywhere; failure everywhere; stated per language.
   - Real `%` is floored in all four (`-7.0 % 2.0` is `1`) but in no item.
-  - `x :: Int; x = 3000000000 + 1` under root-cpp builds and prints
-    -1294967295: NUM-5 does not say whether an `Int` literal is checked
-    against `[[Int]]_L` of its realization (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc).
   - Map pair order: py and r keep insertion order, cpp sorts by key. Is
     order part of a map's value (COLL-5 covers repeated keys only)?
 - **R overflow message names the wrong R type for `Int`.** [reproduced,
-  2026-10-21] data/lang/r/rmorloc.c:1759-1763 (array) and :1920-1924
+  2026-10-21] data/lang/r/rmorloc.c:2069-2074 (array) and :2232-2235
   (scalar): a multi-limb `Int` arriving in R fails "does not fit in R's
   numeric type (max 2^53 ...)"; `[[Int]]_R` is R integer, as the
-  single-limb branches (:1767-1770, :1915) say.
+  single-limb branches (:2076-2081, :2225-2227) say.
 - **`@schema` and `@typeof` evaluate their argument.** [reproduced,
   2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
   raising Python `boom` fails "run failed / boom". features-intrinsics.asc:
   449-450 says the argument is not evaluated. Repro: /work/plans/model-audit-2026-10-21/repro/E/intr/main.loc.
-- **REAL-1 vs NUM-1: the realizer's choice changes a program's value.**
-  [reproduced, 2026-10-21] REAL-1 says the choice changes cost, never
-  meaning; NUM-1 (ruled) makes `Int` width per language. With sourced
-  identities `pid` (py) and `cid` (cpp), `hc x = pid (cid x * 3)` prints
-  -1294967296 for 1000000000 (the realizer placed `* 3` in C++) and
-  `hp x = pid (pid x * 3)` prints 3000000000. C++ signed overflow is also
-  undefined behaviour, not an overflow behavior. Same for `size` of a
-  `Str` and real division by zero (above). Candidates: (a) REAL-1 holds
-  only for values every candidate language represents, stated so; (b)
-  `Int` arithmetic is pinned to one checked semantics; (c) the realizer
-  may move `Int` arithmetic only between languages of equal width.
-  Repro: /work/plans/model-audit-2026-10-21/repro/F/wire/re.loc.
 - **INTR-5 says a program that is not installed sees `p` unchanged.**
   [reproduced, 2026-10-23] Pools and (since 2026-10-23) the nexus join a
   literal `@datafile` path with the program's source root, installed or
   not, so a built program reads its data file from any working directory.
   The item's wording needs updating to that, or the code to the wording.
+- **A newtype with its own C++ form and no C++ packer builds, then fails
+  when it crosses.** [reproduced 2026-11-02] `newtype Box = Int`, `type Cpp
+  => Box = "BoxT"`, a C++ `mk` and a Python `use`: `./nx go 3` fails "no
+  marshaller for a value of this C++ type (schema type 18)"; an export
+  returning it from a C++ root fails the same way. Violates REAL-3 and
+  NEWT-7; the build should refuse it (briefs/S5-steps3-6.md).
+- [read, 2026-11-06] map-r builds a map with `result[[k]] <- v` at any `Map a b`
+  (lib/stdlib/map-r/R/map.R `morloc_from_list`, `morloc_insert`). An integer key
+  assigns by position, so a `Map Int v` built and used only in R, which never
+  reaches a Packable check, would be corrupted (MAP rules, NATIVE). From R's
+  semantics, not run: a NULL value deletes its key (`Map Str (?Int)`, OPT-1) and an
+  empty-string key is lost in unpack, since `x[[""]]` returns NULL.
+
+- **An integer literal that does not fit its type wraps silently.**
+  [reproduced, 2026-11-08, c3a7b3bb3] Violates NUM-5 (ruled 2026-11-08: "A
+  literal that does not fit the type it gets is a compile error") and
+  NUM-4. `f n = ident [300, 1]` with `ident :: [I8] -> [I8]` from C++ builds
+  and prints `[44,1]`: the C++ printer writes `static_cast<int8_t>(300)`.
+  Repro: `module main (f)`, `import root`, `import root-cpp`,
+  `source Cpp from "h.hpp" ("ident")`, `ident :: [I8] -> [I8]`,
+  `f :: Int -> [I8]`, `f n = ident [300, 1]`, with h.hpp defining
+  `inline std::vector<int8_t> ident(const std::vector<int8_t>& x){ return x; }`;
+  `./nexus f 1` prints `[44,1]`. Likewise `x :: Int; x = 3000000000 + 1`
+  under root-cpp builds and prints -1294967295
+  (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc). No literal
+  fit check exists; CppPrinter.hs:73 emits `static_cast<T>(i)`.
+- **An element of a Python Vector of an enumeration is a uint8, not a
+  member.** [read, 2026-11-18] Open: NATIVE-7 against GEN-12. A `Vector n D`
+  of an all-nullary `data` type is a numpy uint8 array (one byte a value),
+  so `.[i]` of it gives a numpy.uint8 where every other `D` value in Python
+  is an `enum.Enum` member; generated matches accept both (a member, or the
+  tag), but a source that compares an element with `D.A` sees False and one
+  that passes it where a `D` is sent is refused. Open: return members from
+  Vector reads, or make the uint8 form part of GEN-12.
+- **Building a Python `data` value costs about 200 ns more than a tuple.**
+  [reproduced, 2026-11-18] Perf. A frozen dataclass's `__init__` sets each
+  field through `object.__setattr__`: 1M `Shape.Rect(x, 2.0)` take 641 ms
+  against 439 ms for `("Rect", (x, 2.0))`; marshalling them is faster than
+  the pair form (416 against 619 ms per round trip through C++). A C helper
+  that allocates and fills the slots would remove the difference for
+  generated literals.
+

@@ -8,7 +8,7 @@ on 0.109.0 (dev 3a238d96) unless marked.
   <IO> Int`, `mk :: <IO> Int -> Box; mk t = {act = t}` fails "Inescapable
   effect 'IO' appear(s) in an argument but not in the result row"; the
   same through a tuple alias or a list is accepted. Cause [read]:
-  `checkDeclaredEffects.inescapableLeak` (Frontend/Treeify.hs:419-425)
+  `checkDeclaredEffects.inescapableLeak` (Frontend/Treeify.hs:416-421)
   collects result labels syntactically and does not look inside a named
   record, `data` or newtype. Repro: /work/plans/model-audit-2026-10-21/repro/D/effleak/m2.loc, m3.loc.
 - **A `do` block's suspension tail is run or returned by expected type.**
@@ -33,9 +33,6 @@ on 0.109.0 (dev 3a238d96) unless marked.
     says only that a bare statement runs `t`. Which result types are
     checked, and is the failure recoverable under FAIL-4 (caught by
     `@try`)?
-  - A signature whose parameter rows hold an inescapable label absent from
-    the result is rejected (`ign :: <IO> Int -> Int; ign t = 1`;
-    features-effects.asc:647-670). Only EFF-12 (open) mentions handlers.
   - EFF-12 names the handler shape `<E, e> a -> <e> a`; the manual and
     code accept `withSeed :: Int -> <Rand> a -> a` (features-effects.asc:
     681-700).

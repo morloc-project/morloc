@@ -6,9 +6,8 @@ use syn::visit::Visit;
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
 const MAX_DEVIATING_ROWS: usize = 2;
-const MAX_ENV_READS: usize = 65;
+const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
-    "morloc-runtime/cell.rs::proc_tag",
     "morloc-runtime/crash.rs::fatal",
     "morloc-runtime/fork_policy.rs::thread_count",
     "morloc-runtime/lifeline.rs::create",
@@ -18,7 +17,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/run.rs::publish_run",
     "morloc-runtime/run.rs::gen_id",
     "morloc-runtime/slurm_ffi.rs::make_job_dir",
-    "morloc-runtime/stream.rs::with_process_local_slot",
+    "morloc-runtime/stream.rs::shared_close_handle_with_status",
     "morloc-runtime/stream.rs::allocate_slot_cas",
     "morloc-runtime-types/process.rs::own_start_time",
     "morloc-runtime/stream.rs::verify_stdio_opener_pid",
@@ -241,8 +240,58 @@ fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         let path = a.path().to_token_stream().to_string();
         let tokens = a.to_token_stream().to_string().replace(' ', "");
-        path == "test" || (path == "cfg" && (tokens.contains("cfg(test)") || tokens.contains("cfg(all(test")))
+        path == "test"
+            || (path == "cfg"
+                && (tokens.contains("cfg(test)")
+                    || tokens.contains("cfg(all(test")
+                    || tokens.contains("cfg(any(test,feature=\"test-hooks\"))")
+                    || tokens.contains("cfg(any(feature=\"test-hooks\",test))")))
     })
+}
+
+/// The `test-hooks` feature of morloc-runtime-types is turned on only by
+/// dev-dependencies, so no build of the runtime itself carries the hooks.
+#[test]
+fn the_test_hooks_feature_is_enabled_only_for_tests() {
+    let mut problems = Vec::new();
+    for c in CRATES.iter().chain(&["morloc-manifest"]) {
+        let manifest = rust_root().join(c).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let mut section = String::new();
+        for (n, line) in text.lines().enumerate() {
+            let t = line.trim();
+            if t.starts_with('[') {
+                section = t.to_string();
+                continue;
+            }
+            if t.starts_with('#') || !t.contains("test-hooks") {
+                continue;
+            }
+            let defines = *c == "morloc-runtime-types" && section == "[features]" && t.replace(' ', "") == "test-hooks=[]";
+            if !(defines || section == "[dev-dependencies]") {
+                problems.push(format!("{c}/Cargo.toml:{}: test-hooks in {section}", n + 1));
+            }
+        }
+    }
+    let root = std::fs::read_to_string(rust_root().join("Cargo.toml")).unwrap();
+    if root.contains("test-hooks") {
+        problems.push("Cargo.toml: test-hooks in the workspace manifest".into());
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn a_test_only_cfg_is_found_in_either_order() {
+    let attrs: Vec<syn::Attribute> = [
+        quote::quote!(#[cfg(any(test, feature = "test-hooks"))]),
+        quote::quote!(#[cfg(any(feature = "test-hooks", test))]),
+    ]
+    .into_iter()
+    .map(|t| syn::parse_quote!(#t))
+    .collect();
+    for a in &attrs {
+        assert!(has_test_attr(std::slice::from_ref(a)), "{}", a.to_token_stream());
+    }
 }
 
 fn reads_pid(text: &str) -> bool {
@@ -408,6 +457,15 @@ impl<'ast> Visit<'ast> for Scan<'_, 'ast> {
         }
         syn::visit::visit_expr_call(self, c);
     }
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        self.out.calls.push(Call {
+            site: format!("{}::{}", self.file, self.scope()),
+            path: format!(".{}", m.method),
+            args: m.args.to_token_stream().to_string(),
+            test_only: self.test_depth > 0,
+        });
+        syn::visit::visit_expr_method_call(self, m);
+    }
 }
 
 fn test_only_modules(src: &Path) -> HashSet<String> {
@@ -508,38 +566,116 @@ fn other_found(file: &Path, scope: &str, name: String, kind: Kind) -> Found {
 }
 
 fn scan_c(out: &mut Vec<Found>) {
-    let locks = ["std::mutex", "std::once_flag", "pthread_mutex_t", "pthread_once_t", "std::condition_variable"];
     for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow"]) {
-        let text = std::fs::read_to_string(&f).unwrap();
-        let mut scope = "-".to_string();
-        for line in text.lines() {
-            let at_col0 = !line.starts_with(char::is_whitespace);
-            let trimmed = line.trim();
-            if at_col0 && line.contains('(') && !trimmed.ends_with(';') && !trimmed.starts_with('#') {
-                if let Some(name) = last_ident(line.split('(').next().unwrap()) {
-                    scope = name;
-                }
-            }
-            if at_col0 && trimmed == "}" {
-                scope = "-".to_string();
-            }
-            for lock in locks {
-                if let Some(name) = trimmed.split(lock).nth(1).and_then(first_ident) {
-                    out.push(other_found(&f, &scope, name, Kind::Lock));
-                }
-            }
-            let decl = ["static ", "thread_local ", "__thread "].iter().any(|k| trimmed.starts_with(k));
-            let constant = ["static const ", "static constexpr ", "static inline "].iter().any(|k| trimmed.starts_with(k));
-            let head = trimmed.split(['=', ';', '[']).next().unwrap();
-            if decl && !constant && !head.contains('(') {
-                if let Some(name) = last_ident(head) {
-                    let local = if at_col0 { "-".to_string() } else { scope.clone() };
-                    let per_thread = trimmed.contains("__thread") || trimmed.contains("thread_local");
-                    out.push(other_found(&f, &local, name, if per_thread { Kind::ThreadLocal } else { Kind::Cell }));
-                }
-            }
+        for (scope, name, kind) in scan_c_text(&std::fs::read_to_string(&f).unwrap()) {
+            out.push(other_found(&f, &scope, name, kind));
         }
     }
+}
+
+/// The process-wide values a C or C++ source declares, as (scope, name, kind).
+fn scan_c_text(text: &str) -> Vec<(String, String, Kind)> {
+    let locks = ["std::mutex", "std::once_flag", "pthread_mutex_t", "pthread_once_t", "std::condition_variable"];
+    let mut out = Vec::new();
+    let mut scope = "-".to_string();
+    for line in text.lines() {
+        let at_col0 = !line.starts_with(char::is_whitespace);
+        let trimmed = line.trim();
+        if at_col0 && line.contains('(') && !trimmed.ends_with(';') && !trimmed.starts_with('#') {
+            if let Some(name) = last_ident(line.split('(').next().unwrap()) {
+                scope = name;
+            }
+        }
+        if at_col0 && trimmed == "}" {
+            scope = "-".to_string();
+        }
+        let mut lock_found = false;
+        for lock in locks {
+            if let Some(name) = trimmed.split(lock).nth(1).and_then(first_ident) {
+                out.push((scope.clone(), name, Kind::Lock));
+                lock_found = true;
+            }
+        }
+        let starts = |ks: &[&str]| ks.iter().any(|k| trimmed.starts_with(k));
+        let keyword = starts(&["static ", "thread_local ", "__thread "]);
+        let constant = starts(&["static const ", "static constexpr ", "static inline "]);
+        let namespace_scope = at_col0
+            && scope == "-"
+            && trimmed.ends_with(';')
+            && !lock_found
+            && !starts(&[
+                "#", "//", "/*", "}", "using ", "typedef ", "extern ", "template ", "template<", "const ", "constexpr ",
+                "inline const ", "inline constexpr ",
+                "namespace ", "friend ", "return ",
+            ]);
+        let head = trimmed.split(['=', ';', '[', '{']).next().unwrap();
+        let name = match head.find('(') {
+            Some(at) if head[at..].starts_with("(*") => first_ident(&head[at + 2..]).filter(|_| head[at + 2..].contains(')')),
+            Some(_) => None,
+            None => {
+                let tagged = ["struct", "class", "enum", "union"].contains(&head.split_whitespace().next().unwrap_or(""));
+                let words = head.split_whitespace().count();
+                last_ident(head).filter(|_| if tagged { words >= 3 && type_colon(head).is_none() } else { words >= 2 })
+            }
+        };
+        if let Some(name) = name.filter(|_| (keyword && !constant) || (!keyword && namespace_scope)) {
+            let local = if at_col0 { "-".to_string() } else { scope.clone() };
+            let per_thread = trimmed.contains("__thread") || trimmed.contains("thread_local");
+            out.push((local, name, if per_thread { Kind::ThreadLocal } else { Kind::Cell }));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_c_scan_finds_namespace_scope_globals() {
+    let fixture = "\
+#include <atomic>
+namespace mlc {
+std::atomic<uint64_t> plain_count{0};
+int plain_int = 3;
+static std::atomic<const ops*> braced_{nullptr};
+void (*probe_fn)() = nullptr;
+static void (*static_probe)(int);
+using alias_t = int;
+typedef int other_t;
+extern int declared_elsewhere;
+const int fixed = 1;
+constexpr int also_fixed = 2;
+inline constexpr int inline_fixed = 4;
+inline int inline_global = 5;
+template <typename T> T fn_template(T);
+int a_prototype(int x);
+bool takes_a_callback(void (*callback)(void*), void* p);
+struct forward_decl;
+struct stat tagged_global;
+enum class opaque_enum : int;
+class derived_decl;
+static const int fork_hook_ = register_hook(nullptr, [] { plain_count++; });
+int a_function(int x) {
+    static int local_count = 0;
+    int not_global = 1;
+    return x + not_global + local_count;
+}
+}
+";
+    let mut found: Vec<(String, String)> = scan_c_text(fixture).into_iter().map(|(s, n, _)| (s, n)).collect();
+    found.sort();
+    let mut want: Vec<(String, String)> = [
+        ("-", "braced_"),
+        ("-", "inline_global"),
+        ("-", "plain_count"),
+        ("-", "plain_int"),
+        ("-", "probe_fn"),
+        ("-", "tagged_global"),
+        ("-", "static_probe"),
+        ("a_function", "local_count"),
+    ]
+    .iter()
+    .map(|(s, n)| (s.to_string(), n.to_string()))
+    .collect();
+    want.sort();
+    assert_eq!(found, want);
 }
 
 fn scan_py(out: &mut Vec<Found>) {
@@ -769,6 +905,67 @@ fn every_descriptor_is_created_close_on_exec() {
         }
     }
     assert!(found.is_empty(), "descriptors not created close-on-exec:\n{}", found.join("\n"));
+}
+
+/// NET-11: each raw read and why it cannot discard bytes that follow what
+/// it reads. A new read fails until it is reviewed and listed here.
+const NET_11_READ_SITES: &[(&str, &str)] = &[
+    ("morloc-nexus/stdio_server.rs::read_fill_fd libc::read", "fills exactly the buffer asked"),
+    ("morloc-runtime-types/net_limits.rs::recv_flags_by libc::recv", "callers bound it to the bytes still owed"),
+    ("morloc-runtime/daemon_ffi.rs::drain_pair libc::read", "drains a wake pipe"),
+    ("morloc-runtime/daemon_ffi.rs::handle_lp_connection libc::recv", "one-byte peek"),
+    ("morloc-runtime/daemon_ffi.rs::recv_exact libc::recv", "reads exactly the length owed"),
+    ("morloc-runtime/daemon_ffi.rs::refuse_busy libc::recv", "drains a connection that then closes"),
+    ("morloc-runtime/fork_policy.rs::morloc_fork_worker libc::read", "one gate byte"),
+    ("morloc-runtime/fork_pool.rs::peek libc::recv", "one-byte peek"),
+    ("morloc-runtime/fork_pool.rs::read_retired libc::read", "whole 4-byte tokens, checked"),
+    ("morloc-runtime/fork_pool.rs::run libc::read", "drains a wake pipe"),
+    ("morloc-runtime/ipc_ffi.rs::recv libc::recv", "the frame reader: reports a read past the packet"),
+    ("morloc-runtime/ipc_ffi.rs::try_answer_ping libc::recv", "peeks a header, then reads exactly it"),
+    ("morloc-runtime/lifeline.rs::wait_for_end libc::read", "reads to end of file"),
+    ("morloc-nexus/cli.rs::resolve_manifest_target .read", "a file's first bytes, to classify it"),
+    ("morloc-nexus/file.rs::read_at_most .read", "a file's first bytes, to classify it"),
+    ("morloc-nexus/file/tests.rs::read .read", "test reader"),
+    ("morloc-nexus/mcp.rs::read .read", "the deadline reader under one BufReader per connection"),
+    ("morloc-nexus/mcp.rs::serve BufReader::new", "one BufReader over stdin for the server's life"),
+    ("morloc-nexus/mcp.rs::serve_conn BufReader::new", "one BufReader per connection, for its life"),
+    ("morloc-nexus/process.rs::wait_for_daemon .read", "reads exactly the reply's length"),
+    ("morloc-nexus/view.rs::drain_stdin_to_temp_with_prefix .read", "copies every byte to a file"),
+    ("morloc-nexus/view.rs::handle_stdin_input .read", "a prefix that is handed on with the rest"),
+    ("morloc-nexus/view.rs::read_exact_or_eof .read", "fills exactly the buffer asked"),
+    ("morloc-runtime-types/compression.rs::decompress_payload_zstd_into .read", "an in-memory decoder"),
+    ("morloc-runtime/cli.rs::spool_to_temp .read", "copies every byte to a file"),
+    ("morloc-runtime/slurm_bridge.rs::rpc BufReader::new", "one request per connection"),
+    ("morloc-runtime/stream.rs::read_schema_from_file .read", "a file's first bytes; the file is opened again to read it"),
+    ("morloc-runtime/pool_ffi.rs::serve libc::read", "drains a wake pipe"),
+    ("morloc-runtime/cpus.rs::read_small_file .read", "a small proc or sysfs file, read whole"),
+];
+
+#[test]
+fn every_raw_read_is_reviewed_against_its_framing() {
+    let raw = ["recv", "recvfrom", "recvmsg", "read"];
+    let partial = [".read", "BufReader::new", "std::io::BufReader::new"];
+    let scan = scan_rust();
+    let reads: HashSet<String> = scan
+        .calls
+        .iter()
+        .filter(|c| !c.test_only)
+        .filter(|c| {
+            c.path.strip_prefix("libc::").is_some_and(|f| raw.contains(&f))
+                || (partial.contains(&c.path.as_str()) && !matches!(c.args.trim(), "" | "true"))
+        })
+        .map(|c| format!("{} {}", c.site, c.path))
+        .collect();
+    let listed: HashSet<String> = NET_11_READ_SITES.iter().map(|(s, _)| s.to_string()).collect();
+    let mut new: Vec<&String> = reads.difference(&listed).collect();
+    let mut gone: Vec<&String> = listed.difference(&reads).collect();
+    new.sort();
+    gone.sort();
+    assert!(
+        new.is_empty() && gone.is_empty(),
+        "NET-11: a reader never discards a byte that follows what it reads. Unreviewed reads: {new:?}; \
+         listed but gone: {gone:?}"
+    );
 }
 
 #[test]
@@ -1122,6 +1319,8 @@ fn only_catch_scopes_catch_a_panic() {
         "rustmorloc/lib.rs::mlc_try",
         // SLOT-25: holds a decoder's throw across the runtime call, then resumes it.
         "rustmorloc/lib.rs::next_decode",
+        "rustmorloc/lib.rs::slice_begin",
+        "rustmorloc/lib.rs::slice_decode",
         "rustmorloc/lib.rs::drop",
     ];
     let ours = ["morloc-runtime/", "morloc-runtime-types/", "morloc-nexus/", "rustmorloc/"];
@@ -1221,4 +1420,138 @@ fn rust_code_calls_the_rust_function_behind_a_c_entry_point() {
         found.extend(rule.found.into_iter().map(|f| format!("{}: {f}", path.display())));
     }
     assert!(found.is_empty(), "DAEMON-9: {}", found.join("\n"));
+}
+
+// SHM-13: a binding resolves a received reference only through
+// mlc_packet_block; every other rel2abs in a binding resolves a relptr
+// nested inside a value or a block the binding made itself. A change here
+// is reviewed against that rule before the count is updated.
+const BINDING_REL2ABS: &[(&str, usize)] = &[
+    ("data/lang/cpp/cppmorloc.cpp", 2),
+    ("data/lang/cpp/cppmorloc.hpp", 2),
+    ("data/lang/cpp/mlc_arrow.hpp", 1),
+    ("data/lang/cpp/pool.cpp", 1),
+    ("data/lang/py/pymorloc.c", 1),
+    ("data/lang/r/rmorloc.c", 2),
+    ("data/rust/rustmorloc/src/lib.rs", 6),
+];
+
+#[test]
+fn bindings_resolve_received_references_only_through_the_check() {
+    let repo = repo_root();
+    let mut files = walk(&repo.join("data").join("lang"), &["c", "cpp", "hpp", "h"], &[]);
+    files.extend(walk(&repo.join("data").join("rust").join("rustmorloc").join("src"), &["rs"], &[]));
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let n: usize = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("/*") || t.starts_with("* ") || t.starts_with("*/") || t == "*")
+            })
+            .map(|l| l.matches("rel2abs").count())
+            .sum();
+        if n > 0 {
+            let rel = f.strip_prefix(&repo).unwrap().to_string_lossy().into_owned();
+            counts.insert(rel, n);
+        }
+    }
+    let expected: HashMap<String, usize> = BINDING_REL2ABS.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+    assert_eq!(counts, expected, "SHM-13: rel2abs uses in the bindings changed; a received reference must go through mlc_packet_block");
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        assert!(
+            !text.contains("data.generation") && !text.contains("PKT_GENERATION"),
+            "SHM-13: {} reads a packet's generation; only the runtime's check may",
+            f.display()
+        );
+    }
+}
+
+#[test]
+fn only_the_check_and_the_builder_touch_a_packets_generation() {
+    let text = std::fs::read_to_string(rust_root().join("morloc-runtime/src/packet_ffi.rs")).unwrap();
+    assert_eq!(
+        text.matches("PKT_GENERATION_OFF").count(),
+        5,
+        "SHM-13: a packet's generation is written by make_rptr_data_packet, read by rptr_check, and cleared \
+         by two tests; anything else must not touch it"
+    );
+    for f in rust_sources() {
+        if f.ends_with("morloc-runtime-types/src/packet.rs") || f.ends_with("source_rules.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&f).unwrap();
+        let other = if f.ends_with("packet_ffi.rs") { &text[..] } else { text.split("#[cfg(test)]").next().unwrap() };
+        assert!(
+            other.contains("PKT_GENERATION_OFF") == f.ends_with("packet_ffi.rs") && !other.contains("data.generation"),
+            "SHM-13: {} touches a packet's generation outside the check, the builder and CommandData",
+            f.display()
+        );
+    }
+}
+
+// SLOT-37: the libmorloc calls that may wait for an output stream's slot
+// lock or its queue.
+const PY_NOGIL_CALLS: &[&str] = &[
+    "mlc_write_begin",
+    "mlc_write_wait",
+    "mlc_write_commit",
+    "mlc_write_abort",
+    "mlc_write",
+    "mlc_flush",
+    "mlc_close",
+    "mlc_open_stdout",
+    "mlc_open_stderr",
+    "mlc_reclaim_stdio_after_dispatch",
+];
+
+fn gil_held_calls(text: &str, names: &[&str]) -> Vec<String> {
+    let mut released = false;
+    let mut found = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("Py_BEGIN_ALLOW_THREADS") {
+            released = true;
+        } else if t.starts_with("Py_END_ALLOW_THREADS") {
+            released = false;
+        }
+        if released || t.starts_with("//") || t.starts_with("#define") || t.contains("PyTRY_NOGIL(") {
+            continue;
+        }
+        for name in names {
+            let hit = line.match_indices(name).any(|(at, _)| {
+                let before = line[..at].chars().next_back();
+                let after = line[at + name.len()..].chars().next();
+                !before.is_some_and(|c| is_ident_char(c) || c == '"') && matches!(after, Some('(') | Some(','))
+            });
+            if hit {
+                found.push(format!("{}: {}", n + 1, t));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_python_call_that_may_wait_for_a_stream_lock_is_found() {
+    let text = "    int32_t rc = mlc_close(h, &e);\n    PyTRY(mlc_open_stdout, s);\n    PyTRY_NOGIL(h, mlc_open_stderr, s);\n    Py_BEGIN_ALLOW_THREADS\n    mlc_write_commit(r, &e);\n    Py_END_ALLOW_THREADS\n    {\"mlc_close\", pybinding__mlc_close, 0},\n    rc = mlc_write(1, h, v, &e);\n";
+    let found = gil_held_calls(text, PY_NOGIL_CALLS);
+    assert_eq!(
+        found,
+        vec![
+            "1: int32_t rc = mlc_close(h, &e);".to_string(),
+            "2: PyTRY(mlc_open_stdout, s);".to_string(),
+            "8: rc = mlc_write(1, h, v, &e);".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn python_waits_for_a_stream_lock_only_without_the_gil() {
+    let text = std::fs::read_to_string(repo_root().join("data/lang/py/pymorloc.c")).unwrap();
+    let found = gil_held_calls(&text, PY_NOGIL_CALLS);
+    assert!(found.is_empty(), "SLOT-37: pymorloc.c calls these holding the GIL:\n{}", found.join("\n"));
+    assert!(!text.contains("Py_mod_gil"), "SLOT-37: an in-place batch's sizes hold only while the GIL is held");
 }

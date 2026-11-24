@@ -47,6 +47,7 @@ suspension: `do 42 :: <> Int`.
 
 ### EFF-5 There is no coercion between `T` and `<E> T`
 Intent: proposed
+Tests: spec-eff-5-1, spec-eff-5-2
 Code: conforms 2026-10-21
 
 A pure value in a suspension slot is a type error; `do v` is the only lift.
@@ -75,7 +76,7 @@ place. A `!` with no enclosing do-block is a type error.
 ### EFF-8 Rows compare by inclusion
 Intent: proposed
 Tests: spec-eff-8-1
-Code: conforms 2026-10-21
+Code: deviates (issues/typecheck.md)
 
     E1 subset of E2      T1 <: T2
     -----------------------------
@@ -112,3 +113,16 @@ Code: unaudited
 The current model says `escapable effect E` gives `E` handlers, and only a
 sourced function `<E, e> a -> <e> a` can be one. Is this part of the
 language, or should handlers be removed until there is a use for them?
+
+### EFF-13 An inescapable effect an argument performs reaches the result
+Intent: proposed
+Tests: spec-eff-13-1, spec-eff-13-2, spec-eff-13-3, spec-eff-13-4, spec-eff-13-5, spec-eff-13-6
+Code: conforms 2026-11-04
+
+Every inescapable effect in a function type's parameters is in its result
+row, so a function given something that performs one cannot hide that it
+runs it. This holds for every signature, sourced or defined, and for each
+instance's methods at the instance's types: `instance Run (Int -> <IO>
+Int)` of `class Run a where run :: a -> Int` is rejected, since there
+`run :: (Int -> <IO> Int) -> Int`. Only a sourced handler discharges an
+escapable effect (EFF-12).

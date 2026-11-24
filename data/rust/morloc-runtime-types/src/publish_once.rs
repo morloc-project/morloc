@@ -1,25 +1,43 @@
+use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// A process-wide value set on first use, safe to fork at any moment
 /// (INIT-3, model/runtime/tla/OncePublish.tla). Each first user builds a value
 /// outside any lock and publishes it by compare-and-swap; a loser drops its
 /// own and takes the published one. Nothing ever waits on another thread, so
-/// a forked child is never left waiting on a builder it does not have.
+/// a forked child is never left waiting on a builder it does not have. The
+/// published value lives as long as the cell. Its pointer is untyped, so a
+/// cell may sit in a struct C code is given.
+#[repr(transparent)]
 pub struct PublishOnce<T> {
-    value: AtomicPtr<T>,
+    value: AtomicPtr<c_void>,
+    owns: PhantomData<Box<T>>,
 }
 
-// SAFETY: INIT-3: a published value is shared by reference and never freed.
+// SAFETY: INIT-3: a published value is shared by reference and freed only with the cell.
 unsafe impl<T: Send + Sync> Sync for PublishOnce<T> {}
+// SAFETY: INIT-3: the cell owns its published value.
+unsafe impl<T: Send> Send for PublishOnce<T> {}
+
+impl<T> Drop for PublishOnce<T> {
+    fn drop(&mut self) {
+        let p = *self.value.get_mut() as *mut T;
+        if !p.is_null() {
+            // SAFETY: INIT-3: no reference to the value outlives the cell.
+            drop(unsafe { Box::from_raw(p) });
+        }
+    }
+}
 
 impl<T> PublishOnce<T> {
     pub const fn new() -> Self {
-        PublishOnce { value: AtomicPtr::new(std::ptr::null_mut()) }
+        PublishOnce { value: AtomicPtr::new(std::ptr::null_mut()), owns: PhantomData }
     }
 
     pub fn get(&self) -> Option<&T> {
-        // SAFETY: INIT-3: a published value is never freed.
-        unsafe { self.value.load(Ordering::Acquire).as_ref() }
+        // SAFETY: INIT-3: a published value is freed only with the cell.
+        unsafe { (self.value.load(Ordering::Acquire) as *const T).as_ref() }
     }
 
     pub fn get_or_init(&self, build: impl FnOnce() -> T) -> &T {
@@ -33,9 +51,9 @@ impl<T> PublishOnce<T> {
             return v;
         }
         let mine = Box::into_raw(Box::new(build()));
-        match self.value.compare_exchange(std::ptr::null_mut(), mine, Ordering::AcqRel, Ordering::Acquire) {
+        match self.value.compare_exchange(std::ptr::null_mut(), mine as *mut c_void, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
-                // SAFETY: INIT-3: published, so never freed.
+                // SAFETY: INIT-3: published, so freed only with the cell.
                 let v = unsafe { &*mine };
                 published(v);
                 v
@@ -43,8 +61,8 @@ impl<T> PublishOnce<T> {
             Err(theirs) => {
                 // SAFETY: INIT-3: the loser frees only its own unpublished value.
                 drop(unsafe { Box::from_raw(mine) });
-                // SAFETY: INIT-3: a published value is never freed.
-                unsafe { &*theirs }
+                // SAFETY: INIT-3: a published value is freed only with the cell.
+                unsafe { &*(theirs as *const T) }
             }
         }
     }
@@ -83,6 +101,25 @@ mod tests {
             .collect();
         assert!(seen.iter().all(|v| *v == seen[0]));
         assert_eq!(EFFECTS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_dropped_cell_drops_its_published_value() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Counted;
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let cell = PublishOnce::new();
+        cell.get_or_init(|| Counted);
+        cell.get_or_init(|| Counted);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(cell);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        drop(PublishOnce::<Counted>::new());
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
     }
 
     #[test]

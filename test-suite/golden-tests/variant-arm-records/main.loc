@@ -29,7 +29,6 @@ record Cpp => Node = "node_t"
 record Gen where
   a :: Int
   b :: Str
-record Cpp => Gen = "struct"
 
 data Expr = Leaf | Hold Pt | Chain Node | Made Gen
 

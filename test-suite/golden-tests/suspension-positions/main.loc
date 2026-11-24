@@ -32,7 +32,6 @@ takeThunk :: <IO> Int -> <IO> Int
 record Job where
   run :: <IO> Int
   name :: Str
-record py => Job = "dict"
 
 letReuse :: Int -> <IO> Int
 letReuse k = do

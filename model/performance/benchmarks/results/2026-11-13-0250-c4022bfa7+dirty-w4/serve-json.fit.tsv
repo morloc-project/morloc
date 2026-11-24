@@ -1,0 +1,15 @@
+# serve-json 2026-11-13 02:50 load=1.60 load_max=1.69 morloc=0.112.0 commit=c4022bfa7+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+SERVE-1	http.c	-6.31065	ms	r2=0.9994
+SERVE-1	http.b	7.98456	ns	r2=0.9994 per result byte
+SERVE-1	cli.c	44.2732	ms	r2=1.0000
+SERVE-1	cli.b	5.29704	ns	r2=1.0000 per result byte
+SERVE-1	http.over	2.68752	ns	per result byte; 2.89 s/GiB
+SERVE-2	call.c	254.483	us	mean of 200 scalar calls
+SERVE-2	health.c	186.808	us	mean of 200 /health probes
+SERVE-3	mcp.c	-19.0529	ms	r2=0.9876
+SERVE-3	mcp.b	12.9495	ns	r2=0.9876 per result byte
+SERVE-3	mcp.http.c	-1.55675	ms	r2=0.9986
+SERVE-3	mcp.http.b	7.74735	ns	r2=0.9986 per result byte
+SERVE-3	mcp.over	5.20219	ns	per result byte over HTTP; 5.59 s/GiB
+SERVE-3	call.c	62.1977	us	mean of 200 scalar tools/call

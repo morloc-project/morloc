@@ -31,12 +31,11 @@ import qualified Data.Text as T
 import System.Directory (canonicalizePath, createDirectoryIfMissing)
 
 import Morloc.CodeGenerator.Guest
-import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes, resolveFutharkBuild)
+import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostEntryTypes, resolveFutharkBuild)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Morloc.System as MS
 import Morloc.ProgramBuilder.Build (ensureStagingDir)
 
 -- | Lower every guest source in the typed AST to host glue. A no-op when there
@@ -95,10 +94,9 @@ rewriteFutSource bindings src
         Nothing -> src
   | otherwise = src
 
--- build a GlueEntry by rendering the host (C++) arg/return types from the sig
 toGlueEntry :: (SourcedSig, FutharkEntry) -> GlueEntry FutharkEntry
 toGlueEntry (sig, entry) =
-  let (argTs, retT) = hostSigTypes (ssType sig)
+  let (argTs, retT) = hostEntryTypes entry
    in GlueEntry sig entry argTs retT
 
 -- ---------------------------------------------------------------------------
@@ -111,7 +109,7 @@ collectLang lang = go
   where
     go :: AnnoS (Indexed TypeU) Many Int -> [(Source, TypeU)]
     go (AnnoS (Idx _ t) _ e) = case e of
-      ExeS (SrcCall src)
+      ExeS (SrcCall (Idx _ src))
         | langName (srcLang src) == lang -> [(src, t)]
       _ -> execWriter (mapExprSM (\c -> tell (go c) >> pure c) e)
 
@@ -128,9 +126,9 @@ rewriteSrc bindings = runIdentity . go
   where
     go (AnnoS g c e) = do
       e' <- case e of
-        ExeS (SrcCall src)
+        ExeS (SrcCall (Idx si src))
           | langName (srcLang src) == futharkLangName ->
-              pure $ ExeS (SrcCall (rewriteFutSource bindings src))
+              pure $ ExeS (SrcCall (Idx si (rewriteFutSource bindings src)))
         _ -> mapExprSM go e
       pure (AnnoS g c e')
 
@@ -162,13 +160,11 @@ dedupSources futSrcs =
       absP <- MM.liftIO (canonicalizePath p)
       return (GuestSource absP (guestLang futharkGuest))
 
--- append the guest objects + link flags to the package metadata so the host
--- pool build links them
+-- record the guest objects and link flags so the host pool build links them
 injectBuild :: BuildProducts -> MorlocMonad ()
-injectBuild products = do
-  let flags = map (T.pack . MS.shellQuote) (bpObjects products) ++ bpLinkFlags products
+injectBuild products =
   MM.modify' $ \s ->
-    let pms' = case statePackageMeta s of
-          [] -> [defaultValue {packageCxxFlags = flags}]
-          (p : ps) -> p {packageCxxFlags = packageCxxFlags p ++ flags} : ps
-     in s {statePackageMeta = pms'}
+    s
+      { stateGuestObjects = stateGuestObjects s ++ bpObjects products
+      , stateGuestLinkFlags = stateGuestLinkFlags s ++ bpLinkFlags products
+      }

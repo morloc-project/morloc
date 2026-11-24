@@ -148,6 +148,13 @@ pub(crate) fn region_len(n: usize, width: usize) -> Result<usize, MorlocError> {
     })
 }
 
+/// The limbs of a multi-limb `Int` (`size` > 1) as bytes, checked to lie
+/// inside the volume its relptr names.
+pub(crate) unsafe fn int_limb_bytes<'a>(size: usize, limbs: RelPtr) -> Result<&'a [u8], MorlocError> {
+    let total = region_len(size, std::mem::size_of::<u64>())?;
+    Ok(std::slice::from_raw_parts(shm::rel2abs_extent(limbs, total)?, total))
+}
+
 /// The relptr range `[lo, hi)` of one block. A block lies inside one
 /// volume, so its relptrs are contiguous, and bounds are checked on relptrs
 /// directly without resolving each one to an address.
@@ -450,7 +457,8 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
     ///
     /// # Safety
     /// `first` points at `n` headers, as `step`'s `data` points at one.
-    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<(usize, Origin)>) -> Result<(), MorlocError> {
+    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<(usize, Origin)>, text: bool) -> Result<(), MorlocError> {
+        let dim_origin = self.dims;
         let Some(RelWindow { lo, hi }) = self.window else {
             return Err(MorlocError::Shm("a run of headers is rebased only inside a window".into()));
         };
@@ -483,6 +491,9 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
             match extent.and_then(|e| rel.checked_add(e)) {
                 Some(end) if rel >= lo && end <= hi => {}
                 _ => return self.check(rel, arr.size.checked_mul(elem_w)),
+            }
+            if text {
+                check_text(self.target(rel)?, arr.size, dim_origin)?;
             }
         }
         Ok(())
@@ -549,22 +560,37 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         if arr.size > 0 {
                             let w = s.parameters.first().map_or(1, |e| e.width);
                             self.check(rel, arr.size.checked_mul(w))?;
+                            if s.serial_type == SerialType::String && self.dims.is_some() {
+                                check_text(self.target(rel)?, arr.size, self.dims)?;
+                            }
                         }
                     }
                     // An empty array points nowhere (its rebased sentinel is
-                    // never read); a flat element region holds no pointers.
-                    if arr.size == 0 || s.parameters.is_empty() || s.parameters[0].is_fixed_width() {
+                    // never read); a flat element region holds no pointers,
+                    // though its enum tags are checked.
+                    if arr.size == 0 || s.parameters.is_empty() {
                         return Ok(());
                     }
                     let elem_schema = &s.parameters[0];
                     let w = elem_schema.width;
+                    let fixed = elem_schema.is_fixed_width();
+                    if fixed && (self.dims.is_none() || !holds_enum(elem_schema)) {
+                        return Ok(());
+                    }
                     let data_rel = if matches!(self.mode, Rebase::Check { .. }) { arr.data + shift } else { arr.data };
                     let elems = self.target(data_rel)?;
+                    if fixed {
+                        if let Some(o) = self.dims {
+                            check_enum_run(elem_schema, elems, arr.size, w, o)?;
+                        }
+                        return Ok(());
+                    }
                     if self.window.is_some() && w == std::mem::size_of::<Array>() {
                         let inner = self.res.resolve(elem_schema)?;
-                        if let Some(ew) = header_elem_width(inner) {
+                        if let Some(ew) = header_elem_width(inner, self.dims.is_some()) {
                             let dim = self.dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
-                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim);
+                            let text = inner.serial_type == SerialType::String && self.dims.is_some();
+                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim, text);
                         }
                     }
                     let flat_elem = self.res.flat(elem_schema);
@@ -631,23 +657,125 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         self.child(st, &f, 0, &s.parameters[0], inner)?;
                     }
                 }
-                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {} // primitives have no relptrs
+                SerialType::Enum => {
+                    if let Some(o) = self.dims {
+                        check_tag(s, *data, o)?;
+                    }
+                }
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur => {} // primitives have no relptrs
             }
         }
         Ok(())
     }
 }
 
+/// True when a fixed-width value of `s` holds an enum tag.
+fn holds_enum(s: &Schema) -> bool {
+    match s.serial_type {
+        SerialType::Enum => true,
+        SerialType::Tuple | SerialType::Map => s.parameters.iter().any(holds_enum),
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+        | SerialType::IStream | SerialType::Variant => false,
+    }
+}
+
+/// The offset and schema of every enum in a fixed-width value of `s`.
+fn enum_slots<'s>(s: &'s Schema, base: usize, out: &mut Vec<(usize, &'s Schema)>) {
+    match s.serial_type {
+        SerialType::Enum => out.push((base, s)),
+        SerialType::Tuple | SerialType::Map => {
+            for (p, off) in s.parameters.iter().zip(&s.offsets) {
+                enum_slots(p, base + off, out);
+            }
+        }
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+        | SerialType::IStream | SerialType::Variant => {}
+    }
+}
+
+/// A tag of the enum `s` that names no constructor fails the check (WIRE-10).
+fn check_tag(s: &Schema, tag: u8, o: Origin) -> Result<(), MorlocError> {
+    match width::arm_tag(tag, s.size) {
+        Some(_) => Ok(()),
+        None => Err(o.tag_failure(width::enum_tag_error(tag, &s.keys))),
+    }
+}
+
+/// Check the enum tags of `n` fixed-width values of `s`, `w` bytes apart,
+/// starting at `data`. A run of bare enums is one scan of its bytes.
+///
+/// # Safety
+/// `data` holds `n` such values.
+unsafe fn check_enum_run(s: &Schema, data: *const u8, n: usize, w: usize, o: Origin) -> Result<(), MorlocError> {
+    let mut slots = Vec::new();
+    enum_slots(s, 0, &mut slots);
+    if let [(0, e)] = slots[..] {
+        if w == 1 {
+            let bytes = std::slice::from_raw_parts(data, n);
+            return match bytes.iter().find(|&&b| usize::from(b) >= e.size) {
+                Some(&tag) => check_tag(e, tag, o),
+                None => Ok(()),
+            };
+        }
+    }
+    for i in 0..n {
+        let p = data.add(i * w);
+        for &(off, e) in &slots {
+            check_tag(e, *p.add(off), o)?;
+        }
+    }
+    Ok(())
+}
+
+/// A `Str` body must be text (FMT-10). A body the program built is checked
+/// as its encoders check it, so the opt-out turns the check off for it.
+///
+/// # Safety
+/// `p` addresses `n` readable bytes.
+unsafe fn check_text(p: *const u8, n: usize, origin: Option<Origin>) -> Result<(), MorlocError> {
+    let bytes = std::slice::from_raw_parts(p, n);
+    let bad = match origin {
+        Some(Origin::Program) => morloc_runtime_types::utf8::checked_first_invalid(bytes),
+        _ => morloc_runtime_types::utf8::first_invalid(bytes),
+    };
+    match bad {
+        None => Ok(()),
+        Some(i) => {
+            let from = if matches!(origin, Some(Origin::Outside)) { " in data read from outside" } else { "" };
+            Err(MorlocError::Serialization(format!("a Str that is not valid UTF-8 (byte {i} of {n}){from}")))
+        }
+    }
+}
+
+/// `check_text` of a body the program built: it runs only in a debug build
+/// (DIM-3), and the opt-out turns it off.
+pub(crate) unsafe fn check_program_text(p: *const u8, n: usize) -> Result<(), MorlocError> {
+    if crate::packet::code_checks() {
+        check_text(p, n, Some(Origin::Program))
+    } else {
+        Ok(())
+    }
+}
+
 /// The width of the elements of a string or array whose elements hold no
 /// pointer, when an array of `s` is a run of such headers that
-/// `RebaseWalk::headers` rebases.
-fn header_elem_width(s: &Schema) -> Option<usize> {
+/// `RebaseWalk::headers` rebases. When the walk checks values, elements
+/// holding an enum are walked instead, so their tags are checked.
+fn header_elem_width(s: &Schema, checked: bool) -> Option<usize> {
     if s.width != std::mem::size_of::<Array>() {
         return None;
     }
     match s.serial_type {
         SerialType::String => Some(1),
-        SerialType::Array => s.parameters.first().filter(|e| e.is_fixed_width()).map(|e| e.width),
+        SerialType::Array => {
+            s.parameters.first().filter(|e| e.is_fixed_width() && !(checked && holds_enum(e))).map(|e| e.width)
+        }
         SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
         | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
         | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional
@@ -772,12 +900,74 @@ impl RebaseMode {
 /// Bytes below which a value is walked on the calling thread.
 const PARALLEL_WALK_MIN_BYTES: isize = 8 << 20;
 
-/// Walk a large root array whose elements hold pointers on the frame
-/// workers: its header on the calling thread, as the walk steps it, then
-/// ranges of its elements (single elements when there are few), each
-/// element walked as a record of its own (as `adjust_records_within` walks
-/// records). `None` when the value is not such an array, for the caller to
-/// walk whole.
+/// Where an element's walk reads past its inline slot when it checks values
+/// (FMT-10): every `Str` body, and every array of fixed-width elements
+/// holding an enum. Each entry is (offset of the header in the slot,
+/// element width). Only meaningful when `shallow_array_slots` is `Some`.
+fn checked_bodies(s: &Schema, base: usize, out: &mut Vec<(usize, usize)>) {
+    if s.is_fixed_width() {
+        return;
+    }
+    match s.serial_type {
+        SerialType::String => out.push((base, 1)),
+        SerialType::Array => {
+            if let Some(e) = s.parameters.first().filter(|e| e.is_fixed_width() && holds_enum(e)) {
+                out.push((base, e.width));
+            }
+        }
+        SerialType::Tuple | SerialType::Map => {
+            for (p, &off) in s.parameters.iter().zip(&s.offsets) {
+                checked_bodies(p, base + off, out);
+            }
+        }
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::Optional | SerialType::Int | SerialType::Table
+        | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum
+        | SerialType::Variant => {}
+    }
+}
+
+/// The bytes a walk of the `n` elements of `elem` at `elems` reads, counted
+/// up to `PARALLEL_WALK_MIN_BYTES`: the elements' inline slots and, when
+/// `checked`, the bodies [`checked_bodies`] names. `whole` when an element
+/// holds a pointer that leads further, so the walk may read all of it.
+///
+/// # Safety
+/// `n` elements of `elem` lie at `elems`.
+unsafe fn walk_touches(elem: &Schema, elems: usize, n: usize, checked: bool, whole: usize) -> usize {
+    let min = PARALLEL_WALK_MIN_BYTES as usize;
+    if shallow_array_slots(elem).is_none() {
+        return whole;
+    }
+    let mut touched = n.saturating_mul(elem.width);
+    let mut bodies = Vec::new();
+    if checked {
+        checked_bodies(elem, 0, &mut bodies);
+    }
+    if bodies.is_empty() || touched >= min {
+        return touched;
+    }
+    for i in 0..n {
+        for &(off, w) in &bodies {
+            // SAFETY: the header lies in element i's inline slot.
+            let a = unsafe { std::ptr::read_unaligned((elems + i * elem.width + off) as *const Array) };
+            touched = touched.saturating_add(a.size.saturating_mul(w));
+        }
+        if touched >= min {
+            break;
+        }
+    }
+    touched
+}
+
+/// Walk a large root array whose elements hold pointers: its header on the
+/// calling thread, as the walk steps it, then ranges of its elements
+/// (single elements when there are few), each element walked as a record of
+/// its own (as `adjust_records_within` walks records), on the frame workers
+/// when the walk reads `PARALLEL_WALK_MIN_BYTES` or more ([`walk_touches`])
+/// and on the calling thread otherwise. `None` when the value is not such an
+/// array, for the caller to walk whole.
 ///
 /// # Safety
 /// As for the serial walk in `mode`: `data` holds a value of `schema` whose
@@ -823,17 +1013,43 @@ unsafe fn walk_root_array_parallel(
         Ok(p) => p as usize,
         Err(e) => return Some(Err(e)),
     };
-    let n = arr.size;
-    let chunk = n.div_ceil(4 * workers).max(1);
+    let whole = (window.hi - window.lo) as usize;
+    // SAFETY: the header check admitted `arr.size` elements at `elems`.
+    let touched = unsafe { walk_touches(elem_schema, elems, arr.size, dims.is_some(), whole) };
+    let workers = if touched >= PARALLEL_WALK_MIN_BYTES as usize { workers } else { 1 };
+    // SAFETY: as above.
+    Some(unsafe { walk_elements(mode, window, schema, elem_schema, elems, arr.size, dims, workers) })
+}
+
+/// Walk the `n` elements of `elem_schema` at `elems` as records of their
+/// own, in ranges taken by `workers` threads (the calling thread among
+/// them). `root` is the schema `elem_schema` was resolved from.
+///
+/// # Safety
+/// `n` elements of `elem_schema` lie at `elems`; their pointers are walked
+/// in `mode`, checked against `window`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn walk_elements(
+    mode: RebaseMode,
+    window: RelWindow,
+    root: &Schema,
+    elem_schema: &Schema,
+    elems: usize,
+    n: usize,
+    dims: Option<Origin>,
+    workers: usize,
+) -> Result<(), MorlocError> {
+    let width = elem_schema.width;
+    let chunk = n.div_ceil(4 * workers.max(1)).max(1);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failed: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
     let work = || {
-        let res = Resolver::new(schema);
+        let res = Resolver::new(root);
         let mut w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window), dims };
         let mut st = Stack::new();
         let inner = res.resolve(elem_schema).ok();
         let header_w = inner
-            .and_then(header_elem_width)
+            .and_then(|s| header_elem_width(s, dims.is_some()))
             .filter(|_| width == std::mem::size_of::<Array>());
         loop {
             let start = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
@@ -842,11 +1058,12 @@ unsafe fn walk_root_array_parallel(
             }
             if let (Some(ew), Some(inner)) = (header_w, inner) {
                 let dim = dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
+                let text = inner.serial_type == SerialType::String && dims.is_some();
                 let end = (start + chunk).min(n);
                 // SAFETY: elements start..end lie inside the region the
-                // header check admitted.
+                // caller admitted.
                 let first = unsafe { (elems as *mut u8).add(start * width) } as *mut Array;
-                if let Err(e) = unsafe { w.headers(first, end - start, ew, dim) } {
+                if let Err(e) = unsafe { w.headers(first, end - start, ew, dim, text) } {
                     failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
                     next.store(n, std::sync::atomic::Ordering::Relaxed);
                     return;
@@ -854,7 +1071,7 @@ unsafe fn walk_root_array_parallel(
                 continue;
             }
             for i in start..(start + chunk).min(n) {
-                // SAFETY: element i lies inside the region the header check
+                // SAFETY: element i lies inside the region the caller
                 // admitted.
                 st.enter(elem_schema, unsafe { (elems as *const u8).add(i * width) }, ());
                 if let Err(e) = walk::run(&mut w, &mut st) {
@@ -865,19 +1082,70 @@ unsafe fn walk_root_array_parallel(
             }
         }
     };
-    std::thread::scope(|sc| {
-        // The calling thread works too, so a refused spawn only narrows it.
-        for _ in 1..workers {
-            if std::thread::Builder::new().spawn_scoped(sc, &work).is_err() {
-                break;
-            }
-        }
+    if workers < 2 {
         work();
-    });
-    Some(match failed.into_inner().unwrap_or_else(|p| p.into_inner()) {
+    } else {
+        std::thread::scope(|sc| {
+            // The calling thread works too, so a refused spawn only narrows it.
+            for _ in 1..workers {
+                if std::thread::Builder::new().spawn_scoped(sc, &work).is_err() {
+                    break;
+                }
+            }
+            work();
+        });
+    }
+    match failed.into_inner().unwrap_or_else(|p| p.into_inner()) {
         Some(e) => Err(e),
         None => Ok(()),
-    })
+    }
+}
+
+/// Check the `count` records of `elem` at `records`, inside `payload` (a
+/// sub-packet payload in the producer's frame, relptrs carrying
+/// `vol_idx_hint`), as [`check_in_place`] checks a whole payload: every
+/// pointer below them, and the bytes it addresses, lie inside `payload`.
+/// Records outside the range are not read.
+///
+/// # Safety
+/// `records .. records + count * elem.width` must lie inside `payload`.
+pub unsafe fn check_records_in_place(
+    payload: &[u8],
+    records: *const u8,
+    count: usize,
+    elem: &Schema,
+    vol_idx_hint: u16,
+    origin: Origin,
+) -> Result<(), MorlocError> {
+    if count == 0 {
+        return Ok(());
+    }
+    if elem.is_fixed_width() {
+        return match origin.checked() {
+            Some(o) if holds_enum(elem) => unsafe { check_enum_run(elem, records, count, elem.width, o) },
+            _ => Ok(()),
+        };
+    }
+    let hi = isize::try_from(payload.len())
+        .map_err(|_| MorlocError::Serialization("a voidstar value too large to address".into()))?;
+    let window = RelWindow { lo: 0, hi };
+    let shift = -shm::encode_relptr(vol_idx_hint as usize, 0);
+    let mode = RebaseMode::Check { base: payload.as_ptr() as usize, shift };
+    let root = Schema::array(elem.clone());
+    let total = if payload.len() >= std::mem::size_of::<Array>() {
+        // SAFETY: a sub-packet payload begins with its root Array header.
+        unsafe { std::ptr::read_unaligned(payload.as_ptr() as *const Array) }.size.max(count)
+    } else {
+        count
+    };
+    let share = (payload.len() as u128 * count as u128 / total as u128) as isize;
+    // SAFETY: the caller vouches the records lie in `payload`.
+    let touched = unsafe { walk_touches(elem, records as usize, count, origin.checked().is_some(), share.max(0) as usize) };
+    let workers = if count >= 2 && touched >= PARALLEL_WALK_MIN_BYTES as usize { crate::compression::frame_workers() } else { 1 };
+    // SAFETY: the caller vouches the records lie in `payload`.
+    unsafe {
+        walk_elements(mode, window, &root, &root.parameters[0], records as usize, count, origin.checked(), workers)
+    }
 }
 
 /// Check a value of `schema` that lies in `bytes` (a sub-packet payload in
@@ -886,6 +1154,18 @@ unsafe fn walk_root_array_parallel(
 /// inside `bytes`, every variant tag names an arm.
 pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16, origin: Origin) -> Result<(), MorlocError> {
     check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0), origin.checked())
+}
+
+/// Check the value of `schema` at the start of `block` as data of `origin`
+/// is checked (FMT-10), writing nothing.
+///
+/// # Safety
+/// `block` must be a live shared-memory block holding a value of `schema`.
+pub unsafe fn check_text_in_block(block: AbsPtr, schema: &Schema, origin: Origin) -> Result<(), MorlocError> {
+    let (Some(len), Ok(rel)) = (shm::shm_block_size(block), shm::abs2rel(block)) else {
+        return Err(MorlocError::Shm("a value to check is not one shared-memory block".into()));
+    };
+    check_window(std::slice::from_raw_parts(block, len), schema, -rel, Some(origin))
 }
 
 /// Whether the value of `schema` at the start of `block` lies wholly inside
@@ -1576,11 +1856,11 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                     let size = *(data as *const usize);
                     if size > 1 {
                         let relptr = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
-                        let limbs = shm::rel2abs(relptr)?;
+                        let limbs = int_limb_bytes(size, relptr)?;
                         self.align(std::mem::align_of::<u64>())?;
-                        let total = size * std::mem::size_of::<u64>();
+                        let total = limbs.len();
                         let here = self.cursor;
-                        self.region(here, total)?.copy_from_slice(std::slice::from_raw_parts(limbs, total));
+                        self.region(here, total)?.copy_from_slice(limbs);
                         self.region(at + std::mem::size_of::<usize>(), std::mem::size_of::<RelPtr>())?
                             .copy_from_slice(&(here as RelPtr).to_ne_bytes());
                         self.cursor += total;
@@ -2021,9 +2301,8 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         let pos = shm::align_up(self.cursor, std::mem::align_of::<u64>());
                         self.set(base, pos as u64 | self.vol_mask);
                         self.pad_to(pos)?;
-                        let limbs = shm::rel2abs(*(data.add(std::mem::size_of::<usize>()) as *const RelPtr))?;
-                        let total = size * std::mem::size_of::<u64>();
-                        self.write_bytes(std::slice::from_raw_parts(limbs, total))?;
+                        let limbs = int_limb_bytes(size, *(data.add(std::mem::size_of::<usize>()) as *const RelPtr))?;
+                        self.write_bytes(limbs)?;
                     }
                 }
                 SerialType::String | SerialType::Array => {
@@ -2146,13 +2425,36 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
     }
 }
 
-// ── write_voidstar_binary (to fd) ──────────────────────────────────────────
+// -- write_flat_padded --
 
-/// Flatten voidstar and write to a file descriptor. Returns bytes written.
-pub fn write_binary_to_fd(fd: i32, data: AbsPtr, schema: &Schema) -> Result<usize, MorlocError> {
-    let buf = flatten_to_buffer(data, schema)?;
-    crate::utility::write_all_to_fd(fd, &buf)?;
-    Ok(buf.len())
+/// Write exactly the bytes of `flatten_to_buffer(data, schema)` to `writer`
+/// without materialising them. `total` is
+/// `calc_voidstar_size_inner(data, schema)`, the length of that buffer.
+pub fn write_flat_padded<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    data: AbsPtr,
+    schema: &Schema,
+    total: usize,
+) -> Result<(), MorlocError> {
+    if schema.serial_type == SerialType::Table {
+        // SAFETY: a table's flat form is its block of `total` bytes.
+        let block = unsafe { std::slice::from_raw_parts(data, total) };
+        return writer.write_all(block).map_err(MorlocError::Io);
+    }
+    let n = write_flat_to_writer(writer, data, schema)?;
+    if n > total {
+        return Err(MorlocError::Serialization(format!(
+            "flat form is {n} bytes, larger than its measured size {total}"
+        )));
+    }
+    const PAD: [u8; 4096] = [0u8; 4096];
+    let mut left = total - n;
+    while left > 0 {
+        let k = left.min(PAD.len());
+        writer.write_all(&PAD[..k]).map_err(MorlocError::Io)?;
+        left -= k;
+    }
+    Ok(())
 }
 
 // ── Tests: write_flat_to_writer byte-equivalence with flatten_to_buffer ───
@@ -2925,6 +3227,41 @@ mod header_run_tests {
     }
 
     #[test]
+    fn a_landed_enum_tag_past_its_constructors_is_refused() {
+        use crate::json::read_json_with_schema;
+        let _shm = crate::init_test_shm();
+        let dna = "e41A1C1G1T";
+        let big = format!("[{}]", vec!["\"T\""; 5000].join(","));
+        let big_pair = format!("[{big},{big}]");
+        // Every tag is T (3); no other byte of these values is 3.
+        for (schema_str, json) in [
+            (dna.to_string(), "\"T\""),
+            (format!("a{dna}"), "[\"T\",\"T\"]"),
+            (format!("at2i4{dna}"), "[[7,\"T\"],[7,\"T\"]]"),
+            (format!("aa{dna}"), "[[\"T\",\"T\"],[\"T\"]]"),
+            (format!("?{dna}"), "\"T\""),
+            (format!("t2s{dna}"), "[\"ab\",\"T\"]"),
+            (format!("a?{dna}"), "[\"T\",null]"),
+            (format!("a{dna}"), big.as_str()),
+            (format!("aa{dna}"), big_pair.as_str()),
+            (format!("at3e41A1C1G1Ti4{dna}"), "[[\"T\",7,\"T\"]]"),
+        ] {
+            let schema = parse_schema(&schema_str).unwrap();
+            let value = read_json_with_schema(json, &schema).unwrap();
+            let mut good: Vec<u8> = Vec::new();
+            write_flat_to_writer(&mut good, value, &schema).unwrap();
+            shm::shfree(value).unwrap();
+            assert!(good.contains(&3), "{schema_str}");
+            let bad: Vec<u8> = good.iter().map(|&b| if b == 3 { 4 } else { b }).collect();
+            assert!(check_in_place(&good, &schema, 0, Origin::Outside).is_ok(), "{schema_str}");
+            shm::shfree(read_binary(&good, &schema).unwrap()).unwrap();
+            let e = check_in_place(&bad, &schema, 0, Origin::Outside).expect_err(&schema_str).to_string();
+            assert!(e.contains("enum tag 4 is out of range"), "{schema_str}: {e}");
+            assert!(read_binary(&bad, &schema).is_err(), "{schema_str}");
+        }
+    }
+
+    #[test]
     fn buffer_shift_of_a_header_run_matches_per_element() {
         let strs = parse_schema("as").unwrap();
         let tups = parse_schema("at1s").unwrap();
@@ -2979,5 +3316,56 @@ mod header_run_tests {
             shm::shfree(pa).unwrap();
             shm::shfree(pb).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod walk_touches_tests {
+    use super::*;
+    use crate::schema::parse_schema;
+
+    /// `n` elements of `elem`, every array header in each sized `size`.
+    fn elements(elem: &Schema, n: usize, size: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n * elem.width];
+        let slots = shallow_array_slots(elem).unwrap();
+        for i in 0..n {
+            for &(off, _) in &slots {
+                let at = i * elem.width + off;
+                out[at..at + 8].copy_from_slice(&size.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// ZIP-10: the walk counts the elements' slots, and a `Str` body only
+    /// when it checks text; a byte array's body it never reads.
+    #[test]
+    fn a_walk_counts_the_slots_and_the_text_it_checks() {
+        let elem = parse_schema("t2sau1").unwrap();
+        let n = 1000;
+        let buf = elements(&elem, n, 300);
+        let at = buf.as_ptr() as usize;
+        let whole = usize::MAX;
+        assert_eq!(unsafe { walk_touches(&elem, at, n, false, whole) }, n * elem.width);
+        assert_eq!(unsafe { walk_touches(&elem, at, n, true, whole) }, n * elem.width + n * 300);
+    }
+
+    /// ZIP-10: counting stops at the parallel threshold.
+    #[test]
+    fn a_walk_over_much_text_counts_to_the_threshold() {
+        let elem = parse_schema("s").unwrap();
+        let n = 4096;
+        let buf = elements(&elem, n, 64 << 10);
+        let got = unsafe { walk_touches(&elem, buf.as_ptr() as usize, n, true, usize::MAX) };
+        let min = PARALLEL_WALK_MIN_BYTES as usize;
+        assert!(got >= min && got < min + n * elem.width + (64 << 10), "{got}");
+    }
+
+    /// ZIP-10: an element whose pointers lead further may be read whole.
+    #[test]
+    fn a_walk_into_nested_values_may_read_the_whole_value() {
+        let elem = parse_schema("aas").unwrap().parameters[0].clone();
+        let buf = vec![0u8; 16 * elem.width];
+        assert_eq!(unsafe { walk_touches(&elem, buf.as_ptr() as usize, 16, true, 12345) }, 12345);
     }
 }

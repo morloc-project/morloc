@@ -1,0 +1,11 @@
+-- PKG-13: a Rust pool built in a managed environment links a library from
+-- P/lib and runs through a run path on P/lib, as a C++ pool does
+-- (spec-pkg-13-1). P is a fake prefix built here; the hook `true`
+-- provisions nothing.
+module main (answer)
+
+import root-rust
+
+source Rust from "src.rs" ("answer")
+
+answer :: Int -> Int

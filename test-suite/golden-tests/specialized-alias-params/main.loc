@@ -1,0 +1,19 @@
+-- A type alias with a specialized parameter (`Q Int b`) binds its variable
+-- to the argument in the variable's own position: `Q Int Real` is
+-- `(Real, Str)` in the wire schema and `[Real]` in the help text, alone,
+-- in a list and as a record field.
+module main (pairFst, listHead, fieldHead)
+
+import root-py
+
+type Q Int b = (b, Str)
+type L Int b = [b]
+
+record R where
+  x :: L Int Real
+
+source Py from "lib.py" ("pair_fst" as pairFst, "list_head" as listHead, "field_head" as fieldHead)
+
+pairFst :: Q Int Real -> Real
+listHead :: [L Int Real] -> Real
+fieldHead :: R -> Real

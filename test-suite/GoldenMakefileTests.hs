@@ -10,9 +10,10 @@ is discovered and run; none has to be registered anywhere.
 With @MORLOC_TEST_SHARD@ set, only this run's share of the directories is
 considered (see "GoldenShard").
 
-With @MORLOC_GOLDEN_SNAPSHOT@ set to a directory, the pool sources each test
+With @MORLOC_GOLDEN_SNAPSHOT@ set to a directory, the pool sources and manifests each test
 generated are copied under it (@<dir>/<test>/...@) before the test cleans
-up, so two runs can be compared file by file.
+up, so two runs can be compared file by file. A manifest records its build
+time, which differs between runs; compare manifests with it removed.
 
 A directory containing a @SKIP@ file is not run. The file's contents are the
 reason, listed once before the suite starts, so that a disabled test stays
@@ -146,8 +147,8 @@ makeManifoldFile path = do
     then void (runQuietly shims ["-C", abspath, "--quiet", "clean"])
     else return ()
 
--- | Copy the generated pool sources under a test directory's build trees
--- into @snap/<test>/@, keeping their paths relative to the test. Staging
+-- | Copy the generated pool sources and manifests under a test directory's
+-- build trees into @snap/<test>/@, keeping their paths relative to the test. Staging
 -- trees a killed build left behind (@*.tmp.<pid>@) are skipped.
 snapshotPools :: FilePath -> FilePath -> IO ()
 snapshotPools testdir snap = do
@@ -177,7 +178,7 @@ snapshotPools testdir snap = do
               entries <- map (p </>) <$> listDirectory p
               concat <$> mapM (visit (inPools || name == "pools")) entries
         else
-          return [p | inPools, takeExtension p `elem` [".rs", ".cpp", ".hpp", ".h", ".py", ".R", ".toml"]]
+          return [p | name == "manifest.json" || inPools && takeExtension p `elem` [".rs", ".cpp", ".hpp", ".h", ".py", ".R", ".toml"]]
 
 outputMatched :: FilePath -> IO Bool
 outputMatched dir = do

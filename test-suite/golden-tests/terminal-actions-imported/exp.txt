@@ -4,8 +4,7 @@ batch of 3
 batch of 2
 batch of 3
 --- twoSites --batches=b.out ---
-[1,2,3,4,5]
-[1,2,3,4,5]
+[1,2,3,4,5,1,2,3,4,5]
 batch of 2
 batch of 3
 batch of 2
@@ -35,8 +34,7 @@ other batch of 3
 other batch of 2
 other batch of 3
 --- other --batches=o.out ---
-[1,2,3,4,5]
-[1,2,3,4,5]
+[1,2,3,4,5,1,2,3,4,5]
 other batch of 2
 other batch of 3
 other batch of 2

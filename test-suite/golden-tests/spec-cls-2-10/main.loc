@@ -1,0 +1,36 @@
+-- Spec CLS-2: a method used at another type inside its own instance selects
+-- the instance for that type, in a definition checked with every term expanded
+-- in place. `tally []` leaves the list's element open, which expands `f`.
+module main (f, g)
+
+import root-py
+
+source Py from "foo.py" ("size", "evens", "first")
+
+size :: Str -> Int
+evens :: Int -> [Int]
+first :: [a] -> a
+
+class Tally f where
+  tally :: f a -> Str
+
+instance Tally List where
+  tally xs = "list"
+
+class Render a where
+  render :: a -> Str
+
+instance Render Int where
+  render x = "int"
+
+instance Render Str where
+  render s = "str:" <> render (size s)
+
+instance Render a => Render [a] where
+  render xs = "list:" <> render (first xs)
+
+f :: Int -> Str
+f n = tally [] <> ":" <> render "x"
+
+g :: Int -> Str
+g n = tally [] <> ":" <> render (evens n)

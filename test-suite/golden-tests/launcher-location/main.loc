@@ -1,0 +1,12 @@
+-- A launcher finds its build tree however it is invoked: by a relative or
+-- absolute path, through PATH, by `sh name` from its own directory, from a
+-- directory whose name holds a space, when it sits in `/`, and through file
+-- links: from another directory, as a relative chain of two, by an absolute
+-- target, by a relative target read from the link's physical directory, by
+-- `sh name`, through PATH, and handed to `morloc-nexus daemon`.
+module main (inc)
+
+import root-py
+
+inc :: Int -> Int
+inc x = x + 1

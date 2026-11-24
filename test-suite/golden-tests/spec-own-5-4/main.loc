@@ -1,0 +1,72 @@
+-- Spec OWN-5: in C++, a tuple or record field read from a value the frame
+-- owns, at that value's last read, is moved out. A payload is a list of
+-- 20000 or more ints; each export prints its result and the payloads
+-- copied (counted.hpp).
+--   tupleSlot   a loop slot rebuilt from its own tuple field
+--   recordSlot  a loop slot rebuilt from its own record field
+--   letAlias    a let naming a field of a value carried on, read only
+--   lentParam   a field of a value the callee only borrows
+--   readBefore  a field read through a let before it is moved
+--   readAfter   a field read through a let after a getter of it: the read runs
+--               first (OWN-2), so the getter moves it
+module main (tupleSlot, recordSlot, letAlias, lentParam, readBefore, readAfter)
+
+import root
+import root-cpp
+
+source Cpp from "counted.hpp" ("mkL", "grow", "keyL", "census")
+
+mkL :: Int -> [Int]
+grow :: [Int] -> Int -> [Int]
+keyL :: [Int] -> Int
+census :: Int -> (Int, Int)
+
+record R where
+  xs :: [Int]
+  k :: Int
+
+tupStep :: Int -> ([Int], Int) -> Int
+tupStep k t
+  ? k == 0 = keyL (.0 t) + .1 t
+  : tupStep (k - 1) (.0 t, k)
+
+tupleSlot :: Int -> (Int, Int)
+tupleSlot n = census (tupStep n (mkL 3, 0))
+
+recStep :: Int -> R -> Int
+recStep k r
+  ? k == 0 = keyL (.xs r) + .k r
+  : recStep (k - 1) {xs = .xs r, k = k}
+
+recordSlot :: Int -> (Int, Int)
+recordSlot n = census (recStep n {xs = mkL 3, k = 0})
+
+aliasStep :: Int -> ([Int], Int) -> Int -> Int
+aliasStep k t s
+  ? k == 0 = s + keyL (.0 t)
+  : (let u = (grow (.0 t) k, k) in let ys = .0 u in aliasStep (k - 1) u (s + keyL ys))
+
+letAlias :: Int -> (Int, Int)
+letAlias n = census (aliasStep n (mkL 0, 0) 0)
+
+useR :: R -> Int
+useR r = keyL (.xs r)
+
+lentParam :: Int -> (Int, Int)
+lentParam n = census (let r = {xs = mkL n, k = 1} in useR r + keyL (.xs r))
+
+keepStep :: Int -> ([Int], Int) -> Int
+keepStep k t
+  ? k == 0 = .1 t
+  : (let a = .0 t in keepStep (k - 1) (.0 t, .1 t + keyL a))
+
+readBefore :: Int -> (Int, Int)
+readBefore n = census (keepStep n (mkL 3, 0))
+
+afterStep :: Int -> ([Int], Int) -> Int
+afterStep k t
+  ? k == 0 = .1 t
+  : (let a = .0 t in let u = (.0 t, k) in afterStep (k - 1) (.0 u, .1 t + keyL a))
+
+readAfter :: Int -> (Int, Int)
+readAfter n = census (afterStep n (mkL 3, 0))

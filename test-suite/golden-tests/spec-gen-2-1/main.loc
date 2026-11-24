@@ -1,0 +1,13 @@
+-- GEN-2: a kind word the language does not define is a compile error that
+-- lists the language's kinds.
+module main (f)
+
+import root-py (idpy, Int)
+
+record P where
+  x :: Int
+
+record Py => P = dictt
+
+f :: P -> P
+f p = idpy p

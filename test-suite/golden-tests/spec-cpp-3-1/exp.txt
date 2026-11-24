@@ -4,6 +4,8 @@ rejected weak
 rejected shared
 rejected field
 rejected fnonly
+rejected dim
+rejected dimrec
 3
 3
 4

@@ -1,0 +1,24 @@
+module main (run)
+
+import root
+import root-cpp
+
+-- Counts the accumulator copies a C++ native fold makes per batch (FOLD-1).
+-- The step copies its accumulator once by design; the fold itself should
+-- add none, since it holds the checked-out value exclusively and can move
+-- it into the step. Large allocations per batch, as the difference between
+-- runs of N1 and N2 batches (fixed setup cancels).
+
+source Cpp from "count.hpp" ("produce", "initAcc", "step", "comb", "report")
+
+produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+initAcc :: [Int]
+step :: [Int] -> [Int] -> [Int]
+comb :: [Int] -> [Int] -> [Int]
+--' Large allocations so far
+report :: [Int] -> Int
+
+--' Fold n small batches into a large accumulator
+--' @with --n=report @fold=step @init=initAcc @combine=comb
+run :: Int -> <IO> (Collect Int)
+run n = @collect (produce n)

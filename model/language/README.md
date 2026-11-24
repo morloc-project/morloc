@@ -44,6 +44,8 @@ split later.
 | File | Prefix | Scope |
 |---|---|---|
 | [module-names.md](module-names.md) | MOD | modules, imports, exports, and which declaration a name refers to across modules |
+| [packages.md](packages.md) | PKG | package identity, install paths, origins, dependency pins, snapshots |
+| [planes.md](planes.md) | PLANE | one plane per environment; planes never mix |
 
 ### Types
 
@@ -54,6 +56,7 @@ split later.
 | [newtypes.md](newtypes.md) | NEWT | `newtype`: a distinct type over a representation, and conversion to and from it |
 | [deriving.md](deriving.md) | DERIV | `deriving` clauses: instances the compiler builds from a declaration |
 | [native-types.md](native-types.md) | NATIVE | per-language type mappings (`type Py => X = ...`, `record Cpp => R`) and their agreement |
+| [generated-types.md](generated-types.md) | GEN | kinds, names, files and imports of the native definitions the compiler generates |
 | [type-equality.md](type-equality.md) | TEQ | when two types are the same type |
 | [base-types.md](base-types.md) | BASE | `Unit`, `Bool`, `Str`: value spaces and operations |
 | [numbers.md](numbers.md) | NUM | `Int`, fixed-width integers, floats: value spaces, defaulting, arithmetic across languages |
@@ -117,7 +120,7 @@ other chapters.
 |---|---|---|
 | [commands.md](commands.md) | CMD | which exports become commands, and their names |
 | [arguments-and-output.md](arguments-and-output.md) | CLI | argument shapes, parsing, stdin, `@parse`, `@render`, output rendering |
-| [interfaces.md](interfaces.md) | IFACE | one call, the same meaning on the CLI, the daemon's HTTP and socket APIs, MCP and the serving front end |
+| [interfaces.md](interfaces.md) | IFACE | one function, the same call by import, the CLI, the daemon's HTTP and socket APIs, MCP and the serving front end |
 | [diagnostics.md](diagnostics.md) | DIAG | the compiler's error contract: never crash, every rejection located, warnings |
 
 Runtime processes, threads, locks and shared memory are `../runtime/`'s.

@@ -1,0 +1,35 @@
+-- GEN-13: `morloc types` writes a program's generated types under a
+-- directory, one subdirectory per language, for programs outside morloc: a
+-- C++ header tree, a Python package and a Rust crate, each built and used
+-- here with no morloc runtime on its paths.
+module main (pc, sc, cc, pr, sr, cr, pp)
+
+import root-cpp
+import root-rust
+import root-py
+
+record P where
+  x :: Int
+  name :: Str
+record Py => P = dataclass
+
+data Shape = Circle Real | Rect Real Real
+
+record Chain where
+  v :: Int
+  next :: ?Chain
+
+pc :: P -> P
+pc p = idcpp p
+sc :: Shape -> Shape
+sc s = idcpp s
+cc :: Chain -> Chain
+cc c = idcpp c
+pr :: P -> P
+pr p = idrust p
+sr :: Shape -> Shape
+sr s = idrust s
+cr :: Chain -> Chain
+cr c = idrust c
+pp :: P -> P
+pp p = idpy p

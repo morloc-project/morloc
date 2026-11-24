@@ -14,6 +14,11 @@ at parse time.
 module Morloc.LangRegistry
   ( LangRegistry (..)
   , LangRegistryEntry (..)
+  , TypeKinds (..)
+  , KindSpec (..)
+  , ClassKind (..)
+  , noTypeKinds
+  , classKindForms
   , emptyRegistry
   , buildDefaultRegistry
   , extendRegistry
@@ -27,6 +32,7 @@ module Morloc.LangRegistry
   , registryIsCompiled
   , registryRunCommand
   , registryAllowStringNull
+  , registryForkWorkers
   , registryMakeExtension
   , registryMakeExecutablePoolName
   , registryMakeSourcePoolName
@@ -36,8 +42,11 @@ module Morloc.LangRegistry
 
 import Data.Aeson ((.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import Data.Map.Strict (Map)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -64,14 +73,86 @@ data LangRegistryEntry = LangRegistryEntry
   -- boundary into a pool of this language. Defaults to True so older
   -- lang.yaml files without the key keep their permissive behaviour.
   , lreAllowStringNull :: !Bool
+  -- | The language's pool forks its workers (NET-9, FOLD-9).
+  , lreForkWorkers :: !Bool
   -- | The pool host language for a co-located "member" language. When set
   -- (e.g. futhark's @host: cpp@), this language has no pool of its own; its
   -- manifolds are compiled into the host language's pool binary and a call
   -- across the boundary is in-process, not a socket foreign call. Nothing for
   -- ordinary languages, which host their own pool. See 'poolOf'.
   , lreHost :: !(Maybe Text)
+  -- | The record kinds the language generates definitions for (GEN-2).
+  , lreTypeKinds :: !TypeKinds
   }
   deriving (Show)
+
+-- | A language's record kinds and its default kind (GEN-2), from the
+-- @generated_types@ section of its lang.yaml.
+data TypeKinds = TypeKinds
+  { tkRecordDefault :: Maybe Text
+  , tkRecordKinds :: Map Text KindSpec
+  , tkPrefix :: Maybe Text
+  -- ^ The package or namespace a class kind's generated classes live under
+  -- (GEN-4), for languages whose names are dotted module paths.
+  }
+  deriving (Show, Eq)
+
+-- | One kind: the form text the compiler carries for a record of this
+-- kind, and the strings a program may still write for it (GEN-3).
+data KindSpec = KindSpec
+  { ksForm :: Text
+  , ksLegacy :: [Text]
+  , ksClass :: Maybe ClassKind
+  -- ^ Set when a record of this kind is an instance of a generated class.
+  }
+  deriving (Show, Eq)
+
+-- | How a generated class holds its fields (GEN-11).
+data ClassKind = DataclassKind | PydanticKind
+  deriving (Show, Eq, Ord)
+
+noTypeKinds :: TypeKinds
+noTypeKinds = TypeKinds Nothing Map.empty Nothing
+
+-- | The forms of a language's class kinds (GEN-11), with each one's class.
+classKindForms :: TypeKinds -> Map Text ClassKind
+classKindForms tk = Map.fromList [(ksForm k, c) | k <- Map.elems (tkRecordKinds tk), Just c <- [ksClass k]]
+
+instance Aeson.FromJSON TypeKinds where
+  parseJSON = Aeson.withObject "generated_types" $ \o -> do
+    onlyKeys "generated_types" ["records", "prefix"] o
+    prefix <- o .:? "prefix"
+    recs <- o .:? "records"
+    case recs of
+      Nothing -> return noTypeKinds {tkPrefix = prefix}
+      Just r -> flip (Aeson.withObject "generated_types.records") r $ \ro -> do
+        onlyKeys "generated_types.records" ["default", "kinds"] ro
+        def <- ro .: "default"
+        kinds <- ro .: "kinds"
+        if not (Map.member def kinds)
+          then fail $ "generated_types.records.default names `" <> T.unpack def <> "`, which is not one of its kinds"
+          else
+            if any (isJust . ksClass) (Map.elems kinds) && isNothing prefix
+              then fail "generated_types declares a class kind but no prefix for its classes"
+              else return (TypeKinds (Just def) kinds prefix)
+
+instance Aeson.FromJSON KindSpec where
+  parseJSON = Aeson.withObject "record kind" $ \o -> do
+    onlyKeys "record kind" ["form", "legacy", "class"] o
+    cls <- o .:? "class"
+    cls' <- case cls :: Maybe Text of
+      Nothing -> return Nothing
+      Just "dataclass" -> return (Just DataclassKind)
+      Just "pydantic" -> return (Just PydanticKind)
+      Just other -> fail $ "record kind class `" <> T.unpack other <> "` is not one of dataclass, pydantic"
+    KindSpec <$> o .: "form" <*> o .:? "legacy" .!= [] <*> pure cls'
+
+-- | Refuse an object holding a key outside the given set, so a misspelled
+-- key in a descriptor is an error rather than silently ignored.
+onlyKeys :: String -> [Text] -> Aeson.Object -> Y.Parser ()
+onlyKeys what allowed o = case [k | k <- map AK.toText (KM.keys o), k `notElem` allowed] of
+  [] -> return ()
+  ks -> fail $ what <> " has unknown keys " <> show ks <> "; its keys are " <> show allowed
 
 emptyRegistry :: LangRegistry
 -- | No languages and no preference, until languages.yaml is read.
@@ -166,6 +247,10 @@ registryAllowStringNull reg name = case Map.lookup name (lrEntries reg) of
   Just entry -> lreAllowStringNull entry
   Nothing -> True
 
+-- | True if the language's pool forks a worker per call (FOLD-9).
+registryForkWorkers :: LangRegistry -> Text -> Bool
+registryForkWorkers reg name = maybe False lreForkWorkers (Map.lookup name (lrEntries reg))
+
 registryMakeExtension :: LangRegistry -> Text -> String
 registryMakeExtension reg name = case Map.lookup name (lrEntries reg) of
   Just entry -> lreExtension entry
@@ -192,7 +277,9 @@ data LangYamlMeta = LangYamlMeta
   , lymSerialType :: Text
   , lymPreamble :: [Text]
   , lymAllowStringNull :: Bool
+  , lymForkWorkers :: Bool
   , lymHost :: Maybe Text
+  , lymTypeKinds :: TypeKinds
   }
   deriving (Show)
 
@@ -207,7 +294,9 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "serial_type" .!= "bytes"
       <*> o .:? "preamble" .!= []
       <*> o .:? "allow_string_null" .!= True
+      <*> o .:? "fork_workers" .!= False
       <*> o .:? "host"
+      <*> o .:? "generated_types" .!= noTypeKinds
 
 newtype LanguagesYaml = LanguagesYaml {lysLanguageOrder :: [Text]}
   deriving (Show)
@@ -224,7 +313,9 @@ entryFromYaml ly =
     , lreSerialType = lymSerialType ly
     , lrePreamble = lymPreamble ly
     , lreAllowStringNull = lymAllowStringNull ly
+    , lreForkWorkers = lymForkWorkers ly
     , lreHost = lymHost ly
+    , lreTypeKinds = lymTypeKinds ly
     }
 
 -- | Parse a lang.yaml file from the filesystem, returning (canonical name, extension)

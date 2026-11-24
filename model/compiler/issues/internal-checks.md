@@ -1,53 +1,37 @@
 # Internal invariants checked silently or not at all
 
-- **Plain `zip` truncates.** [read, 2026-10-23] About 340 `zip`/`zipWith`
-  calls in library/ pair lists the compiler assumes have equal length; a
-  mismatch drops elements instead of failing. One instance (a command's
-  documented arguments vs its wire forms in Nexus.hs validateArgSpecs and
-  argsJson) now fails as an internal error. Morloc.Internal already has
-  safeZip/safeZipWith/safeZipWithM; sweep the zips over lists whose lengths
-  are an invariant to those, failing loudly. [read, 2026-10-29] Candidates
-  found: Serialize.hs carriedTypes (loop ids), Express.hs lambdaTypeMap
-  (missing types become untyped), EffectBoundary.hs adaptCallbackParams
-  (extra parameters go unadapted), HostProvenance.hs `zipWith fit (dataKids
-  t) ps` (two sites unguarded, a third guarded), Valuecheck.hs TupP.
-
 The entries below are fallbacks that turn an impossible shape into wrong
 output. Spec gap: no item says an internal invariant fails loudly. Type
 changes that remove each class are in /work/plans/gadt/type-audit.md. All
 [read, 2026-10-29].
 
-- **Ownership lowering skips its work on a mismatch.** Grammars/Translator/
-  Imperative.hs lowers a node from its folded layer plus the original node
-  passed separately, and re-pairs them by shape and length. adaptOwnedElems,
-  keepElems and storeElems return their input when lengths differ; the
-  `elemEs`/`slotTypes` re-matches of origExpr fall to `[]`; argOwnerships
-  defaults to `repeat Owned`; the loop-body pass and bindCallArgs pass
-  through; several plain zipWith/zipWith3 over owners and arguments. A
-  misalignment would show up as a copy or borrow error in C++/Rust, not as
-  a compiler error.
-- **Name-prefix tuple tests.** `isPrefixOf "Tuple"` decides tuple-ness in
-  Rust.hs rustIsCopy, isVarWidthF and tupleArgs, Desugar.hs
-  extractConstraints (two sites) and Typecheck/Internal.hs
-  classifyTupleShape. TypeNames.hs reserves only `Tuple<digits>`, so a user
-  type `TupleFoo` counts as a tuple. [reproduced 2026-11-01] A class
-  named `TupleLike` is read as a tuple of constraints (Desugar.hs
-  extractConstraints): /work/plans/error-clusters/repro/tuple-prefix-class.loc fails to
-  typecheck, and the same file with the class renamed `PairLike` passes.
-  Elsewhere such a type is assumed Copy, sized by schema width,
-  projected with `.0`. A `TupleFoo` alias typechecks and indexes correctly
-  (/work/plans/gadt/repro/idx-TupleFoo.loc); the Rust effects were not
-  built.
-- **Intrinsic arguments left unchecked.** Typecheck.hs: the
+- **A data type's declared parameters paired with its arguments.** [read,
+  2026-11-05] CodeGenerator/Infer.hs (needed, inferVariantArms),
+  CodeGenerator/Serial.hs (appliedTypeToSerialAST) and TypeEval.hs
+  (dataCtorsOf) pair the parameters a `data` declaration gives, which drop a
+  specialized one, with its arguments, exactly. Not reachable today: the
+  frontend refuses a bare parameterized `data` (arity check) and a `data`
+  with a specialized parameter (`data Box Int b = Full b | Empty`). That
+  refusal is unclear, though: "Cannot compare types Box b@q0 and Box Int
+  b@q0" at the declaration [reproduced]. Namespace/Type.hs paramPairs
+  pairs both cases if specialized `data` parameters are ever allowed.
+- **Pairings whose lengths only an earlier check guarantees.** [read,
+  2026-11-05] Restructure.hs checkAliasApplications: the kind check reads
+  the first scope entry as an alias while the arity check requires every
+  entry to be one, so a name with mixed entries would skip the arity check
+  and reach the exact pairing (no such program found: conflicting
+  declarations are refused first). Namespace/Type.hs paramPairs: its
+  fallback faults when an application has more arguments than variable
+  parameters; Serial.hs appliedTypeToSerialAST calls it unguarded.
+  TypeEval.hs dataCtorsOf is given no arguments for a bare head.
+- **Intrinsic arguments left unchecked.** Typecheck.hs:2142: the
   checkIntrinsicArgs catch-all `_ -> return g` accepts an intrinsic with no
-  listed case, or a listed one at an unlisted arity, without checking its
-  arguments. Ownership.hs: an intrinsic
+  listed case without checking its arguments (an arity `intrinsicArity`
+  fixes is refused first, :2098). Ownership.hs:154-155: an intrinsic
   argument pattern `(x : _)` falls through to Nothing.
 - **Selector leaf with a missing key is dropped.** Typecheck/Internal.hs
   selectorGetter `maybe [] ...` drops the leaf, so a multi-key selection
   yields a shorter tuple.
-- **Valuecheck record comparison.** NamP checks only that the first
-  record's keys are in the second, so extra keys pass.
 - **Effect variables dropped.** Namespace/Type.hs resolveEffectSet turns an
   unsolved effect variable into no effect when casting to Type.
 - **Unknown type becomes passthrough.** Serialize.hs turns an UnkF argument
@@ -59,11 +43,13 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
   recursive mapping loses them. Rust.hs renders RecF from the CVar slot
   that Namespace.hs documents as unreliable (C++ looks the name up in
   cscope instead).
-- **Closure capture types filtered, then zipped.** Rust.hs and Cpp.hs build
-  `ctxTs` by filtering captures with a native type, then zip it with the
-  closure table's schemas; one untyped capture misaligns the rest.
-- **Futhark tuple input passed unmarshalled.** Guest/Futhark.hs marshalIn
-  `(FTTuple Nothing _)` returns the host expression unchanged.
-- **Variant merge drops a constructor.** Grammars/Common.hs
-  mergeVariantOccurrences takes the longer occurrence's names, so on equal
-  lengths a constructor present only in the other occurrence is lost.
+- **Closure capture types filtered, then paired.** Rust.hs:1714 and
+  Cpp.hs:686 build `ctxTs` by keeping only captures with a native type
+  (`orNativeType`), then pair it with the closure table's schemas
+  (`zip3Same` Rust.hs:1729, `zipSame` Cpp.hs:694); one untyped capture is
+  a compiler fault rather than a located error, and the filter hides which
+  capture it was.
+- **Two tuple pairings bypass Morloc.Data.Zip.** [read, 2026-11-14]
+  Cleanup. Frontend/Typecheck.hs:1279 and :2748 pair with `NE.zip es0
+  slots`; the lengths are equal by construction, but the repo rule is to
+  pair through `Morloc.Data.Zip` (`zipSame`).

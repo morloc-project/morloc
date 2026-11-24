@@ -12,13 +12,15 @@
 --   POST /call/echo?render=plain   -> a @render with no @mime: its bytes as
 --                                     `text/plain; charset=utf-8`
 --   POST /call/echo?render=size    -> a typed @with action: JSON
+--   POST /call/pieces?render=text  -> 400: a streamed render reaches a caller
+--                                     only from the command line (DAEMON-15)
 --
 -- The same selections over the socket protocol and MCP (IFACE-6, IFACE-7).
 --
 -- `PlainText = Str` carries `@mime text/plain`, so a value of that type is served
 -- as raw bytes with the media type rather than the JSON envelope. Str keeps this
 -- test free of numpy/Pillow.
-module main (echo, guarded, readFrom)
+module main (echo, guarded, readFrom, pieces)
 
 import root-py
 
@@ -30,11 +32,15 @@ source Py from "render.py"
   , "shout"    as shout
   , "whisper"  as whisper
   , "size"     as size
+  , "mk"
+  , "render_pieces" as renderPieces
   )
 
 shout :: Str -> PlainText
 whisper :: Str -> Str
 size :: Str -> Int
+mk :: Int -> [Int]
+renderPieces :: [Int] -> [Str]
 
 --' Echo a string; the shouting renderer is the default projection.
 --' @render -s/--shout=shout @default
@@ -53,3 +59,13 @@ readFrom f = do
   Ok xs <- @next fi
   xs
 
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 2)
+  sink (mk 3)
+
+--' Batches of numbers, streamed or whole
+--' @render -t/--text=renderPieces @stream
+--' @render -w/--whole=renderPieces
+pieces :: Int -> <IO> (Collect Int)
+pieces n = @collect produce

@@ -25,6 +25,8 @@ mod layout_bench;
 #[cfg(test)]
 mod layout_props;
 #[cfg(test)]
+mod leaf_props;
+#[cfg(test)]
 mod pins;
 pub mod packet;
 pub mod shm;
@@ -49,7 +51,8 @@ pub mod cschema;
 pub mod ffi;
 pub mod utility;
 pub mod cache;
-pub mod cell;
+pub mod fork_side;
+pub mod fold;
 pub mod intrinsics;
 pub mod voidstar;
 pub mod origin;
@@ -65,6 +68,7 @@ mod c_abi_prototypes;
 pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
+mod leaf_copy;
 mod stream_walk;
 mod stream_format;
 mod write_behind;
@@ -76,6 +80,8 @@ pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod delimited;
 pub mod pool_ffi;
+pub mod par_pool;
+pub mod cpus;
 pub mod fork_pool;
 pub mod crash;
 pub mod daemon_ffi;

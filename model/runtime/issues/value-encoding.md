@@ -6,15 +6,15 @@
   literal as a plain double, so one above 2^53 is rounded. Mapping U64 to
   "bit64" instead makes a U64 list literal `c(5L, bit64::as.integer64(..))`,
   whose `c` dispatches on its first argument and strips the class.
-- **Missing record keys accepted.** [read] Violates REC-2. R
-  (rmorloc.c:826-829, 1535-1538) skips a missing key: a number becomes 0,
-  an optional becomes pointer 0 (volume 0) instead of null. (Python raises
-  a KeyError.)
-- [read] morloc-runtime/src/mpack.rs:413-414: Int limbs copied to an
-  unaligned cursor; json.rs:1462 reads them as `*const u64`.
-- [read] mpack.rs:398-416: an 8-byte `bin` Int stores size 1 and a relptr,
+- **A record value missing an optional field.** [read, 2026-11-11] Gap
+  (REC-2 covers literals only): R writes a missing `?T` field as null, so
+  that `x$f <- NULL` keeps working; Python raises a KeyError for any
+  missing key. Which a foreign record value may do needs a ruling; deferred to the record work (user, 2026-11-12).
+- [read] morloc-runtime/src/mpack.rs:404-405: Int limbs copied to an
+  unaligned cursor.
+- [read] mpack.rs:397-405: an 8-byte `bin` Int stores size 1 and a relptr,
   which readers take as the inline value.
-- [read] voidstar.rs `headers` (~486): a shared-memory rebase sets an empty
+- [read] voidstar.rs `headers` (:479): a shared-memory rebase sets an empty
   array's data to the window's low end instead of keeping null; empty
   arrays have no canonical form.
 - **Python and R quiet signalling NaNs in `F32` scalars.** [read] Breaks
@@ -51,8 +51,8 @@
   54585374). `summarize :: Table n {state = Str, pop = Int} -> Int;
   summarize t = fold (+) 0 (getCol "pop" t)` with root-py, table-py and
   vector-py fails for every input, JSON included: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:890 py_size_step, the
-  `PyLong_Check` in the MORLOC_INT arm, unchanged since 139b83e1). Cause
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:961 py_size_step and
+  :1408 in the writer, the `PyLong_Check` in the MORLOC_INT arm). Cause
   unknown: what changed is that the fold now yields a numpy scalar.
 - **Multi-limb `Int` overflow messages omit the value.** [reproduced,
   2026-10-21] Violates WIRE-3. Python `x * 2**70` into Rust `Int`:
@@ -61,8 +61,8 @@
   in 32-bit type". Single-limb messages name the value. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/wire/w3.loc.
 - **Python reads a `Bool` byte through `*(bool*)`.** [read, 2026-10-21]
-  Violates WIRE-8. data/lang/py/pymorloc.c:1806 `PyBool_FromLong(*(bool*)
-  data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:1618), C++
+  Violates WIRE-8. data/lang/py/pymorloc.c:1910 `PyBool_FromLong(*(bool*)
+  data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:2148), C++
   and Rust compare a `uint8_t`.
 - **Packet landing is checked by convention, not by type.** [read,
   2026-10-21] `@load` and pool sidecar loads go through
@@ -72,8 +72,7 @@
   `voidstar::land_compressed_frames` and `read_binary_with_hint`
   still accept any schema, so a new caller can skip the check. A
   `CheckedSchema` value only the check can make would close that.
-  `packet::get_data_value` (pool IPC) and cache.rs's reads of cached
-  packets land without comparing schemas; a cache file is not trusted
+  cache.rs's reads of cached packets land without comparing schemas; a cache file is not trusted
   input. A packet with no schema entry is refused.
   `load_packet_file` opens a small file up to four times (header peek,
   each fast path, the read) and reads the header three times; one read of
@@ -84,3 +83,74 @@
   same offsets. `test_enum_roundtrips_through_render` skips any case that
   does not parse (`if let Ok`), so its `e1` and
   `e21Aa_long_constructor_name` cases test nothing.
+- **An enum tag read through an IFile is not checked.** [read 2026-11-04]
+  Violates WIRE-10. Uncompressed, aligned IFile sub-packets are served from
+  the mapping (stream.rs `SubpacketSrc::File`); the bracket and slice paths
+  (`ifile_bracket_index_against_slot`, `slice_runs`/`copy_runs`, which
+  call `adjust_records_within` with no check) never reach the landing
+  check, so an IFile `[DNA]` with a tag of 4 reaches the language. A scalar
+  enum argument is also never read from a file (nexus-cli.md).
+- **Safe Rust functions dereference raw pointers.** [read, 2026-11-02]
+  json.rs `write_json`, `voidstar_to_json_string`, `print_voidstar_raw` and
+  `voidstar_raw_to_bytes` are safe `pub fn`s that dereference an `AbsPtr`
+  their caller passes.
+- [reproduced, 2026-11-05] Spec gap (model/language/native-types.md says
+  nothing of recursive types with a Packable inside them). A recursive
+  type with a packed value inside its cycle (`record Tree where label :: Lbl; children :: [Tree]`, `Lbl` with
+  a Packable instance) cannot cross languages: the serializer walks the
+  type once and a back-reference is written raw, so inner labels reached
+  the runtime unpacked ("Expected int for MORLOC_INT, but got Lbl"; "no
+  marshaller for a value of this C++ type"). Refused at compile time now
+  where such a value is serialized or deserialized (golden
+  recursive-record-packed-field); a single-pool use still builds.
+  Intrinsics that write a value themselves (@write, cells, streams) are not
+  checked and keep the run-time failure [read]. The fix is a recursive
+  packer per language, generated at the back-reference.
+- [reproduced, 2026-11-05] A newtype whose C++ form differs from its wire
+  parent and that has no Packable instance builds, and fails at run time:
+  `newtype Handle = Int` with `type Cpp => Handle = "handle_t"`, produced
+  by a C++ source and passed through Python, gives "no marshaller for a
+  value of this C++ type (schema type 18)". Spec gap (native-types.md,
+  newtypes.md): whether a newtype with its own form needs a packer depends
+  on whether the language's runtime can build that native form from the
+  wire form; Python builds `bytes` from a Str (golden newtype-wire-parent),
+  C++ has no marshaller for a user struct. A compile-time check needs a
+  per-language statement of which native forms each wire form may become.
+  Reproduction:
+  /work/plans/error-clusters/repro/newtype-form-no-packer.
+- **A top-level Table may stream as its slot alone.** [speculative,
+  2026-11-12] `write_flat_to_writer` (voidstar.rs) emits only the slot
+  width for a top-level Table, and `-f packet` output of a by-reference
+  result with a voidstar Table streams through it; `normalize` excludes
+  only ARROW-format tables. `write_flat_padded` writes a top-level Table
+  as its whole block, which suggests the plain writer is wrong there. Not
+  reproduced: a CSV-read (Arrow) Table round-trips through `-f packet`;
+  a voidstar Table returned by reference is the untested case.
+- **Decoders size their own writes instead of using the slot's width.**
+  [read, 2026-11-13] The JSON and msgpack decoders wrote one byte for a
+  unit, whose slot is 0 bytes (FMT-6), past the end of a record ending in
+  one (fixed). The class remains: each decoder passes its own size to its
+  writer rather than the schema width, and mpack.rs states in a SAFETY
+  comment that "each write respects the slot's width" with nothing
+  checking it. A writer bounded by the slot's width would make an overrun
+  fail. Arrow, table and CLI-shape decoders were covered only by a
+  suite-wide audit (no stray frees), not by reading.
+- **A Rust value at an Int schema is taken to be inline.** [read,
+  2026-11-18] Gap in WIRE-3. rustmorloc's WriteWalk::child writes a leaf at
+  an Int schema at once even while deferring, and write_seq_in_place sizes
+  a list of Int elements as a run of slot widths, whatever the Rust type: a
+  user ToVoidstar impl at an Int schema that writes a multi-limb integer
+  (a tail) would be deferred wrongly or overrun its run. Only the built-in
+  integers (ToVoidstar::INLINE) are known to be inline; the converted-field
+  shortcut checks INLINE, these two sites do not.
+- **A Rust value of a non-`Clone` native type read twice does not build.**
+  [read, 2026-11-20] Needs a ruling. A field projection that is not the
+  subject's last read (FieldCopy, Members/Rust.hs `lcCtorField`), and a
+  user-written arm's field (`MlcField::unfield`), clone the field, so a
+  pattern that binds several fields of a subject, or reads a subject again,
+  over a sourced type that is not `Clone` stops at a rustc error. A copy is
+  needed there, so the choices are a morloc diagnostic (which needs to know
+  whether the type is `Clone`), a ruled `Clone` requirement, or binding by
+  reference where the code after it only borrows. The last read of a
+  subject moves the payload out, or fails the call when it is shared
+  (`mlc_copy!`, golden rust-bind-non-clone).

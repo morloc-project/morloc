@@ -1,0 +1,91 @@
+-- Spec APP-4 and APP-1: instances on function types, as Haskell's printf, QuickCheck's Testable
+-- and the pointwise Semigroup of functions use them. `format` takes any
+-- number of numbers because its instance at `Int -> r` builds the next
+-- format; `check` tests a property of any number of arguments; `<>` joins
+-- two functions into one that joins their results. Of `Arity`'s instances
+-- at `a -> b` and `a -> b -> c`, a function of two numbers takes the second,
+-- the more specific.
+module main (line1, line3, commutes, subtractionCommutes, banner, arityOfInc, arityOfAdd)
+
+import root-r
+
+--' Text from a format string and the numbers that follow it
+class Format r where
+  format :: Str -> r
+
+instance Format Str where
+  format s = s
+
+instance Format r => Format (Int -> r) where
+  format s = \n -> format (s <> " " <> @show n)
+
+--' A format with one number
+line1 :: Int -> Str
+line1 a = format "a =" a
+
+--' A format with three numbers
+line3 :: Int -> Int -> Int -> Str
+line3 a b c = format "abc =" a b c
+
+--' A property, true for every argument tried
+class Testable p where
+  check :: p -> Bool
+
+instance Testable Bool where
+  check b = b
+
+instance Testable p => Testable (Int -> p) where
+  check f = all (\x -> check (f x)) [0, 1, 2, 3]
+
+--' Whether addition commutes on the numbers tried
+commutes :: Bool
+commutes = check plusCommutes
+
+--' Whether x + y equals y + x
+plusCommutes :: Int -> Int -> Bool
+plusCommutes x y = x + y == y + x
+
+--' Whether subtraction commutes on the numbers tried
+subtractionCommutes :: Bool
+subtractionCommutes = check minusCommutes
+
+--' Whether x - y equals y - x
+minusCommutes :: Int -> Int -> Bool
+minusCommutes x y = x - y == y - x
+
+instance Semigroup b => Semigroup (a -> b) where
+  (<>) f g = \x -> f x <> g x
+
+greet :: Str -> Str
+greet n = "Hello, " <> n
+
+exclaim :: Str -> Str
+exclaim n = "!"
+
+--' A greeting built from two functions joined pointwise
+banner :: Str -> Str
+banner name = (greet <> exclaim) name
+
+--' How many arguments a function takes, by its most specific instance
+class Arity f where
+  arity :: f -> Int
+
+instance Arity (a -> b) where
+  arity f = 1
+
+instance Arity (a -> b -> c) where
+  arity f = 2
+
+inc :: Int -> Int
+inc x = x + 1
+
+add :: Int -> Int -> Int
+add x y = x + y
+
+--' The arity a one-argument function is given
+arityOfInc :: Int
+arityOfInc = arity inc
+
+--' The arity a two-argument function is given
+arityOfAdd :: Int
+arityOfAdd = arity add

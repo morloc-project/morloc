@@ -36,9 +36,9 @@ one() {
       --checks='-*,bugprone-use-after-move,bugprone-dangling-handle,clang-analyzer-cplusplus.Move' \
       "$f" -- -std=c++20 -nostdinc++ $gccinc -include morloc_pch.hpp \
       -I"$prefix/include" -I"$state/modules/include" \
-      -I"$state/modules/include/tensor-cpp" -I"$(dirname "$f")" \
+      -I"$state/modules/include/std/tensor-cpp" -I"$(dirname "$f")" \
       -iquote "$golden/$t" -idirafter "$golden/$t" \
-      -iquote "$state/src/morloc/plane/default/root-cpp" 2>&1) || status=$?
+      -iquote "$state/src/morloc/plane/std/root-cpp" 2>&1) || status=$?
   echo "$out" | grep -E "^$f:[0-9]+:[0-9]+: warning:|error:" | sed "s|^|$t: |" || true
   # clang-tidy exits 1 for errors it printed; anything else is a failure of
   # its own.

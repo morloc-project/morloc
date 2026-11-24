@@ -1,0 +1,39 @@
+--' A user type named like a tuple is not a tuple
+--'
+--' `TupleBox` is a newtype over a list: Rust passes it by reference
+--' (`size`), and a record holding one has a variable-width size walk
+--' (`wrap`, with a large vector).
+module main (size, wrap)
+
+import root-rust
+
+--' A boxed list
+newtype TupleBox a = [a]
+type Rust => (TupleBox a) = "Vec<$1>" a
+
+--' A record holding a box
+record R where
+  --' The box
+  b :: TupleBox Int
+  --' A count
+  n :: Int
+record Rust => R = "R"
+
+source Rust from "box.rs" ("mkbox", "boxlen", "mkrec")
+
+--' Box the numbers 0 to n
+mkbox :: Int -> TupleBox Int
+
+--' The length of a box
+boxlen :: TupleBox Int -> Int
+
+--' A record holding a box of n numbers
+mkrec :: Int -> R
+
+--' The length of a fresh box
+size :: Int -> Int
+size x = boxlen (mkbox x)
+
+--' A record holding a box of n numbers
+wrap :: Int -> R
+wrap = mkrec

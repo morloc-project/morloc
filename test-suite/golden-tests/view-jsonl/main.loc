@@ -15,7 +15,6 @@ import root
 record Person where
   name :: Str
   age :: Int
-record Py => Person = "dict"
 
 mkListInt :: Str -> <IO> ()
 mkListInt path = do

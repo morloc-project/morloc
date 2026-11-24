@@ -167,7 +167,19 @@ pub struct ShmHeader {
     /// below this; growth takes `grow_lock` to create the next one.
     pub next_index: std::sync::atomic::AtomicU32,
     pub grow_lock: crate::recoverable_lock::RecoverableLock,
+    /// SHM-18: `VOLUME_GENERAL` or `VOLUME_LARGE`.
+    pub kind: std::sync::atomic::AtomicU32,
+    /// SHM-18: in a large volume, the bytes of its block's data from the
+    /// start that are committed.
+    pub committed: std::sync::atomic::AtomicUsize,
+    /// SIDE-11: in the primary volume, the next process ordinal to draw.
+    pub next_ordinal: std::sync::atomic::AtomicU64,
 }
+
+/// SHM-18
+pub const VOLUME_GENERAL: u32 = 0;
+/// SHM-18
+pub const VOLUME_LARGE: u32 = 1;
 
 const _: () = assert!(std::mem::size_of::<ShmHeader>() % std::mem::align_of::<BlockHeader>() == 0);
 
@@ -180,10 +192,7 @@ const _: () = assert!(std::mem::size_of::<ShmHeader>() % std::mem::align_of::<Bl
 /// is itself sixteen bytes, so data starts one header past a
 /// sixteen-aligned block and is sixteen-aligned in turn.
 ///
-/// Every field is atomic: a holder of a stale pointer reads the header with
-/// no lock while the allocator rewrites it under the volume lock. Ordering
-/// comes from the lock and the reference count's CAS, so the other two
-/// fields are read and written relaxed.
+/// Every field is atomic (SHM-13).
 #[repr(C, align(16))]
 pub struct BlockHeader {
     magic: AtomicU32,
@@ -194,11 +203,12 @@ pub struct BlockHeader {
 impl BlockHeader {
     #[inline]
     pub fn magic(&self) -> u32 {
-        self.magic.load(std::sync::atomic::Ordering::Relaxed)
+        self.magic.load(std::sync::atomic::Ordering::Acquire)
     }
+    /// SHM-13
     #[inline]
     pub fn set_magic(&self, m: u32) {
-        self.magic.store(m, std::sync::atomic::Ordering::Relaxed)
+        self.magic.store(m, std::sync::atomic::Ordering::Release)
     }
     /// The data bytes the block covers.
     #[inline]

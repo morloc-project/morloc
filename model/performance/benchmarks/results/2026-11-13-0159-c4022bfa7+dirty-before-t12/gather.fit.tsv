@@ -1,0 +1,10 @@
+# gather 2026-11-13 01:59 load=0.51 load_max=0.74 morloc=0.112.0 commit=c4022bfa7+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-11	cpp.gather.b	1.81926	s/GiB	r2=0.9999
+ENC-11	cpp.control.b	0.0540046	s/GiB	r2=0.9879
+ENC-11	cpp.extra	1.76526	s/GiB	gather slope over the control's
+ENC-11	cpp.offcpu	-0.746559	s/GiB	off-CPU slope over the control's, r2=0.9990
+ENC-11	py.gather.b	9.12573	s/GiB	r2=0.9995
+ENC-11	py.control.b	1.10681	s/GiB	r2=0.9988
+ENC-11	py.extra	8.01891	s/GiB	gather slope over the control's
+ENC-11	py.offcpu	-0.689133	s/GiB	off-CPU slope over the control's, r2=0.9688

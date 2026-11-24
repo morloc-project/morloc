@@ -1,0 +1,43 @@
+-- A streamed render whose handler returns a list of pieces (`[Str]` or
+-- `[[U8]]`, CLI-8) writes each batch's pieces in order with nothing added
+-- between pieces or batches; a whole render of the same handler writes the
+-- same pieces in one run. Empty batches, empty pieces, batches of thousands
+-- of pieces and compressed batches included, in C++ and Python.
+module main (pieces, bytes, big)
+
+import root-cpp
+
+source Cpp from "impl.hpp" ("mk", "renderPieces", "renderBytePieces", "manyPieces")
+
+--' Batch n: the n numbers 10n to 10n+n-1
+mk :: Int -> [Int]
+--' A batch as text pieces, ending in a newline; none for an empty batch
+renderPieces :: [Int] -> [Str]
+--' A batch as byte pieces, ending in a newline; none for an empty batch
+renderBytePieces :: [Int] -> [[U8]]
+--' Each number as 1000 pieces, one per line
+manyPieces :: [Int] -> [Str]
+
+--' Send batches 2, 0 and 3 to a sink
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 2)
+  _ <- sink (mk 0)
+  sink (mk 3)
+
+--' Stream each batch as text pieces
+--' @render -t/--text=renderPieces @stream @default
+--' @render -w/--whole=renderPieces
+pieces :: Int -> <IO> (Collect Int)
+pieces n = @collect produce
+
+--' Stream each batch as byte pieces
+--' @render -b/--bytes=renderBytePieces @stream @default
+--' @render -w/--whole=renderBytePieces
+bytes :: Int -> <IO> (Collect Int)
+bytes n = @collect produce
+
+--' Stream each batch as many text pieces
+--' @render -t/--text=manyPieces @stream @default
+big :: Int -> <IO> (Collect Int)
+big n = @collect produce

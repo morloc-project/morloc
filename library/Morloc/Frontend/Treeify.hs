@@ -16,12 +16,17 @@ input to the typechecker and code generator.
 module Morloc.Frontend.Treeify
   ( treeify
   , Validation (..)
+  , contractTrees
+  , definitionTree
+  , unsignedDefs
+  , firstPerTerm
+  , instanceBodyTree
+  , instanceBodySites
   , collectRoot
   , recName
   ) where
 
 import qualified Data.Set as Set
-import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -32,7 +37,9 @@ import qualified Morloc.Frontend.Link as MFL
 import Morloc.Frontend.Rename (displayName, renameLocals)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (collectEffLabels, instanceArgHead)
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.Frontend.Instances (MethodTerm (..))
+import Morloc.Typecheck.Internal (collectEffLabels, instanceArgHead, patternAccessibleMethod, structuralMethods)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Config as MC
 import Control.Monad.IO.Class (liftIO)
@@ -41,8 +48,8 @@ import qualified Data.Text.Encoding as TE
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import qualified Morloc.Language as ML
-import Morloc.CodeGenerator.LanguageDescriptor
-  (declaredNamePatterns, declaredReservedNames, declaredReservedPrefixes, matchNamePattern)
+import Morloc.CodeGenerator.LanguageDescriptor (SourceRules (..), declaredSourceRules, matchNamePattern)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -57,12 +64,33 @@ data Namer = Namer
   , namerIndex :: Int
   , namerExpanding :: Map.Map Int EVar  -- terms currently being expanded, by term identity, with the name their back-edges use
   , namerRecursive :: Set.Set Int  -- terms reached through a back-edge while being expanded
-  , namerShallow :: Maybe Int  -- when collecting a definition to check against its signature: its term id
+  , namerShallow :: Int  -- the term id of the definition collected
   , namerShallowOnly :: Maybe (Set.Set Int)
   -- ^ with 'namerShallow': only these terms are referenced by signature;
   -- every other term is expanded
+  , namerInline :: Set.Set Int
+  -- ^ the class methods expanded in place at their uses
   }
   deriving (Show)
+
+-- | Drop each source the program's own modules shadow (SRC-9): a term the
+-- program sources in a language has no imported source in it. Every reader
+-- of a term's sources sees the result. The program's own modules are those
+-- of the root module's package, or, for a script, the root module and its
+-- local submodules.
+shadowImportedSources :: MVar -> MorlocMonad ()
+shadowImportedSources root = do
+  packages <- MM.gets stateModulePackages
+  let package m = Map.lookup m packages
+      own m = case package root of
+        Just p -> package m == Just p
+        Nothing -> m == root || MT.isPrefixOf "." (unMVar m)
+      unshadowed srcs =
+        let ownLangs = Set.fromList [srcLang src | (m, Idx _ src) <- srcs, own m]
+         in [x | x@(m, Idx _ src) <- srcs, own m || Set.notMember (srcLang src) ownLangs]
+      shadow (Monomorphic t) = Monomorphic t {termConcrete = unshadowed (termConcrete t)}
+      shadow x = x
+  MM.modify' $ \st -> st {stateSignatures = GMap.mapVals shadow (stateSignatures st)}
 
 -- When I see a term, I need to look it up. To do so, I need to walk up through
 -- scope and fine all sources/declarations and type annotations. This involves
@@ -77,21 +105,23 @@ data Namer = Namer
 -- All expressions are mapped to integer indices linking expressions to their
 -- ultimate type annotations. The indices also match terms to their signatures
 -- and locations in source code.
--- | What 'Morloc.Frontend.Typecheck.validate' checks: each signed top-level
--- definition of the root module as a tree of its own body, and the root
--- module's instance declarations.
+-- | What 'Morloc.Frontend.Typecheck.validate' checks, and what
+-- specialization references by signature.
 data Validation = Validation
-  { validationTrees :: [AnnoS Int ManyPoly Int]
-  , validationInstances :: [(Int, ClassName, [TypeU])]
+  { validationModules :: [ExprI]
+  -- ^ every module of the program, the root first ('contractTrees')
   , validationDefs :: Map.Map Int (Int, EVar)
-  -- ^ each checked definition by term id: its declaration index and name
+  -- ^ each signed top-level definition of the program by term id: its
+  -- declaration index and name
+  , validationInferred :: Set.Set Int
+  -- ^ the terms among them whose type was inferred, not written (POLY-8)
   }
 
 treeify ::
   DAG MVar [AliasedSymbol] ExprI ->
   MorlocMonad (Validation, [(Int, EVar)])
 treeify d
-  | Map.size d == 0 = return (Validation [] [] Map.empty, [])
+  | Map.size d == 0 = return (Validation [] Map.empty Set.empty, [])
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
       [] -> MM.throwCompilerBug "cyclic import dependency in treeify"
@@ -101,21 +131,21 @@ treeify d
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
           Nothing -> MM.throwCompilerBug $ "module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols groups)) -> do
-            d' <- DAG.mapNodeM (linkAndRemoveAnnotations >=> renameLocals) d
+            -- every sourced symbol must be a name or operator of its language
+            -- (lang.yaml patterns, never hardcoded here): the name is emitted
+            -- verbatim, so code in this position would be injected into the
+            -- pool
+            sourceRules <- liftIO (newIORef Map.empty)
+            d' <- DAG.mapNodeM (linkAndRemoveAnnotations >=> renameLocals >=> checkSources sourceRules) d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
+            shadowImportedSources k
 
             -- every effect label used in a `<...>` row must be declared
             -- (the compiler hardcodes none); checked after link populates
             -- the effect registry
             checkDeclaredEffects d'
-
-            -- every sourced symbol name must match the foreign language's
-            -- name pattern (declared in lang.yaml, never hardcoded here);
-            -- the name is emitted verbatim, so code in this position would
-            -- be injected into the pool
-            checkSourceNames d'
 
             -- PatternAccessible dispatches the pattern-accessor syntax
             -- (`.foo`, `.[i]`, `.[s:e:p]`) at codegen; Indexable /
@@ -123,6 +153,9 @@ treeify d
             -- structurally. Declaring both for the same head is
             -- ambiguous.
             checkPatternAccessibleCoherence
+
+            -- an instance's methods, at its types, are held to the same rule
+            checkInstanceEffects
 
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
@@ -164,13 +197,13 @@ treeify d
                     }
               )
 
-            (checks, instances, defs) <- case DAG.lookupNode k d' of
-              Just node -> do
-                checkBareClassConstraints node
-                (cs, ds) <- contractRoots node
-                return (cs, rootInstances node, ds)
-              Nothing -> return ([], [], Map.empty)
-            return (Validation checks instances defs, exports')
+            let modules = [n | (k', (n, _)) <- Map.toList d', k' == k] <> [n | (k', (n, _)) <- Map.toList d', k' /= k]
+            mapM_ checkBareClassConstraints modules
+            sigs <- MM.gets stateSignatures
+            -- every module's signed definitions, each referenced by its
+            -- signature and elaborated once per type it is used at
+            let defs = Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm (concatMap (signedDefs sigs) modules)]
+            return (Validation modules defs Set.empty, exports')
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -268,93 +301,66 @@ rootCompanions d root exports = do
          in [(i, v) | (i, TermSymbol v) <- allSs]
       _ -> []
 
--- | Two signature-level effect checks, run after 'MFL.link' has
--- populated 'stateEffects':
---
---  1. Every concrete effect label in a `<...>` row of a signature,
---     annotation, typedef body, or class-method type must be declared
---     with `effect` / `escapable effect`. The compiler hardcodes no
---     effect names, so an undeclared label is always a user error.
---
---  2. Inescapable-propagation: every *inescapable* concrete label that
---     appears in a parameter's effect row must also appear in the
---     result row. This holds for all functions, sourced or defined --
---     a sourced handler may discharge an *escapable* effect, but no
---     function (not even a sourced one) may silently consume an
---     inescapable one. Effect variables always propagate (they appear
---     in the result), so they satisfy the rule automatically.
--- | Reject a sourced symbol whose name does not match its language's
--- identifier or operator pattern. Both patterns live only in lang.yaml
--- (ldNamePattern / ldOperatorPattern); the compiler hardcodes no
--- foreign-language naming rule. Operator vs identifier is decided by the
--- symbol itself (srcOperator), so "foo" and "+" are valid but "foo+"
--- matches neither. The name is emitted verbatim into the pool, so a
--- non-name here is a code-injection vector: a language whose patterns
--- cannot be read is an error, never a pass.
-checkSourceNames :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
-checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
+-- | Check every sourced symbol against its language's rules (lang.yaml,
+-- read once per language through the shared cache) and mark whether it is
+-- an operator (called infix): backtick-quoted, or a symbol its language's
+-- name pattern refuses and its operator pattern accepts. A symbol neither
+-- accepts is refused, since it is emitted verbatim; so is one with a
+-- segment the pool reserves or the language keeps as a keyword.
+checkSources :: IORef (Map.Map MT.Text (Either String SourceRules)) -> ExprI -> MorlocMonad ExprI
+checkSources cache = go
   where
-    checkNode :: ExprI -> MorlocMonad ()
-    -- Backtick-quoted names bypass the language-descriptor patterns
-    -- entirely: they are the user's explicit "trust me, emit this string
-    -- verbatim as an infix operator" opt-out for keyword-shaped foreign
-    -- operators (Python `and`, R `%in%`, etc.).
-    checkNode (ExprI i (SrcE src)) | srcBacktick src = do
-      yamlText <- languageDescriptorText (ML.langName (srcLang src))
-      checkReserved i src yamlText
-    checkNode (ExprI i (SrcE src)) = do
+    go (ExprI i e) = descend e >>= fmap (ExprI i) . node i
+    descend (ModE v es) = ModE v <$> mapM go es
+    descend (AssE v x es) = AssE v <$> go x <*> mapM go es
+    descend (IstE a b c d es) = IstE a b c d <$> mapM go es
+    descend x = AST.mapExprIChildrenM go x
+    node i (SrcE src) = do
       let lang = ML.langName (srcLang src)
-          nm = unSrcName (srcName src)
-          isOp = srcOperator src
-          kind = if isOp then "operator" else "name" :: MT.Text
-          refuse :: String -> MorlocMonad ()
-          refuse why =
-            MM.throwSourcedError i $
-              "Cannot check" <+> pretty lang <+> "source" <+> pretty kind
-                <+> squotes (pretty nm) <> ":" <+> pretty why
-      yamlText <- languageDescriptorText lang
-      checkReserved i src yamlText
-      case yamlText >>= declaredNamePatterns of
-        Left why -> refuse why
-        Right (namePat, opPat) -> do
-          let pat = if isOp then opPat else namePat
-          case matchNamePattern pat nm of
-            Left why -> refuse why
-            Right True -> return ()
-            Right False ->
-              MM.throwSourcedError i $
-                "Invalid"
-                  <+> pretty lang
-                  <+> "source"
-                  <+> pretty kind
-                  <+> squotes (pretty nm) <> "."
-                  <+> "A sourced symbol is emitted verbatim, so it"
-                  <+> "must be a valid"
-                  <+> pretty lang
-                  <+> pretty kind <> ", not code."
-                  <+> "Expected pattern"
-                  <+> squotes (pretty pat) <> "."
-    checkNode _ = return ()
+      known <- liftIO (readIORef cache)
+      rules <- case Map.lookup lang known of
+        Just r -> return r
+        Nothing -> do
+          r <- (>>= declaredSourceRules) <$> languageDescriptorText lang
+          liftIO (modifyIORef' cache (Map.insert lang r))
+          return r
+      SrcE <$> checkSource i rules src
+    node _ e = return e
 
-    -- A sourced name may not take a name the pool defines for itself.
-    checkReserved :: Int -> Source -> Either String MT.Text -> MorlocMonad ()
-    checkReserved i src yamlText = do
-      let lang = ML.langName (srcLang src)
-          nm = unSrcName (srcName src)
-          -- each segment of a path, so `crate::x` is checked as `x`
-          segments = nm : MT.splitOn "::" nm
-          taken prefixes names s = s `elem` names || any (`MT.isPrefixOf` s) prefixes
-      case (,) <$> (yamlText >>= declaredReservedPrefixes) <*> (yamlText >>= declaredReservedNames) of
-        Left why ->
-          MM.throwSourcedError i $
-            "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
-        Right (prefixes, names) -> case filter (taken prefixes names) segments of
-          (s : _) ->
-            MM.throwSourcedError i $
-              "The" <+> pretty lang <+> "source" <+> squotes (pretty nm) <+> "uses"
-                <+> squotes (pretty s) <> ","
-                <+> "a name reserved for what the" <+> pretty lang <+> "pool defines."
-          [] -> return ()
+checkSource :: Int -> Either String SourceRules -> Source -> MorlocMonad Source
+checkSource i rules src = do
+  let lang = ML.langName (srcLang src)
+      nm = unSrcName (srcName src)
+      cannot :: String -> MorlocMonad a
+      cannot why =
+        MM.throwSourcedError i $
+          "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
+      refuse :: MDoc -> MorlocMonad ()
+      refuse why = MM.throwSourcedError i $ "The" <+> pretty lang <+> "source" <+> squotes (pretty nm) <+> why
+  sr <- either cannot return rules
+  let segments = nm : concatMap (MT.splitOn ".") (MT.splitOn "::" nm)
+      reserved s = s `elem` srReservedNames sr || any (`MT.isPrefixOf` s) (srReservedPrefixes sr)
+  case filter reserved (nm : MT.splitOn "::" nm) of
+    (s : _) -> refuse $ "uses" <+> squotes (pretty s) <> ", a name reserved for what the" <+> pretty lang <+> "pool defines."
+    [] -> return ()
+  -- Backtick-quoted names bypass the patterns and keywords: they are the
+  -- user's explicit "emit this verbatim as an infix operator" for
+  -- keyword-shaped operators (Python `and`, R `%in%`).
+  if srcBacktick src
+    then return src {srcOperator = True}
+    else do
+      case filter (`elem` srKeywords sr) segments of
+        (k : _) -> refuse $ "uses" <+> squotes (pretty k) <> ", a" <+> pretty lang <+> "keyword, not a name."
+        [] -> return ()
+      isName <- either cannot return (matchNamePattern (srNamePattern sr) nm)
+      isOp <- if isName then return False else either cannot return (matchNamePattern (srOperatorPattern sr) nm)
+      unless (isName || isOp) $
+        refuse $
+          "is not a valid" <+> pretty lang <+> "name or operator. A sourced symbol is emitted"
+            <+> "verbatim, so it must not be code. Expected pattern"
+            <+> squotes (pretty (srNamePattern sr)) <+> "or"
+            <+> squotes (pretty (srOperatorPattern sr)) <> "."
+      return src {srcOperator = isOp}
 
 -- | A language's lang.yaml: the embedded one, else a plugin's under the
 -- morloc home, as the code generator finds it.
@@ -370,6 +376,21 @@ languageDescriptorText lang =
         then Right . TE.decodeUtf8 <$> liftIO (BS.readFile path)
         else return (Left ("no language descriptor at " <> path))
 
+-- | Two signature-level effect checks, run after 'MFL.link' has
+-- populated 'stateEffects':
+--
+--  1. Every concrete effect label in a `<...>` row of a signature,
+--     annotation, typedef body, or class-method type must be declared
+--     with `effect` / `escapable effect`. The compiler hardcodes no
+--     effect names, so an undeclared label is always a user error.
+--
+--  2. Inescapable-propagation: every *inescapable* concrete label that
+--     appears in a parameter's effect row must also appear in the
+--     result row. This holds for all functions, sourced or defined --
+--     a sourced handler may discharge an *escapable* effect, but no
+--     function (not even a sourced one) may silently consume an
+--     inescapable one. Effect variables always propagate (they appear
+--     in the result), so they satisfy the rule automatically.
 checkDeclaredEffects :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 checkDeclaredEffects d = do
   declared <- MM.gets stateEffects
@@ -383,7 +404,12 @@ checkDeclaredEffects d = do
             TypE (ExprTypeE _ _ _ t _ _) -> [t]
             ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
             _ -> []
-          used = Set.unions (map collectEffLabels tys)
+          -- an instance's types name effects too, but are not functions
+          -- whose arguments could leak one
+          heads = case e of
+            IstE _ _ _ ts _ -> ts
+            _ -> []
+          used = Set.unions (map collectEffLabels (tys <> heads))
           undeclared = Set.filter (\l -> not (Map.member l declared)) used
       case Set.toList undeclared of
         (lbl0 : rest) ->
@@ -400,34 +426,60 @@ checkDeclaredEffects d = do
                   <+> "(or `escapable effect"
                   <+> pretty lbl0 <> "`) and import it."
         [] -> do
-          let leaked = Set.unions (map inescapableLeak tys)
+          let leaked = Set.unions (map (inescapableLeak declared) tys)
           if Set.null leaked
             then return ()
-            else
-              MM.throwSourcedError i $
-                "Inescapable effect"
-                  <> (if Set.size leaked > 1 then "s" else "")
-                  <+> hcat
-                    (punctuate ", " (map (squotes . pretty) (Set.toList leaked)))
-                  <+> "appear(s) in an argument but not in the result row."
-                  <+> "An inescapable effect performed via an argument must"
-                  <+> "propagate to the result (only a sourced handler may"
-                  <+> "discharge an escapable effect)."
-      where
-        -- Inescapable concrete labels in any parameter row that are
-        -- absent from the result row.
-        inescapableLeak ty =
-          let (params, ret) = uncurryFun ty
-              paramLabels = Set.unions (map collectEffLabels params)
-              inescapable =
-                Set.filter (\l -> Map.lookup l declared == Just False) paramLabels
-           in Set.difference inescapable (collectEffLabels ret)
+            else MM.throwSourcedError i (leakMessage leaked)
 
-        -- Peel quantifiers and uncurry to (all parameters, final result).
-        uncurryFun (ForallU _ t) = uncurryFun t
-        uncurryFun (FunU ps r) =
-          let (ps', r') = uncurryFun r in (ps ++ ps', r')
-        uncurryFun t = ([], t)
+-- | The inescapable effect labels in a function type's parameters that its
+-- result does not carry.
+inescapableLeak :: Map.Map EffectLabel Bool -> TypeU -> Set.Set EffectLabel
+inescapableLeak declared ty =
+  let (params, ret) = uncurryFun ty
+      paramLabels = Set.unions (map collectEffLabels params)
+      inescapable = Set.filter (\l -> Map.lookup l declared == Just False) paramLabels
+   in Set.difference inescapable (collectEffLabels ret)
+  where
+    -- Peel quantifiers and uncurry to (all parameters, final result).
+    uncurryFun (ForallU _ t) = uncurryFun t
+    uncurryFun (FunU ps r) =
+      let (ps', r') = uncurryFun r in (ps ++ ps', r')
+    uncurryFun t = ([], t)
+
+-- | The diagnostic for inescapable effects an argument performs that the
+-- result does not carry (EFF-13).
+leakMessage :: Set.Set EffectLabel -> MDoc
+leakMessage leaked =
+  "Inescapable effect"
+    <> (if Set.size leaked > 1 then "s" else "")
+    <+> hcat (punctuate ", " (map (squotes . pretty) (Set.toList leaked)))
+    <+> "appear(s) in an argument but not in the result row."
+    <+> "An inescapable effect performed via an argument must"
+    <+> "propagate to the result (only a sourced handler may"
+    <+> "discharge an escapable effect)."
+
+-- | An instance's methods at the instance's types follow the rule
+-- 'checkDeclaredEffects' holds signatures to: a class method whose argument
+-- is a class variable takes, at an instance with an effect there, an
+-- argument that performs the effect, which its result must then carry.
+checkInstanceEffects :: MorlocMonad ()
+checkInstanceEffects = do
+  declared <- MM.gets stateEffects
+  env <- MM.gets stateInstances
+  sequence_
+    [ throwAt (FI.methodTermSite t) $
+        "At its instance of" <+> pretty (ikClass (mtKey t))
+          <+> squotes (pretty (mtMethod t))
+          <+> "has the type" <+> pretty (etype (mtType t)) <> "." <+> leakMessage leaked
+    | t <- FI.allMethodTerms env
+    , let leaked = inescapableLeak declared (etype (mtType t))
+    , not (Set.null leaked)
+    ]
+  where
+    -- an instance with no implementation has no index of its own
+    throwAt :: Maybe Int -> MDoc -> MorlocMonad ()
+    throwAt (Just i) msg = MM.throwSourcedError i msg
+    throwAt Nothing msg = MM.throwRejected msg
 
 -- | Reject any receiver head that has both a @PatternAccessible@
 -- instance and a structural (@Indexable@ \/ @Sliceable@ \/
@@ -437,59 +489,34 @@ checkDeclaredEffects d = do
 -- choice at declaration time.
 checkPatternAccessibleCoherence :: MorlocMonad ()
 checkPatternAccessibleCoherence = do
-  paHeads <- collectReceiverHeads (EV BT.extractPatternMethod) 2
-  -- Fast path: most compiles declare no 'PatternAccessible' instance,
-  -- so skip the structural-class scan entirely.
-  if Map.null paHeads
-    then return ()
-    else do
-      ixHeads <- collectReceiverHeads (EV "__access_index__") 1
-      slHeads <- collectReceiverHeads (EV "__get_slice__") 3
-      sdHeads <- collectReceiverHeads (EV "__get_slice_dim__") 3
-      let structural = Map.unions [ixHeads, slHeads, sdHeads]
-          conflicts  = [ (h, paIdx)
-                       | (h, paIdx) <- Map.toList paHeads
-                       , Map.member h structural
-                       ]
-      case conflicts of
-        [] -> return ()
-        ((h, paIdx) : _) ->
-          MM.throwSourcedError paIdx $
-            "Type" <+> squotes (pretty h)
-              <+> "has a 'PatternAccessible' instance and also has an"
-              <+> "'Indexable', 'Sliceable', or 'SliceableDim' instance."
-              <+> "Both class families dispatch the pattern-accessor"
-              <+> "syntax (.foo, .[i], .[s:e:p]) on the same receiver,"
-              <+> "so silently preferring one would be ambiguous."
-              <+> "Choose one: keep 'PatternAccessible" <+> pretty h <> "'"
-              <+> "for a custom walker, or drop it and let"
-              <+> "'Indexable' / 'Sliceable' provide structural dispatch."
+  env <- MM.gets stateInstances
+  let paHeads = collectReceiverHeads env patternAccessibleMethod
+      structural = Map.unions (map (collectReceiverHeads env) structuralMethods)
+      conflicts = Map.toList (Map.filterWithKey (\h _ -> Map.member h structural) paHeads)
+  case conflicts of
+    [] -> return ()
+    ((h, paIdx) : _) ->
+      MM.throwSourcedError paIdx $
+        "Type" <+> squotes (pretty h)
+          <+> "has a 'PatternAccessible' instance and also has an"
+          <+> "'Indexable', 'Sliceable', or 'SliceableDim' instance."
+          <+> "Both class families dispatch the pattern-accessor"
+          <+> "syntax (.foo, .[i], .[s:e:p]) on the same receiver,"
+          <+> "so silently preferring one would be ambiguous."
+          <+> "Choose one: keep 'PatternAccessible" <+> pretty h <> "'"
+          <+> "for a custom walker, or drop it and let"
+          <+> "'Indexable' / 'Sliceable' provide structural dispatch."
 
--- | Collect the receiver's outermost 'TVar' from every 'TermTypes'
--- entry of a class method's instance list, keyed on that TVar. The
--- 'pos' parameter is the argument index the receiver occupies in the
--- method's function type. The 'Int' value is one representative
--- source index for the instance (used as the caret in error
--- messages). Sourced instances (@source Py from ...@) carry the
--- index in 'termConcrete'; body-declared instances (@__method__ =
--- someExpr@) carry it in 'termDecl'.
-collectReceiverHeads :: EVar -> Int -> MorlocMonad (Map.Map TVar Int)
-collectReceiverHeads method pos = do
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup method sigmap of
-    Nothing -> return Map.empty
-    Just inst -> return $ Map.fromList
-      [ (h, i)
-      | tt@(TermTypes (Just et) _ _) <- instanceTerms inst
-      , Just h <- [instanceArgHead pos et]
-      , Just i <- [instanceIndex tt]
-      ]
-  where
-
-    instanceIndex :: TermTypes -> Maybe Int
-    instanceIndex (TermTypes _ ((_, Idx ix _) : _) _) = Just ix
-    instanceIndex (TermTypes _ _ (ExprI ix _ : _))    = Just ix
-    instanceIndex _                                    = Nothing
+-- | The receiver head of every instance implementing a method, with one
+-- source index of the instance, for the caret of an error message.
+collectReceiverHeads :: InstanceEnv -> ArgMethod -> Map.Map TVar Int
+collectReceiverHeads env (ArgMethod cls method pos) =
+  Map.fromList
+    [ (h, i)
+    | t <- FI.methodTerms env cls method
+    , Just h <- [instanceArgHead pos (mtType t)]
+    , Just i <- [FI.methodTermSite t]
+    ]
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
 linkAndRemoveAnnotations = f
@@ -507,9 +534,7 @@ linkAndRemoveAnnotations = f
     f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
     f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
     f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
-    f (ExprI i (NamE rs)) = do
-      es' <- mapM (f . snd) rs
-      return . ExprI i $ NamE (zip (map fst rs) es')
+    f (ExprI i (NamE rs)) = ExprI i . NamE <$> mapM (traverse f) rs
     f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
     f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
     f (ExprI i (LetE bindings body)) = ExprI i <$> (LetE <$> mapM (\(v, e) -> (,) v <$> f e) bindings <*> f body)
@@ -519,65 +544,101 @@ linkAndRemoveAnnotations = f
     f (ExprI i (IntrinsicE intr es)) = ExprI i <$> (IntrinsicE intr <$> mapM f es)
     f e@(ExprI _ _) = return e
 
--- | Collect the tree of the term at index @gi@ named @v@. With @Nothing@
--- every term it reaches is expanded. With @Just ts@ a reference to a term in
--- @ts@ other than the root is left as its signature alone, a
--- @VarS v (MonomorphicExpr (Just sig) [])@.
-collectRoot :: Maybe (Set.Set Int) -> (Int, EVar) -> MorlocMonad (AnnoS Int ManyPoly Int)
-collectRoot only (gi, v) = do
+-- | Collect the tree of the term at index @gi@ named @v@. A reference to a
+-- term in @only@ other than the root is left as its signature alone, a
+-- @VarS v (MonomorphicExpr (Just sig) [])@, and a class method is left as its
+-- instances' types unless it is in @inline@.
+collectRoot :: Set.Set Int -> Set.Set Int -> (Int, EVar) -> MorlocMonad (AnnoS Int ManyPoly Int)
+collectRoot only inline (gi, v) = do
   GMap idmap _ <- MM.gets stateSignatures
-  let shallow = case only of
-        Nothing -> Nothing
-        Just _ -> Just (fromMaybe (-1) (Map.lookup gi idmap))
-  snd <$> collect (Namer Map.empty 0 Map.empty Set.empty shallow only) (gi, v)
+  let shallow = fromMaybe (-1) (Map.lookup gi idmap)
+  snd <$> collect (Namer Map.empty 0 Map.empty Set.empty shallow (Just only) inline) (gi, v)
 
--- | One tree per signed top-level definition of the root module, collected
--- in shallow mode (see 'namerShallow'), and each such definition's
--- declaration index and name by term id.
-contractRoots :: ExprI -> MorlocMonad ([AnnoS Int ManyPoly Int], Map.Map Int (Int, EVar))
-contractRoots (ExprI _ (ModE _ es)) = do
-  GMap idmap sigmap <- MM.gets stateSignatures
-  let defs =
-          [ (termId, v, i)
-          | ExprI i (AssE v _ _) <- es
-          , Just termId <- [Map.lookup i idmap]
-          , Just (Monomorphic t) <- [Map.lookup termId sigmap]
-          , Just _ <- [termGeneral t]
-          ]
-      firstPerTerm = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
-  trees <- mapM
-    (\(termId, v, i) -> snd <$> collect (Namer Map.empty 0 Map.empty Set.empty (Just termId) Nothing) (i, v))
-    firstPerTerm
-  -- each method an instance of the module defines, checked against the
-  -- method's type at the instance's types, its body assuming the instance's
-  -- context
-  let methodTypes =
+-- | The signed top-level definitions of a module: term id, name and
+-- declaration index.
+signedDefs :: GMap Int Int SignatureSet -> ExprI -> [(Int, EVar, Int)]
+signedDefs (GMap idmap sigmap) (ExprI _ (ModE _ es)) =
+  [ (termId, v, i)
+  | ExprI i (AssE v _ _) <- es
+  , Just termId <- [Map.lookup i idmap]
+  , Just (Monomorphic t) <- [Map.lookup termId sigmap]
+  , Just _ <- [termGeneral t]
+  ]
+signedDefs _ _ = []
+
+-- | The top-level definitions of a module whose term has no signature and
+-- no source: term id, name and declaration index.
+unsignedDefs :: GMap Int Int SignatureSet -> ExprI -> [(Int, EVar, Int)]
+unsignedDefs (GMap idmap sigmap) (ExprI _ (ModE _ es)) =
+  [ (termId, v, i)
+  | ExprI i (AssE v _ _) <- es
+  , Just termId <- [Map.lookup i idmap]
+  , Just (Monomorphic t) <- [Map.lookup termId sigmap]
+  , Nothing <- [termGeneral t]
+  , null (termConcrete t)
+  ]
+unsignedDefs _ _ = []
+
+-- | The tree of a top-level term's definitions, collected in shallow mode
+-- (see 'namerShallow'): every other signed term is referenced by its
+-- signature.
+definitionTree :: (Int, EVar, Int) -> MorlocMonad (AnnoS Int ManyPoly Int)
+definitionTree (termId, v, i) = snd <$> collect (Namer Map.empty 0 Map.empty Set.empty termId Nothing Set.empty) (i, v)
+
+-- | One entry per term, the first; a term's tree holds every definition of it.
+firstPerTerm :: [(Int, EVar, Int)] -> [(Int, EVar, Int)]
+firstPerTerm defs = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
+
+-- | The trees 'Morloc.Frontend.Typecheck.validate' checks: one per signed
+-- term defined in any of the modules, but those in @inferred@, whose types
+-- were checked where they were inferred, collected in shallow mode (see
+-- 'namerShallow'), and one per method body of each instance the modules
+-- declare, checked against the method's type at the instance's types with
+-- the instance's context assumed.
+contractTrees :: Set.Set Int -> [ExprI] -> MorlocMonad [AnnoS Int ManyPoly Int]
+contractTrees inferred modules = do
+  sigs@(GMap _ sigmap) <- MM.gets stateSignatures
+  trees <- mapM definitionTree [d | d@(k, _, _) <- firstPerTerm (concatMap (signedDefs sigs) modules), Set.notMember k inferred]
+  env <- MM.gets stateInstances
+  let bodyType = Map.fromList
         [ (bodyIdx, (k, et))
-        | (k, Polymorphic _ _ _ tts) <- Map.toList sigmap
-        , tt <- tts
-        , Just et <- [termGeneral tt]
-        , ExprI bodyIdx _ <- termDecl tt
+        | (k, Polymorphic cls v _) <- Map.toList sigmap
+        , t <- FI.methodTerms env cls v
+        , (et, ExprI bodyIdx _) <- mtBodies t
         ]
-      bodyType = Map.fromList methodTypes
   instanceTrees <- sequence
-    [ do
-        (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty (Just k) Nothing) body
-        let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
-        return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
-    | ExprI _ (IstE _ _ ctx _ ies) <- es
+    [ instanceBodyTree Nothing k i v et ctx body
+    | ExprI _ (ModE _ es) <- modules
+    , ExprI _ (IstE _ _ ctx _ ies) <- es
     , ExprI i (AssE v body@(ExprI bi _) _) <- ies
     , Just (k, et) <- [Map.lookup bi bodyType]
     ]
-  return (trees <> instanceTrees, Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm])
-contractRoots _ = return ([], Map.empty)
+  return (trees <> instanceTrees)
 
--- | The root module's instance declarations: index, class, instance types.
-rootInstances :: ExprI -> [(Int, ClassName, [TypeU])]
-rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE _ cls _ ts _) <- es]
-rootInstances _ = []
+-- | An instance's body of a method as a definition checked against the
+-- method's type at the instance's types, its body assuming the instance's
+-- context: @k@ is the method's term, @i@ the binding's index. With @only@,
+-- only those terms are referenced by their signatures and every other is
+-- expanded, as 'collectRoot' does.
+instanceBodyTree :: Maybe (Set.Set Int) -> Int -> Int -> EVar -> EType -> [Constraint] -> ExprI -> MorlocMonad (AnnoS Int ManyPoly Int)
+instanceBodyTree only k i v et ctx body = do
+  (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty k only Set.empty) body
+  let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
+  return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
+
+-- | Each instance method body of the modules, by its expression's index:
+-- the binding's index and the context of its instance declaration.
+instanceBodySites :: [ExprI] -> Map.Map Int (Int, [Constraint])
+instanceBodySites modules =
+  Map.fromList
+    [ (bi, (i, ctx))
+    | ExprI _ (ModE _ es) <- modules
+    , ExprI _ (IstE _ _ ctx _ ies) <- es
+    , ExprI i (AssE _ (ExprI bi _) _) <- ies
+    ]
 
 -- | A class constraint names the type it constrains: @Ord a =>@, never a
--- bare @Ord =>@. Checked on the root module's signatures.
+-- bare @Ord =>@.
 checkBareClassConstraints :: ExprI -> MorlocMonad ()
 checkBareClassConstraints = AST.checkExprI check
   where
@@ -654,17 +715,18 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       sigs@(GMap idmap _) <- MM.gets stateSignatures
       let termId = Map.lookup gi0 idmap
       case (termId, GMap.lookup gi0 sigs) of
-        -- Shallow collection for specialization: a class method is left as
-        -- its instances' types, to be elaborated at the use's type. Here a
+        -- Shallow collection: a class method is left as its instances'
+        -- types. For specialization it is elaborated at the use's type; a
         -- use of a method inside its own expansion is not a back-edge, since
-        -- it may resolve to another instance; in full collection the next
-        -- case makes it one.
-        (Just k, GMapJust (Polymorphic cls clsName t ts))
-          | Just _ <- namerShallowOnly namer
-          , Just r <- namerShallow namer
-          , Nothing <- Map.lookup v (namerMap namer)
-          , k /= r || Map.member k (namerExpanding namer) ->
-              return (namer, VarS v (PolymorphicExpr cls clsName t [(et, []) | Just et <- map termGeneral ts]))
+        -- it may resolve to another instance. Validation checks a method use as an
+        -- obligation and never reads its instances' bodies (they are
+        -- checked where the use is elaborated), so it never expands one.
+        (Just k, GMapJust (Polymorphic cls clsName t))
+          | Nothing <- Map.lookup v (namerMap namer)
+          , isNothing (namerShallowOnly namer) || k /= namerShallow namer || Map.member k (namerExpanding namer)
+          , Set.notMember k (namerInline namer) || Map.member k (namerExpanding namer) -> do
+              env <- MM.gets stateInstances
+              return (namer, VarS v (PolymorphicExpr cls clsName t [(mtKey x, mtType x, []) | x <- FI.methodTerms env cls clsName]))
         -- A reference to a term that is being expanded is a recursive
         -- back-edge. It is recognized by the term's identity, not its name:
         -- two unrelated terms may share a name.
@@ -677,8 +739,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- top-level term is referenced by its signature, not expanded (it is
         -- checked against its signature on its own).
         (Just k, GMapJust (Monomorphic t))
-          | Just r <- namerShallow namer
-          , r /= k
+          | namerShallow namer /= k
           , maybe True (Set.member k) (namerShallowOnly namer)
           , Just _ <- termGeneral t
           , not (MT.isInfixOf "`" (unEVar v)) ->
@@ -688,17 +749,18 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         -- declaration, then it will have no type.
         (Just k, GMapJust (Monomorphic t)) -> do
           MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
-          (namer', es) <- expanding k namer (\n -> termtypesToAnnoS gi0 n t)
+          (namer', es) <- expanding k namer (\n -> implsToAnnoS gi0 n (map snd (termConcrete t)) (termDecl t))
           v' <- nameIfRecursive namer' k
           return (namer', VarS v' (MonomorphicExpr (termGeneral t) es))
         -- A polymorphic term should always have a type.
-        (Just k, GMapJust (Polymorphic cls clsName t ts)) -> do
-          MM.sayVVV $
-            "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-          (namer', ess) <- expanding k namer (\n -> statefulMapM (termtypesToAnnoS gi0) n ts)
-          let etypes = map (fromJust . termGeneral) ts
+        (Just k, GMapJust (Polymorphic cls clsName t)) -> do
+          env <- MM.gets stateInstances
+          let ts = FI.methodTerms env cls clsName
+              typed n' x = second ((,,) (mtKey x) (mtType x)) <$> implsToAnnoS gi0 n' (map snd (mtSources x)) (map snd (mtBodies x))
+          MM.sayVVV $ "  polymorphic term" <+> pretty v <> ":" <+> list (map (pretty . mtType) ts)
+          (namer', ess) <- expanding k namer (\n -> statefulMapM typed n ts)
           v' <- nameIfRecursive namer' k
-          return (namer', VarS v' (PolymorphicExpr cls clsName t (zip etypes ess)))
+          return (namer', VarS v' (PolymorphicExpr cls clsName t ess))
         -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
         -- These terms will be renamed for uniqueness
         _ -> do
@@ -736,11 +798,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
               return token
           | otherwise = return v
 
-        termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
-        termtypesToAnnoS gi n t = do
-          let calls = [AnnoS gi ci (ExeS (SrcCall src)) | (_, Idx ci src) <- termConcrete t]
+        implsToAnnoS :: Int -> Namer -> [Indexed Source] -> [ExprI] -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
+        implsToAnnoS gi n srcs bodies = do
+          let calls = [AnnoS gi ci (ExeS (SrcCall isrc)) | isrc@(Idx ci _) <- srcs]
 
-          (n', declarations) <- statefulMapM termExprToAnnoS n (termDecl t)
+          (n', declarations) <- statefulMapM termExprToAnnoS n bodies
           return (n', (calls <> declarations))
 
         termExprToAnnoS :: Namer -> ExprI -> MorlocMonad (Namer, AnnoS Int ManyPoly Int)
@@ -755,9 +817,8 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
     f namer (TupE es) = statefulMapM collectAnnoS namer es |>> second TupS
     f namer (NamE rs) = do
-      (namer', vals) <- statefulMapM collectAnnoS namer (map snd rs)
-      let keys = map fst rs
-      return (namer', NamS (zip keys vals))
+      (namer', rs') <- statefulMapM (\n (key, x) -> second ((,) key) <$> collectAnnoS n x) namer rs
+      return (namer', NamS rs')
     f namer (LamE vs e) = do
       let namer' = foldr (updateRenamer LambdaBound) namer vs
           vs' = map (fst . fromJust . (flip Map.lookup) (namerMap namer')) vs
@@ -782,6 +843,15 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       (inner, body') <- collectAnnoS namer2 innerBody
       return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LetS v' e1' body')
     f _ (LetE [] _) = MM.throwCompilerBugAt gi0 "a let with no bindings reached Treeify"
+    f namer (AppE (ExprI hi (PatE p)) es)
+      | null es && patternArity p > 0 = etaPattern namer hi p
+      | otherwise = do
+          (namer', es') <- statefulMapM collectAnnoS namer es
+          case applyPattern p es' of
+            Just app -> return (namer', PatS hi hi noPatEvidence app)
+            Nothing ->
+              MM.throwSourcedError gi0 $
+                "This pattern takes" <+> pretty (patternArity p) <+> "arguments, got" <+> pretty (length es)
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
       (namer'', es') <- statefulMapM collectAnnoS namer' es
@@ -799,7 +869,9 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (StrE x) = return (namer, StrS x)
     f namer (ConE tv n i xs) =
       statefulMapM collectAnnoS namer xs |>> second (ConS tv n i)
-    f namer (PatE p) = return (namer, ExeS (PatCall p))
+    f namer (PatE p) = do
+      hi <- MM.getCounterWithPos gi0
+      etaPattern namer hi p
     f namer (DoBlockE e) = do
       (namer', e') <- collectAnnoS namer e
       return (namer', DoBlockS e')
@@ -811,6 +883,16 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
         (namer1, r') <- collectAnnoS namer r
         return (namer1, ShapeS PreTyped sh r')
       _ -> MM.throwCompilerBugAt gi0 "malformed shape intrinsic"
+    f namer (IntrinsicE IntrMap es@[_, _]) = do
+      (namer1, es') <- statefulMapM collectAnnoS namer es
+      GMap idmap sigmap <- MM.gets stateSignatures
+      case [k | (k, Polymorphic cls v _) <- Map.toList sigmap, cls == ClassName "Functor", v == EV "map"] of
+        [] -> return (namer1, IntrinsicS IntrMap es')
+        (k : _) -> do
+          i <- MM.getCounterWithPos gi0
+          MM.modify' (\st -> st {stateSignatures = GMap (Map.insert i k idmap) sigmap})
+          (namer2, use) <- collectExprS namer1 {namerMap = Map.delete (EV "map") (namerMap namer1)} (ExprI i (VarE defaultValue (EV "map")))
+          return (namer2 {namerMap = namerMap namer1}, IntrinsicS IntrMap (es' <> [AnnoS i i use]))
     f namer (IntrinsicE intr es) = do
       (namer', es') <- go namer [] es
       return (namer', IntrinsicS intr es')
@@ -826,6 +908,14 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       return (namer3, IfS c' t' e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
+
+    -- A pattern used as a function: a lambda over the arguments it takes.
+    etaPattern namer hi p = do
+      vs <- replicateM (patternArity p) (MM.getCounterWithPos gi0)
+      let name i = EV (".pat_" <> MT.show' i)
+          vars = [ExprI i (VarE defaultValue (name i)) | i <- vs]
+      appI <- MM.getCounterWithPos gi0
+      f namer (LamE (map name vs) (ExprI appI (AppE (ExprI hi (PatE p)) vars)))
 
 -- | The name shared by a recursive term's 'VarS' and its 'CallS' back-edges.
 -- The @`t@ segment is removed by 'Morloc.Frontend.Rename.displayName'.

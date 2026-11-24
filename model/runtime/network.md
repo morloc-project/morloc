@@ -110,7 +110,7 @@ reported and the daemon serves without it.
 
 ### NET-7 A local connection carries one call at a time and is reused only when its callee keeps it
 Status: implemented
-Checked by: a_kept_connection_carries_the_next_calls, a_callee_that_does_not_keep_gets_a_connection_per_call, a_ping_answered_by_a_callee_that_closes_is_not_kept, a_kept_connection_whose_callee_is_gone_is_retried_once_on_a_new_one, a_call_whose_callee_dies_after_reading_it_fails_without_a_retry, a_forked_child_does_not_hold_its_parents_connections_open, the_keep_bit_is_cleared_from_a_reply, tla:CrossingConn, tla:CrossingConn_fork, tla:CrossingConn_death, tla:CrossingConn_abandon, tla:CrossingConn_child_uses_inherited.bug, tla:CrossingConn_child_keeps_inherited.bug, tla:CrossingConn_retry_after_complete_send.bug, tla:CrossingConn_keep_after_error.bug, tla:CrossingConn_keep_across_fork_window.bug, neither_side_of_a_fork_waits_on_it_afterwards
+Checked by: a_kept_connection_carries_the_next_calls, a_callee_that_does_not_keep_gets_a_connection_per_call, a_ping_answered_by_a_callee_that_closes_is_not_kept, a_kept_connection_whose_callee_is_gone_is_retried_once_on_a_new_one, a_send_on_a_socket_with_no_peer_is_peer_closed, a_call_whose_callee_dies_after_reading_it_fails_without_a_retry, a_forked_child_does_not_hold_its_parents_connections_open, the_keep_bit_is_cleared_from_a_reply, a_request_read_records_and_clears_its_keep_bit, a_not_run_reply_on_a_kept_connection_is_retried_once, a_not_run_reply_on_a_fresh_connection_is_an_error, tla:KeptConn, tla:KeptConn_revoke_without_notice.bug, tla:KeptConn_notice_keeps_reading.bug, tla:KeptConn_hold_on_asked.bug, tla:CrossingConn, tla:CrossingConn_fork, tla:CrossingConn_death, tla:CrossingConn_abandon, tla:CrossingConn_child_uses_inherited.bug, tla:CrossingConn_child_keeps_inherited.bug, tla:CrossingConn_retry_after_complete_send.bug, tla:CrossingConn_keep_after_error.bug, tla:CrossingConn_keep_across_fork_window.bug, neither_side_of_a_fork_waits_on_it_afterwards
 
 A caller thread keeps at most one connection per callee and sends the next
 request on it only after it has read the whole reply to the last. The
@@ -119,20 +119,33 @@ caller reuses it only when the reply says the callee keeps it, clears that
 bit before handing the reply on, and drops the connection after any error.
 A ping is answered like a call: its reply asks to keep only when the
 callee keeps, so an echo of the request never carries the request's bit.
-C++ and Rust pools keep; Python and R pools close after each reply. The connection is owned by the caller's
+The callee clears the bit from the request as it reads it and records the
+ask; its reply says kept only when the request asked. Every pool keeps:
+C++ and Rust pools pin a worker to the connection (NET-8), Python and R
+fork workers hold it while idle (NET-9). A C++ pool's parallel helpers
+each keep their own connections while they have work and close them before
+they sleep (WPOOL-10). The connection is owned by the caller's
 fork generation: a forked child closes the cached connections it inherited
 and never uses them (FORK-14). A socket is registered for the child's
 close only after it exists, so a fork in between leaves a child a copy it
 does not close: the caller drops a socket made across a fork, which has
 carried nothing, and makes another; it makes none while a fork is under
-way. A callee that keeps a connection never
-closes it while it lives. A send that fails because the callee's end is
-closed delivered nothing, and is retried once on a new connection; a
-connection that ends after a complete send means the callee is gone, and
-the call fails without a retry, so a call runs at most once and a failure
-is reported only when the callee died. Model: tla:CrossingConn with its
-`.bug` variants `child_uses_inherited`, `child_keeps_inherited`,
-`retry_after_complete_send` and `keep_after_error`.
+way. A callee that keeps a connection closes it while it lives only by a
+revoke: it sends a header-only reply whose not-run bit is set (FMT-1) and
+closes without reading the connection again, so whatever request the
+connection carries was not run. The notice and the close are two system
+calls, so a request can reach the connection between them; it is never
+read, and the caller reads the notice before the end of file (NET-11). A
+send that fails because the callee's end is closed delivered nothing, and
+is retried once on a new connection; so is a call answered by a not-run
+notice on a reused connection, while a not-run
+notice on a new connection is an error, since a new connection is never
+kept yet. A connection that ends after a complete send means the callee is
+gone, and the call fails without a retry, so a call runs at most once and
+a failure is reported only when the callee died. Model: tla:CrossingConn
+with its `.bug` variants `child_uses_inherited`, `child_keeps_inherited`,
+`retry_after_complete_send` and `keep_after_error`; tla:KeptConn with
+`revoke_without_notice`, `notice_keeps_reading` and `hold_on_asked`.
 
 ### NET-8 A pool never leaves a call waiting while every worker is occupied
 Status: implemented
@@ -153,7 +166,7 @@ tla:CrossingConn with its `.bug` variants `finishing_counts_pinned` and
 
 ### NET-9 In a fork pool only an idle worker takes a connection
 Status: implemented
-Checked by: a_fork_pool_serves_calls_and_stops_on_sigterm, a_busy_worker_gets_a_second_worker, the_busy_count_stays_balanced_across_processes, tla:ForkPool, tla:ForkPool_exclusive, tla:ForkPool_noretire, tla:ForkPool_death, tla:ForkPool_emfile_exits.bug, tla:ForkPool_retire_before_accept.bug, tla:ForkPool_no_refork_after_retire.bug, tla:ForkPool_accept_while_busy.bug, tla:ForkPool_descendant_uncounted.bug, tla:ForkPool_no_life_pipe.bug, golden:pool-nested-callbacks-churn
+Checked by: a_fork_pool_serves_calls_and_stops_on_sigterm, a_busy_worker_gets_a_second_worker, the_busy_count_stays_balanced_across_processes, tla:ForkPool, tla:ForkPool_exclusive, tla:ForkPool_noretire, tla:ForkPool_death, tla:ForkPool_emfile_exits.bug, tla:ForkPool_retire_before_accept.bug, tla:ForkPool_no_refork_after_retire.bug, tla:ForkPool_accept_while_busy.bug, tla:ForkPool_descendant_uncounted.bug, tla:ForkPool_no_life_pipe.bug, sequential_calls_from_one_thread_use_one_connection, a_held_connection_is_revoked_when_its_worker_takes_another, a_kept_caller_is_served_while_its_worker_waits_on_another_pool, a_worker_dying_while_holding_a_kept_connection_fails_the_next_call_cleanly, a_worker_dying_mid_request_on_a_kept_connection_fails_without_a_retry, a_retiring_worker_revokes_its_held_connection, a_caller_closing_its_kept_connection_lets_the_worker_go, a_child_forked_by_user_code_does_not_hold_the_kept_connection, tla:KeptConn, tla:KeptConn_callback, tla:KeptConn_serve_while_holding.bug, tla:KeptConn_serve_while_holding_invariant.bug, tla:KeptConn_retire_silently.bug, tla:KeptConn_ignore_eof.bug, golden:pool-nested-callbacks-churn
 
 A fork pool (Python, R) runs one scheduler in libmorloc; the language gives
 only how to fork, how a worker loads its sources, how it serves one
@@ -171,11 +184,29 @@ descriptor leaves the connection queued and the worker polling. A process
 forked from a worker never accepts. The readiness probe is answered like
 any call, by a worker whose sources have loaded. A worker leaves when the
 read end of a pipe only the coordinator holds reaches end of file, so no
-worker outlives its coordinator.
+worker outlives its coordinator. A surplus idle worker retires only when
+the waits in progress number fewer than the workers that would be left.
+
+A worker owns every connection it accepts: the language serves one request
+read from it, and the worker then holds it or closes it. It holds it only
+when the whole reply went out saying kept (NET-7), which a reply says only
+in a worker of its birth fork generation; any failure closes it. A held
+worker is idle, not busy: it polls the listen socket, its held connection
+and the coordinator's pipe; when both a call on its held connection and a new
+connection wait, it takes them in turn, so neither can starve. A held connection
+that reaches end of file is closed; one with a request is served again. A
+worker never serves one connection while it holds another: after it
+accepts one (only once the accept succeeds), when it retires (before it
+says so) and when it leaves, it revokes the one it holds (NET-7). No timer
+lets a held connection go. The connection's slot is cleared before the
+connection is closed, and a forked child closes its copy of it. The
+coordinator never holds a connection. Model: tla:KeptConn with its `.bug`
+variants `serve_while_holding`, `serve_while_holding_invariant`,
+`retire_silently` and `ignore_eof`.
 
 ### NET-10 A message past a limit is answered, and no declared length is trusted
 Status: implemented
-Checked by: a_message_past_the_frame_is_refused_unsent, a_request_past_the_daemons_cap_is_refused_as_a_limit, every_kind_survives_its_class_name, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, the_header_names_every_kind_as_the_runtime_does, a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame
+Checked by: a_message_past_the_frame_is_refused_unsent, a_request_past_the_daemons_cap_is_refused_as_a_limit, every_kind_survives_its_class_name, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, the_header_names_every_kind_as_the_runtime_does, a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame, a_content_length_is_digits_and_its_copies_agree, read_http_request_refuses_a_head_or_body_it_cannot_read_one_way, a_request_line_is_three_visible_ascii_parts, a_head_that_could_be_read_two_ways_is_refused
 
 A length-prefixed message carries at most 4 GiB. A daemon takes a request
 of at most 64 MiB on its socket and 4 MiB over HTTP; an MCP server over
@@ -190,4 +221,32 @@ never sent with a wrapped length. A reader of a length-prefixed message
 allocates as its bytes arrive, so a declared length costs memory only as
 it is sent; an HTTP body within its cap is allocated when its length is
 read. A request refused before it is parsed is answered in JSON, as an
-unparsable one is, also to a packet-mode client.
+unparsable one is, also to a packet-mode client. Every HTTP server reads
+a request head by one rule, and refuses as a bad request a head it could
+read two ways: a request line that is not three visible-ASCII parts, a
+malformed header line or name, a `Transfer-Encoding`, or a
+`Content-Length` that is not digits or disagrees with another (RFC 9110
+8.6). A body shorter than its declared length is refused, never served.
+Nothing in a request is truncated.
+
+### NET-11 A reader of a framed message keeps every byte it reads, and a reused connection holds nothing it skipped
+Status: implemented
+Checked by: a_notice_read_behind_a_kept_reply_ends_the_connection, a_request_with_bytes_behind_it_is_refused, queued_bytes_are_read_before_the_end_of_a_closed_peer, every_raw_read_is_reviewed_against_its_framing, the_job_id_is_the_last_line_of_sbatchs_output, tla:KeptConn, tla:KeptConn_read_past_frame.bug
+
+A read of one message from a stream socket, pipe or file may return bytes
+that follow it: on a kept connection, the not-run notice of a revoke can
+arrive behind the reply in the same read (NET-7, NET-9). A reader never
+discards a byte it has read. Either the bytes past the message stay unread
+in the descriptor, or the connection ends after the message and is never
+reused, polled or read again. A caller whose reply read took bytes past
+the reply uses the reply and closes the connection instead of keeping it,
+so its next call opens a fresh one. A callee that reads a request with
+bytes past it refuses the request without running it, since nothing
+follows a request (NET-7). On a local stream socket, bytes queued before
+the peer's end closes are read before its end of file or reset; the
+caller reads a revoke's notice even when its own request was left unread.
+Every raw read (`recv`, `read`) and every partial standard-library read
+(`Read::read`, a `BufReader`) is reviewed against this item, and a new one
+fails a check until it is. Model: tla:KeptConn (a read takes what is queued behind a reply;
+the revoke sends its notice and closes in two steps) with its `.bug`
+variant `read_past_frame`.

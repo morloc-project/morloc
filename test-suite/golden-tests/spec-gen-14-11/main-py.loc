@@ -1,0 +1,24 @@
+-- The Python twin of main-cpp.loc: refused.
+module main (trip)
+
+import root-py
+
+newtype Tenths = Int
+type Py => Tenths = "float"
+
+instance Packable Int Tenths where
+  source Py from "pk.py" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Tree where
+  t :: Tenths
+  kids :: [Tree]
+
+source Py from "f.py" ("mk", "tens")
+mk :: Int -> Tree
+tens :: Tree -> [Int]
+
+trip :: Str -> Int -> <IO> [Int]
+trip p n = do
+  _ <- @save 0 p (mk n)
+  r <- @load p :: <IO> (Try Str Tree)
+  match r | (Ok x) = tens x | (Err e) = []

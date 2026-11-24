@@ -95,44 +95,23 @@ pub(crate) unsafe fn mlc_save_json(
 // `mlc_save_voidstar` and `mlc_write_voidstar_data_packet_to_fd` both
 // build a MORLOC_DATA_PACKET (header + SCHEMA_STRING + optional
 // FRAME_INDEX + payload) from a voidstar. `build_voidstar_data_packet_parts`
-// does the shared work: flatten voidstar, build metadata, optionally
-// zstd-compress, assemble the 32-byte header. Emit strategies differ:
+// does the shared work: size the value, build metadata, optionally
+// flatten and zstd-compress it, assemble the 32-byte header. Emit strategies differ:
 // `mlc_save_voidstar` writes to a temp file then renames for atomicity;
 // the fd variant writes linearly to a caller-supplied fd.
 
-// RAII wrapper for a libc::malloc'd buffer. Kept alive alongside
-// VoidstarDataPacketParts so payload_ptr stays valid on the uncompressed
-// path.
-struct CBlob(*mut u8);
-impl Drop for CBlob {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { libc::free(self.0 as *mut c_void); }
-        }
-    }
-}
-
-// Emit-ready components of a voidstar DATA packet. Holds the flattened
-// blob and optional compressed bytes so payload_ptr() borrows remain
-// valid for the parts' lifetime.
+// Emit-ready components of a voidstar DATA packet. An uncompressed payload
+// is not materialised: it is flattened straight into the fd when written.
 struct VoidstarDataPacketParts {
     hdr_bytes: [u8; 32],
     metadata: Vec<u8>,
     payload_len: usize,
-    // Uncompressed payload lives in blob; compressed payload lives in
-    // comp_bytes. Exactly one of the two is the payload source.
-    #[allow(dead_code)]
-    blob: CBlob,
-    comp_bytes: Option<Vec<u8>>,
+    payload: PacketPayload,
 }
 
-impl VoidstarDataPacketParts {
-    fn payload_ptr(&self) -> *const u8 {
-        match &self.comp_bytes {
-            Some(b) => b.as_ptr(),
-            None => self.blob.0 as *const u8,
-        }
-    }
+enum PacketPayload {
+    Flat { data: crate::shm::AbsPtr, schema: crate::schema::Schema },
+    Compressed(Vec<u8>),
 }
 
 // Build packet parts. Returns None on error with errmsg set.
@@ -142,20 +121,11 @@ unsafe fn build_voidstar_data_packet_parts(
     clvl: crate::compression::CompressionLevel,
     errmsg: *mut *mut c_char,
 ) -> Option<VoidstarDataPacketParts> {
-    use crate::packet_ffi::flatten_voidstar_to_buffer;
-
-    let mut blob: *mut u8 = ptr::null_mut();
-    let mut blob_size: usize = 0;
-    let mut err: *mut c_char = ptr::null_mut();
-    if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
-        set_errmsg(errmsg, &take_reason(err));
-        return None;
-    }
-    let blob = CBlob(blob);
+    let schema_rs = crate::cschema::CSchema::to_rust(schema);
+    let abs = data as crate::shm::AbsPtr;
 
     // Self-describing SCHEMA_STRING lets IFile / `morloc-nexus file`
     // read the payload schema straight from the packet metadata.
-    let schema_rs = crate::cschema::CSchema::to_rust(schema);
     let schema_str = morloc_runtime_types::schema::schema_to_string(&schema_rs);
     let mut schema_body = schema_str.as_bytes().to_vec();
     schema_body.push(0); // NUL-terminator expected by decode_schema_entry
@@ -165,11 +135,21 @@ unsafe fn build_voidstar_data_packet_parts(
         &schema_body,
     );
 
-    let (metadata, comp_bytes, compression_byte, payload_len) = if clvl.is_none() {
-        (base_meta, None, crate::packet::PACKET_COMPRESSION_NONE, blob_size)
+    let (metadata, payload, compression_byte, payload_len) = if clvl.is_none() {
+        let total = match crate::ffi::calc_voidstar_size_inner(abs, &schema_rs) {
+            Ok(n) => n,
+            Err(e) => { set_errmsg(errmsg, &e); return None; }
+        };
+        let payload = PacketPayload::Flat { data: abs, schema: schema_rs };
+        (base_meta, payload, crate::packet::PACKET_COMPRESSION_NONE, total)
     } else {
-        let raw_slice = std::slice::from_raw_parts(blob.0 as *const u8, blob_size);
-        match crate::compression::compress_payload_zstd(raw_slice, clvl) {
+        let raw = match crate::voidstar::flatten_to_buffer(abs, &schema_rs) {
+            Ok(b) => b,
+            Err(e) => { set_errmsg(errmsg, &e); return None; }
+        };
+        let compressed = crate::compression::compress_payload_zstd(&raw, clvl);
+        drop(raw);
+        match compressed {
             Ok((bytes, frames)) => {
                 let body = crate::packet::encode_frame_index_entry(&frames);
                 let metadata = crate::packet::append_metadata_entry(
@@ -178,7 +158,7 @@ unsafe fn build_voidstar_data_packet_parts(
                     &body,
                 );
                 let payload_len = bytes.len();
-                (metadata, Some(bytes), crate::packet::PACKET_COMPRESSION_ZSTD, payload_len)
+                (metadata, PacketPayload::Compressed(bytes), crate::packet::PACKET_COMPRESSION_ZSTD, payload_len)
             }
             Err(e) => { set_errmsg(errmsg, &e); return None; }
         }
@@ -194,31 +174,36 @@ unsafe fn build_voidstar_data_packet_parts(
     // 2 version + 2 flavor + 2 mode + 1 cmd_type + 1 source + 1 format.
     hdr_bytes[15] = compression_byte;
 
-    Some(VoidstarDataPacketParts { hdr_bytes, metadata, payload_len, blob, comp_bytes })
+    Some(VoidstarDataPacketParts { hdr_bytes, metadata, payload_len, payload })
 }
 
-// Write parts sequentially to fd. On failure returns the C errmsg
-// pointer produced by write_binary_fd; caller owns cleanup.
+// Write parts sequentially to fd. Returns 0, -1 with errmsg set, or
+// PACKET_TO_FD_PIPE_CLOSED without errmsg on EPIPE.
 unsafe fn write_data_packet_parts_to_fd(
     fd: libc::c_int,
     parts: &VoidstarDataPacketParts,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    use crate::packet_ffi::write_all_fd;
-    let pieces: [(*const u8, usize); 3] = [
-        (parts.hdr_bytes.as_ptr(), parts.hdr_bytes.len()),
-        (parts.metadata.as_ptr(), parts.metadata.len()),
-        (parts.payload_ptr(), parts.payload_len),
-    ];
-    for (buf, len) in pieces {
-        if len > 0 {
-            let n = write_all_fd(fd, buf, len, errmsg);
+    use crate::packet_ffi::{write_all_fd, write_flat_voidstar_to_fd};
+    let pieces: [&[u8]; 2] = [&parts.hdr_bytes, &parts.metadata];
+    for buf in pieces {
+        if !buf.is_empty() {
+            let n = write_all_fd(fd, buf.as_ptr(), buf.len(), errmsg);
             if n < 0 {
                 return n;
             }
         }
     }
-    0
+    let n = match &parts.payload {
+        PacketPayload::Compressed(bytes) if !bytes.is_empty() => {
+            write_all_fd(fd, bytes.as_ptr(), bytes.len(), errmsg)
+        }
+        PacketPayload::Compressed(_) => 0,
+        PacketPayload::Flat { data, schema } => {
+            write_flat_voidstar_to_fd(fd, *data, schema, parts.payload_len, errmsg)
+        }
+    };
+    if n < 0 { n } else { 0 }
 }
 
 // ── Temp-file gather (whole-form with:/render:) ────────────────────────────
@@ -437,23 +422,13 @@ pub fn begin_dispatch() -> (u64, u64) {
 /// register it for removal at end-of-call, and return its path.
 pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     clear_errmsg(errmsg);
-    let dir = process_temp_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let template = format!("{}/morloc-gather-XXXXXX\0", dir.display());
-    let mut buf: Vec<u8> = template.into_bytes();
-    let fd = morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char);
-    if fd < 0 {
-        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
-        return ptr::null_mut();
-    }
-    libc::close(fd);
-    buf.pop(); // drop the NUL mkstemp left in place
-    let path = String::from_utf8_lossy(&buf).into_owned();
-    temp_registry().entries.push(TempEntry {
-        owner: current_temp_owner(),
-        born: next_dispatch_id(),
-        path: std::path::PathBuf::from(&path),
-    });
+    let path = match make_temp(current_temp_owner(), next_dispatch_id()) {
+        Ok(p) => p,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
     match CString::new(path) {
         Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
@@ -461,6 +436,57 @@ pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
             ptr::null_mut()
         }
     }
+}
+
+/// A fresh empty file in the morloc tmpdir, registered for removal with the
+/// call `owner` (born at dispatch id `born`) as @tmpfile registers its own.
+pub(crate) fn make_temp(owner: u64, born: u64) -> Result<String, MorlocError> {
+    let dir = process_temp_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let template = format!("{}/morloc-gather-XXXXXX\0", dir.display());
+    let mut buf: Vec<u8> = template.into_bytes();
+    let fd = unsafe { morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char) };
+    if fd < 0 {
+        return Err(MorlocError::Io(std::io::Error::last_os_error()));
+    }
+    unsafe { libc::close(fd) };
+    buf.pop(); // drop the NUL mkstemp left in place
+    let path = String::from_utf8_lossy(&buf).into_owned();
+    temp_registry().entries.push(TempEntry {
+        owner,
+        born,
+        path: std::path::PathBuf::from(&path),
+    });
+    Ok(path)
+}
+
+/// Remove a file `make_temp` made, dropping its registration.
+pub(crate) fn unlink_temp(path: &str) {
+    let pb = std::path::PathBuf::from(path);
+    temp_registry().entries.retain(|e| e.path != pb);
+    let _ = std::fs::remove_file(&pb);
+}
+
+/// SLOT-15: whether `path` is a file @tmpfile made in this process and not
+/// yet removed.
+pub(crate) fn is_registered_temp(path: &str) -> bool {
+    temp_registry().entries.iter().any(|e| e.path.as_os_str() == path)
+}
+
+/// SLOT-15: whether `path` lies under this run's temp root, which the run
+/// removes, whichever of its processes made the file.
+pub(crate) fn is_run_temp(path: &str) -> bool {
+    if run_dir().is_none() {
+        return false;
+    }
+    let p = std::path::Path::new(path);
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return false;
+    }
+    let (Some(dir), Ok(root)) = (p.parent(), std::fs::canonicalize(temp_root())) else {
+        return false;
+    };
+    std::fs::canonicalize(dir).is_ok_and(|d| d.starts_with(root))
 }
 
 /// @close on a Str path: unlink a registered temp file and drop it from the
@@ -497,8 +523,12 @@ pub(crate) unsafe fn mlc_unlink_tmp(
         }
         None => false,
     };
+    let owned_here = reg.entries.iter().any(|e| e.path == pb);
     drop(reg);
-    if !registered {
+    let gather_of_run = !owned_here
+        && is_run_temp(path_str)
+        && pb.file_name().is_some_and(|n| n.to_string_lossy().starts_with("morloc-gather-"));
+    if !registered && !gather_of_run {
         set_errmsg(errmsg, &MorlocError::Other(format!(
             "@close: '{}' is not a registered temp file; @close only removes \
              files created by the whole-list with:/render: gather",
@@ -544,7 +574,6 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     for p in doomed {
         let _ = std::fs::remove_file(&p);
     }
-    crate::cell::sweep_dispatch(call_id, oldest);
     crate::lease::reclaim_if_due();
     crate::stream::release_ended_if_rung();
 }
@@ -721,7 +750,7 @@ pub(crate) unsafe fn mlc_compare(
     errmsg: *mut *mut c_char,
 ) -> libc::c_int {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
+    let rs = crate::packet_ffi::rust_schema(schema);
     match crate::compare::compare_voidstar_values(a as *const u8, b as *const u8, &rs) {
         Ok(o) => o as libc::c_int,
         Err(e) => {
@@ -1031,9 +1060,8 @@ pub(crate) unsafe fn mlc_open_stdin(
     )
 }
 
-/// `@stdout :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 1;
-/// `mlc_write` routes through the pool-nexus RPC socket. At most one
-/// `@stdout` per nexus.
+/// `@stdout :: <IO> OStream a` -- typed intrinsic. SLOT-16: the nexus
+/// writes fd 1. At most one `@stdout` per nexus.
 pub(crate) unsafe fn mlc_open_stdout(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1053,14 +1081,13 @@ pub(crate) unsafe fn mlc_open_stdout(
 /// not wedge the next @stdout open with "already open". The Rust/C++ pool
 /// loop (pool_dispatch_packet) calls the underlying reclaim directly;
 /// Python and R call this C-ABI wrapper from their per-dispatch handlers.
-/// Cheap on the common no-stdio path (a single thread-local read).
+/// Cheap on the common no-stdio path (thread-local reads).
 pub(crate) unsafe fn mlc_reclaim_stdio_after_dispatch() {
     crate::stream::pool_reclaim_stdio_after_dispatch();
 }
 
-/// `@stderr :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 2;
-/// `mlc_write` routes through the pool-nexus RPC socket. At most one
-/// `@stderr` per nexus.
+/// `@stderr :: <IO> OStream a` -- typed intrinsic. SLOT-16: the nexus
+/// writes fd 2. At most one `@stderr` per nexus.
 pub(crate) unsafe fn mlc_open_stderr(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1284,6 +1311,50 @@ pub(crate) unsafe fn mlc_next_with(
     }
 }
 
+/// A pool's callback for `mlc_ifile_slice_with`, given the slice's length
+/// before any piece: 0 to go on, nonzero having kept its own error.
+pub type SliceBegin = unsafe extern "C" fn(ctx: *mut c_void, n: u64) -> i32;
+
+/// `.[start:stop]` on an IFile decoded piece by piece in place (SLOT-25):
+/// `bounds` holds start and stop. 0 when every piece was decoded, 1 when a
+/// callback failed (whatever the runtime did after), -1 with `errmsg` set
+/// when the runtime failed.
+pub(crate) unsafe fn mlc_ifile_slice_with(
+    handle: i64,
+    bounds: *const IFileWalkArg,
+    on_begin: Option<SliceBegin>,
+    decode: Option<NextDecode>,
+    ctx: *mut c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let (Some(on_begin), Some(decode)) = (on_begin, decode) else {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_ifile_slice_with: no callback".into()));
+        return -1;
+    };
+    if bounds.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_ifile_slice_with: no bounds".into()));
+        return -1;
+    }
+    let b = std::slice::from_raw_parts(bounds, 2);
+    let opt = |a: &IFileWalkArg| if a.has != 0 { Some(a.value) } else { None };
+    let res = crate::stream::shared_ifile_slice_with(
+        handle,
+        opt(&b[0]),
+        opt(&b[1]),
+        &mut |n| on_begin(ctx, n as u64) == 0,
+        &mut |data, space| decode(ctx, data as *const c_void, space) == 0,
+    );
+    match res {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 /// Read the next frame (sub-packet) of a file-backed IStream as a fresh SHM
 /// Array<a>. At the end of the stream returns null and sets `*eof` to 1; an
 /// empty frame is an empty Array with `*eof` 0. Used by `@replay`.
@@ -1379,7 +1450,11 @@ pub(crate) unsafe fn mlc_write(
     let written = crate::compression::CompressionLevel::from_int(level).and_then(|l| {
         crate::stream::shared_write_subpacket(handle, l, payload_voidstar as crate::shm::AbsPtr)
     });
-    match written {
+    write_result(written, errmsg)
+}
+
+unsafe fn write_result(r: Result<(), MorlocError>, errmsg: *mut *mut c_char) -> i32 {
+    match r {
         Ok(()) => 0,
         // Broken pipe is an <IO> condition, not a recoverable error: return
         // the reserved code with NO errmsg so the C++ shim throws a distinct
@@ -1392,6 +1467,152 @@ pub(crate) unsafe fn mlc_write(
     }
 }
 
+/// SLOT-36: begin an in-place `@write` batch on `handle`.
+pub(crate) unsafe fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    let nowait = flags & morloc_runtime_types::MLC_WRITE_NOWAIT != 0;
+    let begun = crate::compression::CompressionLevel::from_int(level).and_then(|l| crate::stream::write_begin(handle, l, nowait));
+    match begun {
+        Ok(crate::stream::Begun::Fallback) => morloc_runtime_types::MLC_WRITE_FALLBACK,
+        r => write_result(r.map(|_| ()), errmsg),
+    }
+}
+
+/// SLOT-36: the room for one element of `size` portable bytes.
+pub(crate) unsafe fn mlc_write_place(size: u64, reached: *const u8, room: *mut crate::stream::MlcRoom, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    match crate::stream::write_place(size as usize, reached) {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        r => write_result(
+            r.map(|r| {
+                // SAFETY: SLOT-36: the caller passes room for one MlcRoom.
+                unsafe { *room = r.expect("matched above") }
+            }),
+            errmsg,
+        ),
+    }
+}
+
+/// SLOT-36: place and write one leaf element (`mlc_write_place_bytes` in
+/// morloc.h).
+pub(crate) unsafe fn mlc_write_place_bytes(
+    src: *const u8,
+    n: u64,
+    flags: u32,
+    reached: *const u8,
+    end: *mut *const u8,
+    bad: *mut i64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let mut first_bad = None;
+    let r = usize::try_from(n)
+        .map_err(|_| MorlocError::Other("@write: a leaf is too large".into()))
+        .and_then(|n| crate::stream::write_place_bytes(src, n, flags, reached, &mut first_bad));
+    match r {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        Ok(Some(e)) => {
+            // SAFETY: SLOT-36: the caller passes room for the end pointer.
+            unsafe { *end = e };
+            0
+        }
+        Err(e) => match first_bad {
+            Some(i) => {
+                // SAFETY: SLOT-36: the caller passes room for the offset.
+                unsafe { *bad = i as i64 };
+                set_errmsg(errmsg, &e);
+                morloc_runtime_types::MLC_WRITE_NOT_TEXT
+            }
+            None => write_result(Err(e), errmsg),
+        },
+    }
+}
+
+/// SLOT-36: one leaf of a list of leaves (`mlc_piece_t` in morloc.h).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MlcPiece {
+    pub data: *const u8,
+    pub n: u64,
+}
+
+/// SLOT-36: place and write one list-of-leaves element (`mlc_write_place_pieces`
+/// in morloc.h).
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn mlc_write_place_pieces(
+    pieces: *const MlcPiece,
+    k: u64,
+    flags: u32,
+    reached: *const u8,
+    end: *mut *const u8,
+    bad_piece: *mut i64,
+    bad: *mut i64,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let mut first_bad = None;
+    let too_large = || MorlocError::Other("@write: a list of leaves is too large".into());
+    let r = usize::try_from(k).map_err(|_| too_large()).and_then(|k| {
+        let given: &[MlcPiece] = if k == 0 { &[] } else { std::slice::from_raw_parts(pieces, k) };
+        let pieces = given
+            .iter()
+            .map(|p| usize::try_from(p.n).map(|n| (p.data, n)).map_err(|_| too_large()))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::stream::write_place_pieces(&pieces, flags, reached, &mut first_bad)
+    });
+    match r {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        Ok(Some(e)) => {
+            // SAFETY: SLOT-36: the caller passes room for the end pointer.
+            unsafe { *end = e };
+            0
+        }
+        Err(e) => match first_bad {
+            Some((j, i)) => {
+                // SAFETY: SLOT-36: the caller passes room for the two offsets.
+                unsafe {
+                    *bad_piece = j as i64;
+                    *bad = i as i64;
+                }
+                set_errmsg(errmsg, &e);
+                morloc_runtime_types::MLC_WRITE_NOT_TEXT
+            }
+            None => write_result(Err(e), errmsg),
+        },
+    }
+}
+
+/// SLOT-36: the slots of up to `k` fixed-width or inline `Int` elements.
+pub(crate) unsafe fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    match crate::stream::write_place_run(k as usize, reached) {
+        Ok(None) => morloc_runtime_types::MLC_WRITE_WOULD_BLOCK,
+        r => write_result(
+            r.map(|r| {
+                let (p, n) = r.expect("matched above");
+                // SAFETY: SLOT-36: the caller passes one pointer and one count.
+                unsafe {
+                    *slots = p;
+                    *placed = n as u64;
+                }
+            }),
+            errmsg,
+        ),
+    }
+}
+
+/// SLOT-37: wait for the queue room a would-block placement lacked.
+pub(crate) unsafe fn mlc_write_wait(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    write_result(crate::stream::write_wait(reached), errmsg)
+}
+
+/// SLOT-36
+pub(crate) unsafe fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    write_result(crate::stream::write_commit(reached), errmsg)
+}
+
 /// `@flush handle`: force any buffered elements to be written as a
 /// sub-packet now, without closing the stream. No-op when the buffer
 /// is empty. Useful for tests that need deterministic sub-packet
@@ -1402,22 +1623,17 @@ pub(crate) unsafe fn mlc_flush(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    match crate::stream::shared_flush_buffer(handle) {
-        Ok(()) => 0,
-        // See mlc_write: broken pipe surfaces as the reserved code (no errmsg).
-        Err(MorlocError::PipeClosed) => crate::ipc_ffi::note_pipe_closed(),
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            1
-        }
-    }
+    write_result(crate::stream::shared_flush_buffer(handle), errmsg)
 }
 
 /// @tell: number of elements written to the process's @stdout OStream so far
 /// (0 if none open). Never fails.
 pub(crate) unsafe fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
     clear_errmsg(errmsg);
-    crate::stream::stdout_element_count()
+    crate::stream::stdout_element_count().unwrap_or_else(|e| {
+        set_errmsg(errmsg, &e);
+        0
+    })
 }
 
 /// `@append schema_str path`: open an existing stream file for append.
@@ -2149,6 +2365,27 @@ pub(crate) unsafe fn mlc_materialize_subpacket_from_bytes(
     elem_schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
+    materialize_subpacket_from_bytes(bytes, n, elem_schema, crate::origin::Origin::Outside, errmsg)
+}
+
+/// `mlc_materialize_subpacket_from_bytes` of a frame of this run's own
+/// output streams, a value the program built (DIM-3).
+pub(crate) unsafe fn mlc_materialize_own_subpacket_from_bytes(
+    bytes: *const u8,
+    n: u64,
+    elem_schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    materialize_subpacket_from_bytes(bytes, n, elem_schema, crate::origin::Origin::Program, errmsg)
+}
+
+unsafe fn materialize_subpacket_from_bytes(
+    bytes: *const u8,
+    n: u64,
+    elem_schema: *const CSchema,
+    origin: crate::origin::Origin,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
     const FN: &str = "mlc_materialize_subpacket_from_bytes";
     wrap_c_call(errmsg, ptr::null_mut(), || {
         if bytes.is_null() {
@@ -2158,8 +2395,8 @@ pub(crate) unsafe fn mlc_materialize_subpacket_from_bytes(
             return Err(MorlocError::Other(format!("{}: null schema", FN)));
         }
         let slice = std::slice::from_raw_parts(bytes, n as usize);
-        let rs = CSchema::to_rust(elem_schema);
-        let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs)?;
+        let rs = crate::packet_ffi::rust_schema(elem_schema);
+        let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs, origin)?;
         Ok(p as *mut c_void)
     })
 }
@@ -2446,10 +2683,8 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             assert!(wrong.is_null() && refused, "n={n} level={level} .{ext} loaded at the wrong type");
             assert!(!right.is_null(), "n={n} level={level} .{ext}: {:?}", unsafe { reason(err) });
-            unsafe {
-                let _ = crate::shm::shfree(value as *mut u8);
-                let _ = crate::shm::shfree(right as *mut u8);
-            }
+            let _ = crate::shm::shfree(value as *mut u8);
+            let _ = crate::shm::shfree(right as *mut u8);
         }
         unsafe {
             crate::ffi::free_schema(ints);
@@ -2608,6 +2843,11 @@ mod c_abi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn mlc_ifile_slice_with(handle: i64, bounds: *const IFileWalkArg, on_begin: super::SliceBegin, decode: super::NextDecode, ctx: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_ifile_slice_with(handle, bounds, Some(on_begin), Some(decode), ctx, errmsg)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void {
         super::mlc_next_frame(handle, eof, errmsg)
     }
@@ -2620,6 +2860,52 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_write(level, handle, payload_voidstar, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_begin(level, handle, flags, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_place_bytes(src: *const u8, n: u64, flags: u32, reached: *const u8, end: *mut *const u8, bad: *mut i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place_bytes(src, n, flags, reached, end, bad, errmsg)
+    }
+
+    #[no_mangle]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe extern "C" fn mlc_write_place_pieces(pieces: *const super::MlcPiece, k: u64, flags: u32, reached: *const u8, end: *mut *const u8, bad_piece: *mut i64, bad: *mut i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place_pieces(pieces, k, flags, reached, end, bad_piece, bad, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_place(size: u64, reached: *const u8, room: *mut crate::stream::MlcRoom, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place(size, reached, room, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_place_run(k, reached, slots, placed, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_wait(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_wait(reached, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_commit(reached, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mlc_write_abort() {
+        crate::stream::write_abort()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mlc_write_open() -> bool {
+        crate::stream::write_open()
     }
 
     #[no_mangle]
@@ -2715,5 +3001,166 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(bytes: *const u8, n: u64, elem_schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
         super::mlc_materialize_subpacket_from_bytes(bytes, n, elem_schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_materialize_own_subpacket_from_bytes(bytes: *const u8, n: u64, elem_schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_materialize_own_subpacket_from_bytes(bytes, n, elem_schema, errmsg)
+    }
+}
+
+#[cfg(test)]
+mod packet_emit_tests {
+    //! The voidstar data packet `@save` and `-f voidstar` write: header,
+    //! metadata, then the flat form, compressed or not.
+    use super::*;
+    use crate::schema::parse_schema;
+
+    // The packet as built from a materialised flat form.
+    fn flattened_packet(abs: crate::shm::AbsPtr, rs: &crate::schema::Schema, level: u8) -> Vec<u8> {
+        let lvl = crate::compression::CompressionLevel::from_u8(level).unwrap();
+        let raw = crate::voidstar::flatten_to_buffer(abs, rs).unwrap();
+        let mut schema_body = morloc_runtime_types::schema::schema_to_string(rs).into_bytes();
+        schema_body.push(0);
+        let mut meta = crate::packet::append_metadata_entry(
+            &[], crate::packet::METADATA_TYPE_SCHEMA_STRING, &schema_body,
+        );
+        let (payload, comp) = if lvl.is_none() {
+            (raw, crate::packet::PACKET_COMPRESSION_NONE)
+        } else {
+            let (bytes, frames) = crate::compression::compress_payload_zstd(&raw, lvl).unwrap();
+            let body = crate::packet::encode_frame_index_entry(&frames);
+            meta = crate::packet::append_metadata_entry(
+                &meta, crate::packet::METADATA_TYPE_FRAME_INDEX, &body,
+            );
+            (bytes, crate::packet::PACKET_COMPRESSION_ZSTD)
+        };
+        let mut header = crate::packet::PacketHeader::data_mesg(
+            crate::packet::PACKET_FORMAT_VOIDSTAR, payload.len() as u64,
+        );
+        header.offset = meta.len() as u32;
+        let mut out = header.to_bytes().to_vec();
+        out[15] = comp;
+        out.extend_from_slice(&meta);
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    fn read_pipe_while<F: FnOnce(libc::c_int)>(write: F) -> Vec<u8> {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let rd = fds[0];
+        let reader = std::thread::spawn(move || {
+            use std::io::Read;
+            use std::os::unix::io::FromRawFd;
+            let mut f = unsafe { std::fs::File::from_raw_fd(rd) };
+            let mut v = Vec::new();
+            f.read_to_end(&mut v).unwrap();
+            v
+        });
+        write(fds[1]);
+        unsafe { libc::close(fds[1]) };
+        reader.join().unwrap()
+    }
+
+    fn cases() -> Vec<(String, &'static str)> {
+        let big: Vec<String> = (0..70_000).map(|i| format!("{}.5", i)).collect();
+        let words: Vec<String> = (0..5_000).map(|i| format!("\"w{}\"", "x".repeat(i % 37))).collect();
+        vec![
+            ("42".into(), "i4"),
+            ("\"hello\"".into(), "s"),
+            ("[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]".into(), "af8"),
+            ("[1, 2, 3, 4, 5]".into(), "au1"),
+            ("[[1,2,3],[4,5],[]]".into(), "aai4"),
+            ("[1, \"hello\"]".into(), "t2i4s"),
+            ("null".into(), "?s"),
+            (format!("[{}]", big.join(",")), "af8"),
+            (format!("[{}]", words.join(",")), "as"),
+        ]
+    }
+
+    #[test]
+    fn save_writes_the_flattened_packet_bytes() {
+        let _shm = crate::init_test_shm();
+        let dir = std::env::temp_dir().join(format!("mlc-save-bytes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (json, sch) in cases() {
+            let rs = parse_schema(sch).unwrap();
+            let abs = crate::json::read_json_with_schema(&json, &rs).unwrap();
+            let cs = CSchema::from_rust(&rs);
+            for level in [0u8, 3] {
+                let path = dir.join(format!("v-{sch}-{level}.bin"));
+                let cpath = CString::new(path.to_str().unwrap()).unwrap();
+                let mut err: *mut c_char = ptr::null_mut();
+                let rc = unsafe {
+                    mlc_save_voidstar(abs as *const c_void, cs, level as i64, cpath.as_ptr(), &mut err)
+                };
+                assert_eq!(rc, 0, "save {sch} level {level}");
+                let got = std::fs::read(&path).unwrap();
+                assert!(got == flattened_packet(abs, &rs, level), "save {sch} level {level}: bytes differ");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_packet_to_a_pipe_has_the_flattened_bytes() {
+        let _shm = crate::init_test_shm();
+        for (json, sch) in cases() {
+            let rs = parse_schema(sch).unwrap();
+            let abs = crate::json::read_json_with_schema(&json, &rs).unwrap();
+            let cs = CSchema::from_rust(&rs);
+            for level in [0u8, 3] {
+                let mut n = 0;
+                let got = read_pipe_while(|fd| {
+                    let mut err: *mut c_char = ptr::null_mut();
+                    n = unsafe {
+                        mlc_write_voidstar_data_packet_to_fd(abs as *const c_void, cs, level, fd, &mut err)
+                    };
+                });
+                assert_eq!(n, got.len() as i64, "{sch} level {level}: returned size");
+                assert!(got == flattened_packet(abs, &rs, level), "{sch} level {level}: bytes differ");
+            }
+        }
+    }
+
+    #[test]
+    fn the_streamed_flat_form_equals_flatten_to_buffer() {
+        let _shm = crate::init_test_shm();
+        for (json, sch) in cases() {
+            let rs = parse_schema(sch).unwrap();
+            let abs = crate::json::read_json_with_schema(&json, &rs).unwrap();
+            let want = crate::voidstar::flatten_to_buffer(abs, &rs).unwrap();
+            let total = crate::ffi::calc_voidstar_size_inner(abs, &rs).unwrap();
+            assert_eq!(total, want.len(), "{sch}");
+            let got = read_pipe_while(|fd| {
+                let mut err: *mut c_char = ptr::null_mut();
+                let n = unsafe {
+                    crate::packet_ffi::write_flat_voidstar_to_fd(fd, abs, &rs, total, &mut err)
+                };
+                assert_eq!(n, total as i64, "{sch}");
+            });
+            assert!(got == want, "{sch}: streamed flat form differs");
+        }
+    }
+
+    #[test]
+    fn a_closed_pipe_is_reported_as_closed() {
+        let _shm = crate::init_test_shm();
+        let rs = parse_schema("af8").unwrap();
+        let json = format!("[{}]", vec!["1.5"; 100_000].join(","));
+        let abs = crate::json::read_json_with_schema(&json, &rs).unwrap();
+        let cs = CSchema::from_rust(&rs);
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { libc::close(fds[0]) };
+        let prev = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let n = unsafe { mlc_write_voidstar_data_packet_to_fd(abs as *const c_void, cs, 0, fds[1], &mut err) };
+        unsafe {
+            libc::signal(libc::SIGPIPE, prev);
+            libc::close(fds[1]);
+        }
+        assert_eq!(n, morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED);
     }
 }

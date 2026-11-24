@@ -29,6 +29,8 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , declaredReservedPrefixes
   , declaredReservedNames
   , declaredManifoldPrefix
+  , SourceRules (..)
+  , declaredSourceRules
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -194,10 +196,16 @@ data LangDescriptor = LangDescriptor
     -- when the callee first reads it (R's promises). Morloc calls by value,
     -- so each computed argument is bound to a local before its call.
     ldLazyArgs :: !Bool
+  , -- FORK-17: a call of user code with the fork check around it, the call
+    -- written as $CALL; empty when the pool checks some other way.
+    ldForkCheck :: !Text
   , -- External codegen (optional)
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
     ldTableImportFn :: !(Maybe Text) -- e.g. "mlc_table_import"
+  , -- The program's generated record classes (GEN-11): qualified name to
+    -- kind ("dataclass" or "pydantic"). Set by the compiler, never by lang.yaml.
+    ldGeneratedClasses :: !(Map.Map Text Text)
   , -- Build steps run per sourced file (lang.yaml @build: per_source:@)
     ldSourceHooks :: ![SourceHook]
   , -- == Template fields (Layer 1 & 2) ==
@@ -206,6 +214,8 @@ data LangDescriptor = LangDescriptor
     ldAssignOp :: !Text -- "=" or "<-"
   , ldAndOp :: !Text -- the short-circuit and: "and" or "&&"
   , ldOrOp :: !Text -- the short-circuit or: "or" or "||"
+  , ldNotOp :: !Text -- boolean negation: "not" or "!"
+  , ldContinueStmt :: !Text -- next iteration of a loop: "continue" or "next"
   , -- Lambda
     ldLambdaTemplate :: !Text -- e.g. "lambda {{args}}: {{body}}"
   , -- Do-block (effect wrapper)
@@ -221,7 +231,7 @@ data LangDescriptor = LangDescriptor
   , -- Import
     ldImportTemplate :: !Text -- e.g. "{{namespace}} = importlib.import_module(\"{{module_path}}\")"
   , -- Socket path
-    ldSocketPathTemplate :: !Text -- e.g. "os.path.join(global_state[\"tmpdir\"], {{socket}})"
+    ldSocketPathTemplate :: !Text -- e.g. "_mlc_socket_paths[{{socket}}]"
   , -- Resource packing for remote calls
     ldResourcePackTemplate :: !Text -- e.g. "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
   , -- Return statement
@@ -230,13 +240,18 @@ data LangDescriptor = LangDescriptor
     ldFuncDefHeader :: !Text -- e.g. "def {{name}}({{args}}):"
   , ldManifoldPrefix :: !Text
     -- ^ A manifold's function is this prefix followed by its id.
+  , ldReservedPrefixes :: ![Text]
+    -- ^ Prefixes no sourced name may start with.
   , ldPoolQualifier :: !Text
     -- ^ Prepended to a name the pool runtime defines where generated code
     -- refers to it (R: the runtime's environment).
+  , ldBuiltinQualifier :: !Text
+    -- ^ Prepended to a source with no file (a builtin), so it cannot resolve
+    -- to a name the pool defines (Python: its `builtins` module).
+  , ldKeywords :: ![Text]
+    -- ^ Words of the language that are not names; no source may be named
+    -- by one.
   , ldBlockStyle :: !BlockStyle
-  , -- Error wrapping
-    ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
-  , ldErrorWrapClose :: ![Text] -- Except block lines with {{name}} template var
   , ldFrameLabelStmt :: !Text
     -- ^ Written after a named function's definition, for a language that
     -- reads its trace from the call stack (EMIT-3): {{fname}} the generated
@@ -287,6 +302,12 @@ data LangDescriptor = LangDescriptor
     -- and {{caps}} (list literal of the captured-argument schema strings).
     -- Example Python: @"mlc_closure_table[{{mid}}] = {{caps}}"@; R:
     -- @"mlc_closure_table[[\"{{mid}}\"]] <- {{caps}}"@.
+  , ldWireConverterScope :: !Text
+    -- ^ Statement after the definition of a wire converter (a function a
+    -- closure codec names) that gives it the scope of generated code, where
+    -- the pool's runtime code is defined in a scope of its own.
+    -- Substitution: {{name}}. Example for R:
+    -- @"environment({{name}}) <- globalenv()"@; empty for Python.
   }
   deriving (Eq, Show, Generic)
 
@@ -361,8 +382,10 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldSourceHooks" (Y.Array mempty)
             . ins "ldAllowStringNull" (Y.Bool True)
             . ins "ldLazyArgs" (Y.Bool False)
+            . ins "ldForkCheck" (Y.String "")
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
+            . ins "ldGeneratedClasses" (Y.Object mempty)
             . ins "ldRealPosInf" (Y.String "")
             . ins "ldListLengthTemplate" (Y.String "")
             . ins "ldRealNegInf" (Y.String "")
@@ -370,6 +393,8 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldIntLiteralSuffix" (Y.String "")
             . ins "ldAndOp" (Y.String "&&")
             . ins "ldOrOp" (Y.String "||")
+            . ins "ldNotOp" (Y.String "!")
+            . ins "ldContinueStmt" (Y.String "continue")
             . ins "ldIntLiteralSuffixLimit" Y.Null
             . ins "ldIntLiteralPlainTypes" (Y.Array mempty)
             . ins "ldIntLiteralWide" (Y.Object mempty)
@@ -398,8 +423,6 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldReturnTemplate" (Y.String "return({{expr}})")
             . ins "ldFuncDefHeader" (Y.String "")
             . ins "ldBlockStyle" (Y.String "indent")
-            . ins "ldErrorWrapOpen" (Y.String "")
-            . ins "ldErrorWrapClose" (Y.Array mempty)
             . ins "ldFrameLabelStmt" (Y.String "")
             . ins "ldPatternStyle" (Y.String "fstring")
             . ins "ldConcatFn" (Y.String "")
@@ -418,12 +441,20 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteFooter" (Y.String "")
             . ins "ldLogWrap" (Y.String "")
             . ins "ldManifoldPrefix" (Y.String "m")
+            . ins "ldReservedPrefixes" (Y.Array mempty)
             . ins "ldPoolQualifier" (Y.String "")
+            . ins "ldBuiltinQualifier" (Y.String "")
+            . ins "ldKeywords" (Y.Array mempty)
             . ins "ldClosureRegisterEntry" (Y.String "")
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
+            . ins "ldWireConverterScope" (Y.String "")
             $ obj
-    Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
+    d <- Aeson.genericParseJSON Aeson.defaultOptions (Y.Object withDefaults)
+    let check = ldForkCheck d
+    if T.null check || T.count "$CALL" check == 1
+      then return d
+      else fail "ldForkCheck must name the call as $CALL exactly once"
 
 -- | Load a language descriptor from a YAML file
 loadLangDescriptor :: FilePath -> IO (Either String LangDescriptor)
@@ -473,6 +504,8 @@ defaultLangDescriptor name ext =
     , ldIntLiteralSuffix = ""
     , ldAndOp = "&&"
     , ldOrOp = "||"
+    , ldNotOp = "!"
+    , ldContinueStmt = "continue"
     , ldIntLiteralSuffixLimit = Nothing
     , ldIntLiteralPlainTypes = []
     , ldIntLiteralWide = Map.empty
@@ -487,8 +520,10 @@ defaultLangDescriptor name ext =
     , ldIsCompiled = False
     , ldAllowStringNull = True
     , ldLazyArgs = False
+    , ldForkCheck = ""
     , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
+    , ldGeneratedClasses = Map.empty
     , ldSourceHooks = []
     , -- Template fields
       ldAssignOp = "="
@@ -503,8 +538,6 @@ defaultLangDescriptor name ext =
     , ldReturnTemplate = "return({{expr}})"
     , ldFuncDefHeader = ""
     , ldBlockStyle = IndentBlock
-    , ldErrorWrapOpen = ""
-    , ldErrorWrapClose = []
     , ldFrameLabelStmt = ""
     , ldPatternStyle = FStringPattern
     , ldConcatFn = ""
@@ -523,10 +556,14 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteFooter = ""
     , ldLogWrap = ""
     , ldManifoldPrefix = "m"
+    , ldReservedPrefixes = []
     , ldPoolQualifier = ""
+    , ldBuiltinQualifier = ""
+    , ldKeywords = []
     , ldClosureRegisterEntry = ""
     , ldClosureTableHeader = ""
     , ldClosureTableEntry = ""
+    , ldWireConverterScope = ""
     }
 
 -- | The identifier and operator patterns a lang.yaml declares
@@ -573,6 +610,38 @@ declaredReservedNames content = do
   AesonTypes.parseEither
     (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedNames"))
     (v :: Aeson.Value)
+
+-- | What a lang.yaml says a sourced symbol may be, read in one decode: its
+-- name and operator patterns (both required and valid), the prefixes and
+-- names its pool reserves, and its keywords, which are not names.
+data SourceRules = SourceRules
+  { srNamePattern :: Text
+  , srOperatorPattern :: Text
+  , srReservedPrefixes :: [Text]
+  , srReservedNames :: [Text]
+  , srKeywords :: [Text]
+  }
+
+declaredSourceRules :: Text -> Either String SourceRules
+declaredSourceRules content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  rules <-
+    AesonTypes.parseEither
+      ( Aeson.withObject "lang.yaml" $ \o ->
+          SourceRules
+            <$> o Aeson..: "ldNamePattern"
+            <*> o Aeson..: "ldOperatorPattern"
+            <*> (maybe [] id <$> o Aeson..:? "ldReservedPrefixes")
+            <*> (maybe [] id <$> o Aeson..:? "ldReservedNames")
+            <*> (maybe [] id <$> o Aeson..:? "ldKeywords")
+      )
+      (v :: Aeson.Value)
+  mapM_ validPattern [("ldNamePattern", srNamePattern rules), ("ldOperatorPattern", srOperatorPattern rules)]
+  return rules
+  where
+    validPattern (key, pat)
+      | T.null pat = Left (key <> " is empty")
+      | otherwise = either (\e -> Left (key <> ": " <> e)) (const (Right ())) (matchNamePattern pat "")
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the
 -- language descriptor (lang.yaml); no language-specific identifier rule

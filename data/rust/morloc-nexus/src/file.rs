@@ -199,6 +199,19 @@ impl Classification {
 /// exits 0/1 based on whether any input produced an error or
 /// validation failure.
 pub fn run(args: &FileArgs) -> ! {
+    if args.repair {
+        let mut failed = false;
+        for path in &args.targets {
+            match repair_file(Path::new(path)) {
+                Ok(msg) => println!("{}: {}", path, msg),
+                Err(e) => {
+                    eprintln!("Error: {}: {}", path, e);
+                    failed = true;
+                }
+            }
+        }
+        std::process::exit(if failed { 1 } else { 0 });
+    }
     let probe_bytes = crate::cli::parse_byte_size("--bytes", &args.bytes) as usize;
     let opts = RenderOpts {
         no_file: args.no_file,
@@ -257,11 +270,104 @@ pub enum ValidationOutcome {
     StructureOnly,
 }
 
+/// SLOT-28: give a stream file a final REPAIRED footer over its complete
+/// sub-packets, replacing the file only once the new one is on disk.
+fn repair_file(path: &Path) -> Result<String, String> {
+    use morloc_runtime_types::packet as pk;
+    use std::io::{Read, Write};
+    use std::os::unix::io::AsRawFd;
+    let probe = classify_path(path, DEFAULT_PROBE_BYTES);
+    match &probe {
+        Classification::MorlocStreamPacket { footer: FooterInfo::Final { status, .. }, .. }
+            if *status != pk::FOOTER_STATUS_FAILED =>
+        {
+            return Ok(format!("nothing to repair: the stream is {}", footer_status_name(*status)));
+        }
+        Classification::MorlocStreamPacket { .. } => {}
+        _ => return Err("not a morloc stream file".into()),
+    }
+    let src = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    // A writer holds this lock while the stream is open (SLOT-31).
+    if unsafe { libc::flock(src.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("a writer has this stream open; repair it once the writer has ended".into());
+    }
+    let len = src.metadata().map_err(|e| e.to_string())?.len();
+    let plan = {
+        let mapped = Mapped::new(&src, len)?;
+        pk::repair_plan(mapped.bytes()).map_err(|e| e.to_string())?
+    };
+    let target = crate::phase2::resolve_target(&path.to_string_lossy());
+    let crate::orchestrate::Write::Staged { temp, dest } = crate::orchestrate::plan_write(&target)? else {
+        return Err("not a regular file".into());
+    };
+    let written = (|| -> std::io::Result<()> {
+        let mut out = std::fs::OpenOptions::new().write(true).truncate(true).open(&temp)?;
+        let copied = std::io::copy(&mut (&src).take(plan.data_end), &mut out)?;
+        if copied != plan.data_end {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the file shrank while it was repaired"));
+        }
+        out.write_all(&plan.footer)?;
+        out.sync_all()?;
+        std::fs::rename(&temp, &dest)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e.to_string());
+    }
+    Ok(format!("repaired: {} sub-packets, {} elements", plan.subpackets, plan.elements))
+}
+
+/// A read-only mapping of a whole file, unmapped on drop.
+struct Mapped {
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+impl Mapped {
+    fn new(file: &std::fs::File, len: u64) -> Result<Self, String> {
+        use std::os::unix::io::AsRawFd;
+        let len = usize::try_from(len).map_err(|_| "file too large to map".to_string())?;
+        if len == 0 {
+            return Err("empty file".into());
+        }
+        let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, file.as_raw_fd(), 0) };
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(Mapped { ptr, len })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the mapping covers `len` readable bytes until drop.
+        unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+    }
+}
+
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.ptr, self.len) };
+    }
+}
+
 fn run_validate(
     path: &str,
     cls: &Classification,
     user_schema: Option<&str>,
 ) -> ValidationOutcome {
+    // SLOT-29
+    if let Classification::MorlocStreamPacket { footer, .. } = cls {
+        let unfinished = match footer {
+            FooterInfo::Missing { .. } => Some("it has no footer, so its writer did not finish it"),
+            FooterInfo::Temp { .. } => Some("it has only a temporary footer: it is still being written, or its writer stopped"),
+            FooterInfo::Final { status, .. } if *status == morloc_runtime_types::packet::FOOTER_STATUS_FAILED => {
+                Some("its writer failed (the final footer says FAILED)")
+            }
+            FooterInfo::Final { .. } => None,
+        };
+        if let Some(why) = unfinished {
+            return ValidationOutcome::Failed(format!("{why}; `morloc-nexus file --repair` keeps its complete batches"));
+        }
+    }
     // Resolve a schema string: user-supplied wins, then a morloc-packet
     // embedded schema, else fall back to structure-only.
     let schema_str: Option<String> = match user_schema {
@@ -751,7 +857,7 @@ fn classify_stream_packet<R: Read + Seek>(
     let footer_result = if file_size < 32 + metadata_offset + STREAM_TAIL_SIZE as u64 {
         FooterInfo::Missing { walk: None }
     } else {
-        match read_stream_footer(f, file_size) {
+        match read_stream_footer(f, file_size, 32 + metadata_offset) {
             Ok(info) => info,
             Err(e) => return Classification::Error(e),
         }
@@ -840,7 +946,7 @@ fn forward_scan_stream_body<R: Read + Seek>(
             Some(t) => t,
             None => return Err("forward-scan sub-packet size overflow".into()),
         };
-        if cur + total > file_size {
+        if cur.checked_add(total).map_or(true, |end| end > file_size) {
             out.partial = true;
             break;
         }
@@ -876,6 +982,7 @@ fn forward_scan_stream_body<R: Read + Seek>(
 fn read_stream_footer<R: Read + Seek>(
     f: &mut R,
     file_size: u64,
+    body_start: u64,
 ) -> Result<FooterInfo, String> {
     let tail_off = file_size - STREAM_TAIL_SIZE as u64;
     f.seek(SeekFrom::Start(tail_off))
@@ -960,6 +1067,23 @@ fn read_stream_footer<R: Read + Seek>(
         diag.subpacket_count = entries.len() as u64;
     }
     if is_final {
+        morloc_runtime_types::packet::check_subpacket_index(
+            &entries,
+            body_start,
+            footer_off,
+            diag.element_count,
+            |off| {
+                let mut hdr = [0u8; 32];
+                f.seek(SeekFrom::Start(off))
+                    .and_then(|_| f.read_exact(&mut hdr))
+                    .map_err(morloc_runtime_types::error::MorlocError::Io)?;
+                let h = PacketHeader::from_bytes(&hdr)?;
+                { h.length }.checked_add(32 + { h.offset } as u64).ok_or_else(|| {
+                    morloc_runtime_types::error::MorlocError::Packet("sub-packet length overflows".into())
+                })
+            },
+        )
+        .map_err(|e| format!("stream footer subpacket index invalid: {}", e))?;
         Ok(FooterInfo::Final { diag, status, entries })
     } else {
         Ok(FooterInfo::Temp { diag })

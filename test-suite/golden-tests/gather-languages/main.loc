@@ -1,0 +1,164 @@
+-- Whole-list gather (STRM-4) across every pair of producer and handler
+-- languages. Each command's producer is sourced in one language and each of
+-- its `@render` flags names a handler in another, so `rowsCpp --py` gathers
+-- a C++ stream whole into a Python handler. Batch i holds i elements (batch
+-- 0 is empty), so a handler that saw dropped, merged or reordered batches
+-- prints different rows. Element types: [U64] rows, Str (with an empty
+-- string and spaces) and a record.
+
+module main
+  ( rowsCpp, rowsPy, rowsR, rowsRust
+  , strsCpp, strsPy, strsR, strsRust
+  , hitsCpp, hitsPy, hitsRust
+  )
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+--' A named score
+record Hit where
+  --' Name of the hit
+  name :: Str
+  --' Its score
+  score :: U64
+record Cpp => Hit = "hit_t"
+record Rust => Hit = "Hit"
+
+source Cpp from "impl.hpp"
+  ( "produce_rows" as produceRowsC, "produce_strs" as produceStrsC, "produce_hits" as produceHitsC
+  , "show_rows" as showRowsC, "show_strs" as showStrsC, "show_hits" as showHitsC )
+source Py from "impl.py"
+  ( "produce_rows" as produceRowsP, "produce_strs" as produceStrsP, "produce_hits" as produceHitsP
+  , "show_rows" as showRowsP, "show_strs" as showStrsP, "show_hits" as showHitsP )
+source R from "impl.R"
+  ( "produce_rows" as produceRowsR, "produce_strs" as produceStrsR
+  , "show_rows" as showRowsR, "show_strs" as showStrsR )
+source Rust from "impl.rs"
+  ( "produce_rows" as produceRowsRs, "produce_strs" as produceStrsRs, "produce_hits" as produceHitsRs
+  , "show_rows" as showRowsRs, "show_strs" as showStrsRs, "show_hits" as showHitsRs )
+
+produceRowsC :: I64 -> ([[U64]] -> <IO> ()) -> <IO> ()
+produceRowsP :: I64 -> ([[U64]] -> <IO> ()) -> <IO> ()
+produceRowsR :: I64 -> ([[U64]] -> <IO> ()) -> <IO> ()
+produceRowsRs :: I64 -> ([[U64]] -> <IO> ()) -> <IO> ()
+
+produceStrsC :: I64 -> ([Str] -> <IO> ()) -> <IO> ()
+produceStrsP :: I64 -> ([Str] -> <IO> ()) -> <IO> ()
+produceStrsR :: I64 -> ([Str] -> <IO> ()) -> <IO> ()
+produceStrsRs :: I64 -> ([Str] -> <IO> ()) -> <IO> ()
+
+produceHitsC :: I64 -> ([Hit] -> <IO> ()) -> <IO> ()
+produceHitsP :: I64 -> ([Hit] -> <IO> ()) -> <IO> ()
+produceHitsRs :: I64 -> ([Hit] -> <IO> ()) -> <IO> ()
+
+--' Rows shown by C++
+showRowsC :: [[U64]] -> Str
+--' Rows shown by Python
+showRowsP :: [[U64]] -> Str
+--' Rows shown by R
+showRowsR :: [[U64]] -> Str
+--' Rows shown by Rust
+showRowsRs :: [[U64]] -> Str
+
+--' Strings shown by C++
+showStrsC :: [Str] -> Str
+--' Strings shown by Python
+showStrsP :: [Str] -> Str
+--' Strings shown by R
+showStrsR :: [Str] -> Str
+--' Strings shown by Rust
+showStrsRs :: [Str] -> Str
+
+--' Hits shown by C++
+showHitsC :: [Hit] -> Str
+--' Hits shown by Python
+showHitsP :: [Hit] -> Str
+--' Hits shown by Rust
+showHitsRs :: [Hit] -> Str
+
+--' Stream rows from C++
+--' @render --cpp=showRowsC
+--' @render --py=showRowsP
+--' @render --r=showRowsR
+--' @render --rust=showRowsRs
+rowsCpp :: I64 -> <IO> (Collect [U64])
+rowsCpp b = @collect (produceRowsC b)
+
+--' Stream rows from Python
+--' @render --cpp=showRowsC
+--' @render --py=showRowsP
+--' @render --r=showRowsR
+--' @render --rust=showRowsRs
+rowsPy :: I64 -> <IO> (Collect [U64])
+rowsPy b = @collect (produceRowsP b)
+
+--' Stream rows from R
+--' @render --cpp=showRowsC
+--' @render --py=showRowsP
+--' @render --r=showRowsR
+--' @render --rust=showRowsRs
+rowsR :: I64 -> <IO> (Collect [U64])
+rowsR b = @collect (produceRowsR b)
+
+--' Stream rows from Rust
+--' @render --cpp=showRowsC
+--' @render --py=showRowsP
+--' @render --r=showRowsR
+--' @render --rust=showRowsRs
+rowsRust :: I64 -> <IO> (Collect [U64])
+rowsRust b = @collect (produceRowsRs b)
+
+--' Stream strings from C++
+--' @render --cpp=showStrsC
+--' @render --py=showStrsP
+--' @render --r=showStrsR
+--' @render --rust=showStrsRs
+strsCpp :: I64 -> <IO> (Collect Str)
+strsCpp b = @collect (produceStrsC b)
+
+--' Stream strings from Python
+--' @render --cpp=showStrsC
+--' @render --py=showStrsP
+--' @render --r=showStrsR
+--' @render --rust=showStrsRs
+strsPy :: I64 -> <IO> (Collect Str)
+strsPy b = @collect (produceStrsP b)
+
+--' Stream strings from R
+--' @render --cpp=showStrsC
+--' @render --py=showStrsP
+--' @render --r=showStrsR
+--' @render --rust=showStrsRs
+strsR :: I64 -> <IO> (Collect Str)
+strsR b = @collect (produceStrsR b)
+
+--' Stream strings from Rust
+--' @render --cpp=showStrsC
+--' @render --py=showStrsP
+--' @render --r=showStrsR
+--' @render --rust=showStrsRs
+strsRust :: I64 -> <IO> (Collect Str)
+strsRust b = @collect (produceStrsRs b)
+
+--' Stream hits from C++
+--' @render --cpp=showHitsC
+--' @render --py=showHitsP
+--' @render --rust=showHitsRs
+hitsCpp :: I64 -> <IO> (Collect Hit)
+hitsCpp b = @collect (produceHitsC b)
+
+--' Stream hits from Python
+--' @render --cpp=showHitsC
+--' @render --py=showHitsP
+--' @render --rust=showHitsRs
+hitsPy :: I64 -> <IO> (Collect Hit)
+hitsPy b = @collect (produceHitsP b)
+
+--' Stream hits from Rust
+--' @render --cpp=showHitsC
+--' @render --py=showHitsP
+--' @render --rust=showHitsRs
+hitsRust :: I64 -> <IO> (Collect Hit)
+hitsRust b = @collect (produceHitsRs b)

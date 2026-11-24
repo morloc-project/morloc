@@ -10,14 +10,12 @@ module main (emit)
 
 import root
 
-emit :: <IO> ()
-emit = do
-  o <- @stdout :: <IO> OStream Int
+emit :: <IO> (Collect Int)
+emit = @stdout (\o -> do
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5, 6, 7]
   @flush o
   @write 0 o [8, 9]
   @flush o
-  @write 0 o [10]
-  @close o
+  @write 0 o [10])

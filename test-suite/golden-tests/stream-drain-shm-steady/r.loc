@@ -24,7 +24,7 @@ drainWith s sink = do
     drainWith s sink
 
 --' Stream every batch to stdout
-consume :: IStream Int -> <IO> ()
+consume :: IStream Int -> <IO> (Collect Int)
 consume s = @collect (drainWith s)
 
 gather :: IStream Int -> [Int] -> <IO> [Int]

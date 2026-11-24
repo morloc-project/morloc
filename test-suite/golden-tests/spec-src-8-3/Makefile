@@ -5,8 +5,11 @@ PROG := $(STATE)/exe/prog/prog
 
 all:
 	rm -rf obs.txt *.err state
-	mkdir -p $(STATE)/src/morloc/plane/default
-	cp -r $(REAL)/src/morloc/plane/default/root $(REAL)/src/morloc/plane/default/root-py $(REAL)/src/morloc/plane/default/internal $(STATE)/src/morloc/plane/default/
+	mkdir -p $(STATE)/src/morloc/plane/std
+	cp -r $(REAL)/src/morloc/plane/std/root $(REAL)/src/morloc/plane/std/root-py $(REAL)/src/morloc/plane/std/internal $(STATE)/src/morloc/plane/std/
+	cp $(REAL)/LAYOUT $(STATE)/
+	mkdir -p $(STATE)/fdb
+	cp $(REAL)/fdb/std.root.module $(REAL)/fdb/std.root-py.module $(REAL)/fdb/std.internal.module $(STATE)/fdb/
 	printf 'def bump(x):\n    return x + 100.0\n' > bumpmod/bump.py
 	printf 'def own(x):\n    return x\n' > prog/own.py
 	$(M) install ./bumpmod 2>> build.err

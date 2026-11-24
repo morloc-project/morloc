@@ -1,0 +1,68 @@
+-- General pattern walks over an IFile of several sub-packets.
+--
+-- Three @write calls, each followed by @flush, give a stream file of
+-- three sub-packets of three elements. A path with an index or slice at
+-- the root followed by a bracket (`.[i].1.[j]`, `.[s:e:p].1.[j]`) is
+-- not a root-only fast path, so it goes through the runtime's general
+-- walker, which must find each element in the sub-packet that holds it.
+
+module main
+  ( walkCpp
+  , walkPy
+  , walkCompressedCpp
+  , walkCompressedPy
+  , indexThenBracket
+  , sliceThenBracket
+  )
+
+import root
+import root-cpp
+import root-py
+
+writeThree :: Int -> Str -> <IO> ()
+writeThree z path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (Int, [Int])))
+  @write z o [(0, [0, 1]), (1, [1, 2]), (2, [2, 3])]
+  @flush o
+  @write z o [(3, [3, 4]), (4, [4, 5]), (5, [5, 6])]
+  @flush o
+  @write z o [(6, [6, 7]), (7, [7, 8]), (8, [8, 9])]
+  @close o
+
+walkLang :: (Bool -> Bool) -> Int -> Str -> <IO> Bool
+walkLang langId z path = do
+  writeThree z path
+  Ok f <- @open path :: <IO> (Try Str (IFile [(Int, [Int])]))
+  langId $
+    ( .[5].0 f == 5 ) &&
+    ( .[7].1.[1] f == 8 ) &&
+    ( .[-1].1.[0] f == 8 ) &&
+    ( .[2:7].0 f == [2, 3, 4, 5, 6] ) &&
+    ( .[:].1.[0] f == [0, 1, 2, 3, 4, 5, 6, 7, 8] ) &&
+    ( .[1::3].1.[1] f == [2, 5, 8] ) &&
+    ( .[::-4].1.[0] f == [8, 4, 0] ) &&
+    ( .[4:4].1.[0] f == ([] :: [Int]) )
+
+walkCpp :: Str -> <IO> Bool
+walkCpp = walkLang idcpp 0
+
+walkPy :: Str -> <IO> Bool
+walkPy = walkLang idpy 0
+
+walkCompressedCpp :: Str -> <IO> Bool
+walkCompressedCpp = walkLang idcpp 3
+
+walkCompressedPy :: Str -> <IO> Bool
+walkCompressedPy = walkLang idpy 3
+
+indexThenBracket :: Str -> <IO> Int
+indexThenBracket path = do
+  writeThree 0 path
+  Ok f <- @open path :: <IO> (Try Str (IFile [(Int, [Int])]))
+  .[7].1.[1] f
+
+sliceThenBracket :: Str -> <IO> [Int]
+sliceThenBracket path = do
+  writeThree 0 path
+  Ok f <- @open path :: <IO> (Try Str (IFile [(Int, [Int])]))
+  .[1::3].1.[1] f

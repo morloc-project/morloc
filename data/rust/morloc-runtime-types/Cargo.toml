@@ -8,6 +8,10 @@ description = "Stateless morloc runtime types and pure functions shared between 
 [lib]
 crate-type = ["rlib"]
 
+[features]
+# Hooks that let another crate's tests refuse frame-decoding threads.
+test-hooks = []
+
 [dependencies]
 libc = { workspace = true }
 serde = { workspace = true }
@@ -16,3 +20,4 @@ twox-hash = { workspace = true }
 thiserror = { workspace = true }
 zstd = { workspace = true }
 memchr = "2"
+simdutf8 = { workspace = true }

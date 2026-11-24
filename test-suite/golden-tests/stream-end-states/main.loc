@@ -1,0 +1,66 @@
+-- How a stream ends decides whether it is read (SLOT-28, SLOT-29, SLOT-40).
+-- `ok` writes [1,2] then [3] and succeeds; `fails` writes [1,2] and then
+-- throws, so its packet stdout ends with a FAILED footer and `-o` leaves
+-- its file as it was. A FAILED stream is refused by `@load`, an IStream and
+-- an IFile. A file cut so it has no footer may be one still being written,
+-- so `@load` and an IStream read its complete batches and an IFile refuses
+-- it. A pipe that ends before a final footer, or with a FAILED one, fails
+-- its consumer. `morloc-nexus file --repair` closes either file and marks
+-- it repaired.
+
+module main (ok, fails, loadAll, first, fileLen, sumStdin)
+
+import root-py
+
+source Py from "impl.py" ("total", "is_empty" as isEmpty)
+
+total :: [Int] -> Int
+isEmpty :: [Int] -> Bool
+
+--' Write two batches
+ok :: <IO> (Collect Int)
+ok = @stdout (\o -> do
+  _ <- @write 0 o [1, 2]
+  _ <- @flush o
+  @write 0 o [3])
+
+--' Write a batch, then fail
+fails :: <IO> (Collect Int)
+fails = @stdout (\o -> do
+  _ <- @write 0 o [1, 2]
+  _ <- @flush o
+  boom)
+
+boom :: <IO> ()
+boom = @throw "the producer failed"
+
+--' Load a stream file whole
+loadAll :: Str -> <IO> [Int]
+loadAll path = do
+  Ok xs <- @load path :: <IO> (Try Str [Int])
+  xs
+
+--' The first batch of a stream file
+first :: Str -> <IO> [Int]
+first path = do
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok xs <- @next s
+  xs
+
+--' The element count of a stream file, opened for random access
+fileLen :: Str -> <IO> Int
+fileLen path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  Ok n <- @flen f
+  n
+
+drain :: IStream Int -> Int -> <IO> Int
+drain s acc = do
+  Ok xs <- @next s
+  ? isEmpty xs = do acc : drain s (acc + total xs)
+
+--' Sum a stream read from standard input
+sumStdin :: <IO> Int
+sumStdin = do
+  Ok s <- @stdin :: <IO> (Try Str (IStream Int))
+  drain s 0

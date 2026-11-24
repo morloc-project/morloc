@@ -1,0 +1,6 @@
+module main (f)
+
+import .a (av)
+
+f :: Int
+f = av

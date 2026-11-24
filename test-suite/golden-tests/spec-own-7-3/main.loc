@@ -1,0 +1,73 @@
+-- Spec OWN-7: a C++ function that keeps a parameter on only some
+-- evaluations has a by-value form, chosen by a call that may move every
+-- such argument. `pick` is recursive, so it is not inlined; each export
+-- prints its result and the payloads copied (pay.hpp, which also aborts on a
+-- read of a moved payload).
+--   temps       both arguments temporaries: the by-value form, no copy
+--   lastRead    both arguments locals read for the last time: no copy
+--   callerKeeps the kept argument is read again after the call: one copy
+--   mixed       one temporary, one live local: the reference form, one copy
+--   dropsLive   the branch keeps the temporary, the live one is dropped
+--   twice       one local passed as both arguments: one copy
+--   asValue     a partial application: the reference form, applied to a
+--               payload it is lent (CPP-7), and one copy of the value the
+--               closure captures
+--   releases    the by-value form of a function that is not a loop releases
+--               the argument it drops before it returns: one payload is
+--               alive while its result is read
+module main (temps, lastRead, callerKeeps, mixed, dropsLive, twice, asValue, releases)
+
+import root
+import root-cpp
+
+newtype Pay = Int
+type Cpp => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Cpp from "pay.hpp" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Cpp from "pay.hpp" ("mkp", "keyp", "livep", "census")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+livep :: Pay -> Int
+census :: Int -> (Int, Int)
+
+pick :: Int -> Pay -> Pay -> Pay
+pick j a b
+  ? j <= 0 = a
+  : ? j == 1 = b
+  : pick (j - 2) a b
+
+temps :: Int -> (Int, Int)
+temps n = census (keyp (pick n (mkp 7) (mkp 8)))
+
+lastRead :: Int -> (Int, Int)
+lastRead n = census (let a = mkp 7 in let b = mkp 8 in keyp (pick n a b))
+
+callerKeeps :: Int -> (Int, Int)
+callerKeeps n = census (let a = mkp 7 in let r = keyp (pick n a (mkp 8)) in r + keyp a)
+
+mixed :: Int -> (Int, Int)
+mixed n = census (let b = mkp 8 in let r = keyp (pick n (mkp 7) b) in r + keyp b)
+
+dropsLive :: Int -> (Int, Int)
+dropsLive n = census (let a = mkp 7 in let r = keyp (pick (n + 1) a (mkp 8)) in r + keyp a)
+
+twice :: Int -> (Int, Int)
+twice n = census (let a = mkp 7 in keyp (pick n a a))
+
+asValue :: Int -> (Int, Int)
+asValue n = census (sum (map keyp (map (pick n (mkp 7)) [mkp 8])))
+
+chooseNT :: Int -> Pay -> Pay -> Pay
+chooseNT j a b
+  ? j <= 0 = a
+  : ? j == 1 = b
+  : lid (chooseNT (j - 2) a b)
+
+lid :: Pay -> Pay
+lid p = p
+
+releases :: Int -> (Int, Int)
+releases n = census (livep (chooseNT (n - 1) (mkp 7) (mkp 8)))

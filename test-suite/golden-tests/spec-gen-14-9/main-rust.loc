@@ -1,0 +1,45 @@
+-- GEN-14: the Rust twin of main-cpp.loc.
+module main (idShape, idOpt, idOptStr, showShape, idDot)
+
+import root-rust
+
+newtype Date = Str
+type Rust => Date = "DateT"
+
+instance Packable Str Date where
+  source Rust from "d.rs" ("packDate" as pack, "unpackDate" as unpack)
+
+newtype Tenths = Int
+type Rust => Tenths = "f64"
+
+instance Packable Int Tenths where
+  source Rust from "d.rs" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+record Rust => Pair a = "PairT<$1>" a
+
+data Shape = Circle Date | Box Int
+
+data Opt a = Some a | None
+
+data Dot = Dot (Pair Tenths) | Nada
+
+source Rust from "d.rs" ("same")
+same :: a -> a
+
+idShape :: Shape -> Shape
+idShape x = same x
+
+idOpt :: Opt Date -> Opt Date
+idOpt x = same x
+
+idOptStr :: Opt Str -> Opt Str
+idOptStr x = same x
+
+showShape :: Shape -> Str
+showShape x = @show (same x)
+
+idDot :: Dot -> Dot
+idDot x = same x

@@ -1,0 +1,32 @@
+module main (steady)
+
+import root
+import root-cpp
+import root-py
+
+-- A packet a C++ manifold binds is freed when the manifold is done with
+-- it, also where the manifold returns a function value. Each step applies
+-- a function parameter to one argument, which runs the stage of a closure
+-- that fetches a batch from python and returns the closure of the rest:
+-- no closure holds the argument's packet or the batch's packet, so both
+-- are freed although the stage returns a function.
+--
+-- The C++ pool records the memory it holds at step 1000 (`mark`) and
+-- reports how much more it holds after the last step (`grownKiB`), as in
+-- crossing-memory-steady.
+
+source Py from "src.py" ("readings")
+source Cpp from "src.hpp" ("addTotal", "capply", "cwith", "mark", "grownKiB")
+
+readings :: Int -> [Int]
+addTotal :: [Int] -> Int -> Int
+capply :: (Int -> Int) -> Int -> Int
+cwith :: ((Int -> Int -> Int) -> Int) -> (Int -> Int -> Int) -> Int
+mark :: Int -> Int -> Int
+grownKiB :: Int -> Int
+
+step :: Int -> Int
+step i = cwith (\f -> capply (f i) i) (\x -> addTotal (readings x))
+
+steady :: Int -> Int
+steady n = grownKiB (sum (map (\i -> mark i (step i)) (range 0 n)))

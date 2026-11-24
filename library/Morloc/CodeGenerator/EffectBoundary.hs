@@ -1,3 +1,4 @@
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -56,6 +57,7 @@ module Morloc.CodeGenerator.EffectBoundary
   , expandT
   ) where
 
+import Morloc.Data.Zip (zip3Indexed, zip3Same, zipSame, zipWithSame, zipWithSameM)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
@@ -69,9 +71,10 @@ import Control.Monad.Except (catchError)
 import Morloc.CodeGenerator.Infer (inferConcreteType)
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
-import Morloc.CodeGenerator.Instance (findFunctorMap, resolveInstanceForType)
-import Morloc.Typecheck.Internal (unqualify)
-import Morloc.CodeGenerator.Serial (PackerInstance (..), findPackerInstances)
+import qualified Morloc.Frontend.Instances as FI
+import Morloc.CodeGenerator.Infer (requireDetermined)
+import Morloc.Typecheck.Internal (emptyGamma, functorMapMethod, prettyConstraint, unqualify)
+import Morloc.CodeGenerator.Serial (PackerInstance (..), findPackerInstances, selectPackerInstance)
 
 -- | The calling convention imposed by the surrounding boundary.
 data BoundaryContext
@@ -143,6 +146,9 @@ polyOuterType (PolyDebugWrap _ _ body)                = polyOuterType body
 polyOuterType (PolyApp fn _) = case polyOuterType fn of
   Just (FunT _ ret) -> Just ret
   other             -> other
+polyOuterType (PolyPat (Idx _ t) _) = case t of
+  FunT _ ret -> Just ret
+  other -> Just other
 polyOuterType (PolyIf _ t e) = case polyOuterType t of
   Just tp | hasOuterEffect tp -> Just tp
   _                           -> polyOuterType e
@@ -265,6 +271,7 @@ descend m _ (PolyLet _ e1 e2) = do
 descend m ctx (PolyApp f xs) = do
   walk m ctx f
   mapM_ (walk m LocalRoot) xs
+descend m _ (PolyPat _ app) = mapM_ (walk m LocalRoot) app
 descend m ctx (PolyIf c t' e) = do
   walk m LocalRoot c
   walk m ctx t'
@@ -309,26 +316,22 @@ rewrite lang m (PolyApp fn xs) = do
   fn'  <- rewrite lang m fn
   xs'  <- mapM (rewrite lang m) xs
   case (fn', xs') of
-    -- A field read through a record whose value is the host's reads a value
-    -- in the host's convention. A read applied to further arguments is the
-    -- read followed by a call of what it read.
-    (PolyExe (Idx gi (FunT (recT : rest) r)) (PatCallP pat@(PatternStruct sel)), x : ys) -> do
+    (PolyRemoteInterface {}, _) -> crossPool lang m fn' xs'
+    _ -> maybeSuspendRemoteReceive <$> sourceCall lang fn' xs'
+-- A field read through a record whose value is the host's reads a value in the
+-- host's convention.
+rewrite lang m (PolyPat g@(Idx gi ft) app) = do
+  app' <- mapM (rewrite lang m) app
+  case (ft, app') of
+    (FunT (recT : rest) r, PatGet sel [] x) -> do
       scope <- MM.getGeneralScope
       hostRecs <- hostRecords lang gi [recT]
       let hv = HostView scope Set.empty hostRecs Set.empty Nothing
           fieldT = if null rest then r else FunT rest r
       if readsHostRecord hv sel recT && needsAdapt hv Nothing fieldT
-        then do
-          let getter = PolyExe (Idx gi (FunT [recT] (hostType hv Nothing fieldT))) (PatCallP pat)
-          value <- adapt Inbound lang gi hv Nothing fieldT (PolyApp getter [x])
-          if null ys
-            then return value
-            else do
-              v <- MM.getCounter
-              return $ PolyLet v value (PolyApp (PolyExe (Idx gi fieldT) (LocalCallP v)) ys)
-        else return (PolyApp fn' xs')
-    (PolyRemoteInterface {}, _) -> crossPool lang m fn' xs'
-    _ -> maybeSuspendRemoteReceive <$> sourceCall lang fn' xs'
+        then adapt Inbound lang gi hv Nothing fieldT (PolyPat (Idx gi (FunT [recT] (hostType hv Nothing fieldT))) (PatGet sel [] x))
+        else return (PolyPat g app')
+    _ -> return (PolyPat g app')
 rewrite _ _ (PolyManifold l m' f k e) = do
   e' <- rewrite l m' e
   return $ PolyManifold l m' f k e'
@@ -368,9 +371,23 @@ rewrite lang m (PolyRecord o v@(Idx _ name) ps rs) = do
     else return (PolyRecord o v ps rs')
 rewrite lang m (PolyIntrinsic t@(Idx _ resT) intr xs) = do
   xs' <- mapM (rewrite lang m) xs
+  scope <- MM.getGeneralScope
+  let param h = case expandT scope <$> polyOuterType h of
+        Just (AppT _ [a]) -> Just a
+        _ -> Nothing
+      unitOf (EffectT e _) = EffectT e (VarT BT.unit)
+      unitOf _ = VarT BT.unit
+      gatherArg = case expandT scope resT of
+        EffectT _ l@(AppT _ [_]) -> Just (AppT (VarT BT.cellVar) [TyA l])
+        _ -> Nothing
+      foldArg = case expandT scope resT of
+        EffectT _ b -> Just (AppT (VarT BT.cellVar) [TyA b])
+        _ -> Nothing
   PolyIntrinsic t intr <$> case (intr, xs') of
-    (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr resT h f
-    (IntrSpawn, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr resT h f
+    (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr ((\a -> AppT (VarT BT.list) [a]) <$> param h) resT f
+    (IntrSpawn, [h, f]) -> (\f' -> [h, f']) <$> intrinsicCallback lang m intr ((\a -> AppT (VarT BT.ostreamVar) [a]) <$> param h) resT f
+    (IntrGather, [f]) -> (: []) <$> intrinsicCallback lang m intr gatherArg (unitOf resT) f
+    (IntrFold, [i, s, c, f]) -> (\f' -> [i, s, c, f']) <$> intrinsicCallback lang m intr foldArg (unitOf resT) f
     _ -> return xs'
 rewrite lang m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite lang m) xs
 rewrite _ _ leaf = return leaf
@@ -394,6 +411,7 @@ substBndVar i i' t = go
     go (PolyLet j a b) = PolyLet j (go a) (go b)
     go (PolyReturn e) = PolyReturn (go e)
     go (PolyApp h xs) = PolyApp (go h) (map go xs)
+    go (PolyPat g app) = PolyPat g (fmap go app)
     go (PolyCacheBody lbl m as e) = PolyCacheBody lbl m as (go e)
     go (PolyDebugWrap m as e) = PolyDebugWrap m as (go e)
     go (PolyList v ts xs) = PolyList v ts (map go xs)
@@ -465,19 +483,19 @@ sourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP origin src)) xs = do
             (_, Just dr) -> isEffect (expandT scope dr) && isEffect ret
             _ -> False
       xs' <- sequence
-        [ adapt Outbound lang gidx hv d t x | (d, t, x) <- zip3 dIns ins xs ]
-      let hostIns = zipWith (hostType hv) dIns ins
+        [ adapt Outbound lang gidx hv d t x | (d, t, x) <- zip3Same dIns ins xs ]
+      let hostIns = zipWithSame (hostType hv) dIns ins
           head' r = if null ins then r else FunT hostIns r
       case ret of
         EffectT effs r | suspended -> do
           let dr = peelDecl dRet
               fn' = PolyExe (Idx gidx (head' (hostType hv dr r))) (SrcCallP origin src)
-          (binds, xs'') <- unzip <$> zipWithM bindArg hostIns xs'
+          (binds, xs'') <- unzip <$> zipWithSameM bindArg hostIns xs'
           adapted <- adapt Inbound lang gidx hv dr r (PolyApp fn' xs'')
           let suspendedCall = PolyDoBlock (Idx gidx (EffectT effs r)) adapted
           return $ foldr (\(i, e) body -> PolyLet i e body) suspendedCall (concat binds)
         _
-          | needsAdapt hv dRet ret || or (zipWith (needsAdapt hv) dIns ins) -> do
+          | needsAdapt hv dRet ret || or (zipWithSame (needsAdapt hv) dIns ins) -> do
               let fn' = PolyExe (Idx gidx (head' (hostType hv dRet ret))) (SrcCallP origin src)
               adapt Inbound lang gidx hv dRet ret (PolyApp fn' xs')
           | otherwise -> return (PolyApp fn xs')
@@ -526,7 +544,7 @@ crossPool lang m (PolyRemoteInterface l (Idx ri t) ids rf inner0) xs0 = do
         | PolyManifold _ _ (ManifoldFull as) _ _ <- inner0
         , length as == length xs0 = [Just i | Arg i _ <- as]
         | otherwise = map (const Nothing) xs0
-  args <- mapM (crossArg view) (zip params xs0)
+  args <- mapM (crossArg view) (zipSame params xs0)
   here <- hostRecords lang m [payload]
   there <- hostRecords l m [payload]
   let toHere = Set.difference here there
@@ -597,7 +615,7 @@ flattenFunT t = t
 -- variables it quantifies. The signature is found by the source it
 -- implements, since the call's own index may belong to the definition
 -- around it.
-declaredSignature :: Maybe Int -> Source -> MorlocMonad (Set.Set TVar, Maybe Type)
+declaredSignature :: SrcOrigin -> Source -> MorlocMonad (Set.Set TVar, Maybe Type)
 declaredSignature origin src = do
   sig <- sourceSignature origin src
   return $ case sig of
@@ -606,40 +624,32 @@ declaredSignature origin src = do
        in (Set.fromList vs, Just (typeOf t))
     Nothing -> (Set.empty, Nothing)
 
--- | The signature of the term a source call names. A call a user term makes
--- carries its source expression, which names one term. A call the compiler
--- builds carries none and is known only by its host function, so every
--- signature of that host function must agree.
-sourceSignature :: Maybe Int -> Source -> MorlocMonad (Maybe EType)
+-- | The signature of the term a source call implements, found by the index
+-- the source is declared under, never by its host function: one host
+-- function may implement several terms with different signatures. A class
+-- method's source has its instance's signature (HOST-10). An index no term
+-- lists is a compiler bug.
+sourceSignature :: SrcOrigin -> Source -> MorlocMonad (Maybe EType)
 sourceSignature origin src = do
-  sgmap <- MM.gets stateSignatures
-  let sigs = GMap.elems sgmap
-      -- the term the index was linked to, or for an instance method (which
-      -- is not in the index map) the term that lists the index among its
-      -- implementations
-      ofTerm = case origin of
-        Just i
-          | GMapJust sg <- GMap.lookup i sgmap, Just e <- signatureOf sameSource sg -> Just e
-          | otherwise -> listToMaybe [e | sg <- sigs, Just e <- [signatureOf (\(Idx j _) -> j == i) sg]]
-        Nothing -> Nothing
-      ofHost = nubBy (\a b -> etype a == etype b) [e | sg <- sigs, Just e <- [signatureOf sameSource sg]]
-  case (ofTerm, ofHost) of
-    (Just e, _) -> return (Just e)
-    (Nothing, []) -> return Nothing
-    (Nothing, [e]) -> return (Just e)
-    (Nothing, _) ->
-      MM.throwCompilerBug $
-        "a call of" <+> squotes (pretty (srcName src))
-          <+> "names no term, and the host function has more than one signature"
+  sigs <- GMap.elems <$> MM.gets stateSignatures
+  env <- MM.gets stateInstances
+  let monomorphic = [termGeneral t | Monomorphic t <- sigs, any atIndex (termConcrete t)]
+      methods = [Just (FI.mtType t) | t <- FI.allMethodTerms env, any atIndex (FI.mtSources t)]
+  case monomorphic <> methods of
+    et : _ -> return et
+    [] -> bug "is listed by no term"
   where
-    signatureOf p (Monomorphic (TermTypes (Just e) srcs _))
-      | any (p . snd) srcs = Just e
-    signatureOf p (Polymorphic _ _ e ts)
-      | any (any (p . snd) . termConcrete) ts = Just e
-    signatureOf _ _ = Nothing
-    -- The host function itself: its name in its language and file, whatever
-    -- alias a module gives it.
-    sameSource (Idx _ s) = srcName s == srcName src && srcPath s == srcPath src && srcLang s == srcLang src
+    i = srcOriginIndex origin
+    kind :: MDoc
+    kind = case origin of
+      Written _ -> "written"
+      Built _ -> "compiler-built"
+    atIndex (_, Idx j _) = j == i
+    bug :: MDoc -> MorlocMonad a
+    bug what =
+      MM.throwCompilerBug $
+        "a" <+> kind <+> "call of" <+> squotes (pretty (srcName src)) <+> "has source index"
+          <+> pretty i <> ", which" <+> what
 
 -- | The other direction of a callback boundary: a host that receives a
 -- morloc callback may call it with a value of its own making, so each
@@ -649,7 +659,7 @@ sourceSignature origin src = do
 -- value again.
 adaptCallbackParams :: Lang -> Int -> HostView -> [Maybe Type] -> PolyExpr -> MorlocMonad PolyExpr
 adaptCallbackParams lang m hv ds (PolyManifold l mi (ManifoldPart ctx bnd) k body) = do
-  (bnd', body') <- foldM adaptOne (bnd, body) (zip ds bnd)
+  (bnd', body') <- foldM adaptOne (bnd, body) (zipSame ds bnd)
   return (PolyManifold l mi (ManifoldPart ctx bnd') k body')
   where
     adaptOne (bs, b) (d, Arg i (Just t))
@@ -729,10 +739,10 @@ declaredFun scope = go (64 :: Int) . expandT scope
          in case go (n - 1) (funHead r) of
               FunT more@(_ : _) out -> FunT (ins' <> more) out
               r' -> FunT ins' r'
-      AppT h ks -> AppT h (map (go (n - 1)) ks)
+      AppT h ks -> AppT h (map (fmap (go (n - 1))) ks)
       EffectT e x -> EffectT e (go (n - 1) x)
       OptionalT x -> OptionalT (go (n - 1) x)
-      NamT o v ps rs -> NamT o v (map (go (n - 1)) ps) [(k, go (n - 1) x) | (k, x) <- rs]
+      NamT o v ps rs -> NamT o v (map (fmap (go (n - 1))) ps) [(k, go (n - 1) x) | (k, x) <- rs]
       _ -> t
     funHead t = case expandT scope t of
       e@(FunT (_ : _) _) -> e
@@ -772,10 +782,15 @@ declAt :: HostView -> (Type -> Maybe a) -> Maybe Type -> Maybe a
 declAt (HostView scope _ _ _ _) f (Just d) = f (expandT scope d)
 declAt _ _ Nothing = Nothing
 
-declArgs :: HostView -> Int -> Maybe Type -> [Maybe Type]
+declArgs :: HostView -> Int -> Maybe Type -> [Maybe ArgT]
 declArgs hv n d = case declAt hv (\x -> case x of AppT _ ds | length ds == n -> Just ds; _ -> Nothing) d of
   Just ds -> map Just ds
   Nothing -> replicate n Nothing
+
+-- | The declared type at a type argument's position.
+declType :: Maybe ArgT -> Maybe Type
+declType (Just (TyA t)) = Just t
+declType _ = Nothing
 
 declField :: HostView -> Key -> Maybe Type -> Maybe Type
 declField hv k = declAt hv (\x -> case x of NamT _ _ _ rs -> lookup k rs; _ -> Nothing)
@@ -825,7 +840,7 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
   | otherwise = case expandT scope t of
       t'@(FunT _ _) | Just (as, r) <- calledAs hv d t' ->
         let (das, dr) = declFun hv (length as) d
-            as' = zipWith (hostTypeOn hv seen) das as
+            as' = zipWithSame (hostTypeOn hv seen) das as
             r' = case r of
               EffectT _ c | runs hv dr -> Just (fromMaybe c (hostTypeOn hv seen (declEffect hv dr) c))
               _ -> hostTypeOn hv seen dr r
@@ -835,20 +850,22 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
               _ -> False
          in if not split && all isNothing as' && isNothing r'
               then Nothing
-              else Just (FunT (zipWith fromMaybe as as') (fromMaybe r r'))
+              else Just (FunT (zipWithSame fromMaybe as as') (fromMaybe r r'))
       EffectT effs c -> EffectT effs <$> hostTypeOn hv seen (declEffect hv d) c
       NamT _ v _ _ | Set.member v hostRecs -> Nothing
       NamT o v ps rs ->
         let rs' = [hostTypeOn (withinRecord v hv) seen (declField hv k d) ft | (k, ft) <- rs]
          in if all isNothing rs'
               then Nothing
-              else Just (NamT o v ps [(k, fromMaybe ft ft') | ((k, ft), ft') <- zip rs rs'])
+              else Just (NamT o v ps [(k, fromMaybe ft ft') | ((k, ft), ft') <- zipSame rs rs'])
       OptionalT a -> OptionalT <$> hostTypeOn hv seen (declOptional hv d) a
       AppT h ts ->
-        let ts' = zipWith (hostTypeOn hv seen) (declArgs hv (length ts) d) ts
+        let ts' = zipWithSame hostArg (declArgs hv (length ts) d) ts
+            hostArg dx (TyA x) = TyA <$> hostTypeOn hv seen (declType dx) x
+            hostArg _ (KiA _) = Nothing
          in if all isNothing ts'
               then Nothing
-              else Just (AppT h (zipWith fromMaybe ts ts'))
+              else Just (AppT h (zipWithSame fromMaybe ts ts'))
       _ -> Nothing
   where
     here = typeKeys scope t
@@ -891,16 +908,16 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
             inner' <- adapt dir l g hv' d t0 inner
             return $ PolyApp (PolyRemoteInterface l (Idx i (hostType hv d ti)) ids rf inner') xs
       PolyList v ts xs
-        | AppT _ [a] <- t -> do
-            let da = case declArgs hv 1 d of [x] -> x; _ -> Nothing
+        | AppT _ [TyA a] <- t -> do
+            let da = case declArgs hv 1 d of [x] -> declType x; _ -> Nothing
             xs' <- mapM (adapt dir lang g hv da a) xs
-            return $ PolyList v [Idx i (hostType hv da ty) | Idx i ty <- ts] xs'
+            return $ PolyList v [Idx i (hostType hv da <$> ty) | Idx i ty <- ts] xs'
       PolyTuple v xs
-        | AppT _ ts <- t, length ts == length xs -> do
-            let ds = declArgs hv (length ts) d
+        | AppT _ as <- t, length as == length xs, let ts = tyArgs as, length ts == length xs -> do
+            let ds = map declType (declArgs hv (length as) d)
             xs' <- sequence
               [ (,) (Idx i (hostType hv dx tx)) <$> adapt dir lang g hv dx tx x
-              | (dx, tx, (Idx i _, x)) <- zip3 ds ts xs ]
+              | (dx, tx, (Idx i _, x)) <- zip3Same ds ts xs ]
             return $ PolyTuple v xs'
       PolyRecord o v ps rs
         | NamT _ name _ fts <- t -> do
@@ -972,25 +989,21 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             let dk = declField hv k d
                 here' = case dir of Outbound -> ft; Inbound -> hostType (withinRecord name hv) dk ft
                 there = case dir of Outbound -> hostType (withinRecord name hv) dk ft; Inbound -> ft
-                getter = PolyApp
-                  (PolyExe (Idx g (FunT [here] here')) (PatCallP (PatternStruct (SelectorKey (unKey k, SelectorEnd) []))))
-                  [var]
+                getter = PolyPat (Idx g (FunT [here] here')) (PatGet (SelectorKey (unKey k, SelectorEnd) []) [] var)
             x <- adapt dir lang g (withinRecord name hv) dk ft getter
             return (k, (Idx g there, x))
         | (k, ft) <- fts ]
       return $ PolyRecord o (Idx g name) (map (Idx g) ps) fs
-    AppT (VarT h) ts | h == BT.tuple (length ts) -> do
-      let ds = declArgs hv (length ts) d
+    AppT (VarT h) as | let ts = tyArgs as, h == BT.tuple (length ts) -> do
+      let ds = map declType (declArgs hv (length ts) d)
       xs <- sequence
         [ do
             let here' = case dir of Outbound -> tx; Inbound -> hostType hv dx tx
                 there = case dir of Outbound -> hostType hv dx tx; Inbound -> tx
-                getter = PolyApp
-                  (PolyExe (Idx g (FunT [here] here')) (PatCallP (PatternStruct (SelectorIdx (i, SelectorEnd) []))))
-                  [var]
+                getter = PolyPat (Idx g (FunT [here] here')) (PatGet (SelectorIdx (i, SelectorEnd) []) [] var)
             x <- adapt dir lang g hv dx tx getter
             return (Idx g there, x)
-        | (i, dx, tx) <- zip3 [0 ..] ds ts ]
+        | (i, dx, tx) <- zip3Indexed 0 ds ts ]
       return $ PolyTuple (Idx g h) xs
     OptionalT a -> do
       let da = declOptional hv d
@@ -998,19 +1011,31 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       return $ PolyIntrinsic (Idx g (OptionalT aThere)) IntrMapOptional [each, var]
     AppT (VarT h) ts -> do
       mapSrc <- case ts of
-        [_] -> resolveInstanceForType findFunctorMap g lang t
+        [_] -> functorMapSource
         _ -> return Nothing
       case (mapSrc, ts) of
-        (Just src, [a]) -> do
-          let da = case declArgs hv 1 d of [x] -> x; _ -> Nothing
+        (Just src, [TyA a]) -> do
+          let da = case declArgs hv 1 d of [x] -> declType x; _ -> Nothing
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
           (each, aThere) <- element da a
-          return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (SrcCallP Nothing src)) [each, var]
+          return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (builtSrcCall src)) [each, var]
         _ -> packed h ts var here
     _ -> refuse
   return (PolyLet v e body)
   where
     t = expandT scope t0
+
+    -- The @map@ of the instance the container's type selects, in this pool.
+    functorMapSource = do
+      requireDetermined g t
+      env <- MM.gets stateInstances
+      case FI.resolveArg scope emptyGamma env [functorMapMethod] (type2typeu t) of
+        Right (Just ev) -> case FI.methodSourcesIn env ev (EV "map") lang of
+          [] -> return Nothing
+          [src] -> return (Just src)
+          _ -> MM.throwSourcedError g $ "The instance selected for" <+> pretty t <+> "has several" <+> pretty lang <+> "sources of 'map'"
+        Right Nothing -> return Nothing
+        Left e -> MM.throwSourcedError g $ "Cannot map over" <+> pretty t <> ":" <+> FI.explainResolveError prettyConstraint e
 
     elemHere da a = case dir of
       Outbound -> a
@@ -1031,20 +1056,17 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
     -- the form it packs to: unpacked, adapted, and packed again.
     packed h ts var here = do
       instances <- findPackerInstances
-      case [ (vs, headArgs, wire, srcs)
-           | pin <- instances
-           , let (vs, headU) = unqualify (piHead pin)
-           , AppU (VarU h') headArgs <- [headU]
+      selected <- selectPackerInstance g (Map.member lang . piSources) (type2typeu t) instances
+      case [ (headArgs, snd (unqualify (piWire pin)), srcs)
+           | Just pin <- [selected]
+           , AppU (VarU h') headArgs <- [snd (unqualify (piHead pin))]
            , h' == h
            , length headArgs == length ts
            , Just srcs <- [Map.lookup lang (piSources pin)]
-           , let wire = snd (unqualify (piWire pin))
            ] of
-        ((_, headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
-          let instantiate args = foldr
-                (\(p, a) w -> case p of VarU pv -> substituteTVar pv a w; _ -> w)
-                (typeOf wireU)
-                (zip headArgs args)
+        ((headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
+          let instantiate args =
+                typeOf (instantiateParams [(pv, argU a) | (VarU pv, a) <- zipSame headArgs args] wireU)
               wireT = instantiate ts
               dWire = case declArgs hv (length ts) d of
                 ds | all isJust ds -> Just (instantiate (catMaybes ds))
@@ -1052,9 +1074,9 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
               wireHere = case dir of Outbound -> wireT; Inbound -> hostType hv dWire wireT
               wireThere = case dir of Outbound -> hostType hv dWire wireT; Inbound -> wireT
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
-              unpacked = PolyApp (PolyExe (Idx g (FunT [here] wireHere)) (SrcCallP Nothing unpackSrc)) [var]
+              unpacked = PolyApp (PolyExe (Idx g (FunT [here] wireHere)) (builtSrcCall unpackSrc)) [var]
           adapted <- adapt dir lang g hv dWire wireT unpacked
-          return $ PolyApp (PolyExe (Idx g (FunT [wireThere] there)) (SrcCallP Nothing packSrc)) [adapted]
+          return $ PolyApp (PolyExe (Idx g (FunT [wireThere] there)) (builtSrcCall packSrc)) [adapted]
         [] -> refuse
 
     refuse :: MorlocMonad a
@@ -1071,7 +1093,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       m <- MM.freshManifoldIndex g
       args <- sequence
         [ adapt (flipDir dir) lang g hv da a (PolyBndVar (C (Idx g (slotT da a))) i)
-        | (i, da, a) <- zip3 ids das as ]
+        | (i, da, a) <- zip3Same ids das as ]
       -- The host calls a morloc function with the arguments its
       -- declaration ends at (HOST-2), so one taking more is partially
       -- applied to them. A host function that ends there is called with
@@ -1097,11 +1119,11 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             | null rest = body0
             | otherwise =
                 PolyLet w body0
-                  (PolyApp (PolyExe (Idx g r) (LocalCallP w)) [PolyBndVar (C (Idx g a)) i | (i, a) <- zip restIds rest])
+                  (PolyApp (PolyExe (Idx g r) (LocalCallP w)) [PolyBndVar (C (Idx g a)) i | (i, a) <- zipSame restIds rest])
       MM.modify' $ \st -> st
         { stateArgTypes =
             foldr (\(i, ty) -> Map.insert i (Idx g ty)) (stateArgTypes st)
-              ((v, calleeT) : (w, r) : [(i, slotT da a) | (i, da, a) <- zip3 ids das as] <> zip restIds rest)
+              ((v, calleeT) : (w, r) : [(i, slotT da a) | (i, da, a) <- zip3Same ids das as] <> zipSame restIds rest)
         -- A host's callable has no identity to send to another pool, and
         -- re-running the call that produced it would run its effects again,
         -- so a closure wrapping one may not cross.
@@ -1110,33 +1132,30 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             Outbound -> stateHostOriginClosures st
         }
       return $ PolyManifold lang m
-        (ManifoldPart [Arg v None] ([Arg i (Just (slotT da a)) | (i, da, a) <- zip3 ids das as] <> [Arg i (Just a) | (i, a) <- zip restIds rest]))
+        (ManifoldPart [Arg v None] ([Arg i (Just (slotT da a)) | (i, da, a) <- zip3Same ids das as] <> [Arg i (Just a) | (i, a) <- zipSame restIds rest]))
         Transparent (PolyReturn body)
 
--- | The function @replay and @spawn call as @f(x)@ in their pool helper,
--- exactly as a host calls a callback: @replay :: IStream a -> ([a] -> \<IO\>
--- ()) -> \<IO\> ()@ and @spawn :: IStream a -> (OStream a -> \<IO\> ()) ->
--- \<IO\> ()@, whose result type is the function's.
-intrinsicCallback :: Lang -> Int -> Intrinsic -> Type -> PolyExpr -> PolyExpr -> MorlocMonad PolyExpr
-intrinsicCallback lang m intr resT h f = do
+-- | The function an intrinsic's pool helper calls as @f(x)@, exactly as a
+-- host calls a callback: @replay's @([a] -> \<IO\> ())@, @spawn's
+-- @(OStream a -> \<IO\> ())@, and the @(Cell b -> \<IO\> ())@ of @gather and
+-- @fold, given the type of its argument where it is known and the type of
+-- its result.
+intrinsicCallback :: Lang -> Int -> Intrinsic -> Maybe Type -> Type -> PolyExpr -> MorlocMonad PolyExpr
+intrinsicCallback lang m intr margT resT f = do
   scope <- MM.getGeneralScope
-  let argT a = case intr of
-        IntrReplay -> AppT (VarT BT.list) [a]
-        _ -> AppT (VarT BT.ostreamVar) [a]
-  case expandT scope <$> polyOuterType h of
-    Just (AppT _ [a]) -> adapt Outbound lang m (HostView scope Set.empty Set.empty Set.empty Nothing) Nothing (FunT [argT a] resT) f
+  case margT of
+    Just argT -> adapt Outbound lang m (HostView scope Set.empty Set.empty Set.empty Nothing) Nothing (FunT [argT] resT) f
     _ -> case f of
       PolyManifold l m' form k body | isLambdaForm form ->
         return (PolyManifold l m' form k (forceReturnPosition m' body))
       _ -> MM.throwCompilerBug $ "The function passed to" <+> viaShow intr <+> "has no known type"
 
 -- | The record types among these whose value in this pool is already the
--- host's. In a compiled language a record mapped to a type the program
--- declares (@record Rust => Ops = "Ops"@) has the field types written in
--- that declaration, which follow the host's convention: building one is the
--- outbound boundary for its fields and reading a field the inbound one, and
--- the value crosses to a host as it is. A record the compiler generates
--- (@"struct"@), and every record of a dynamic language, holds morloc values.
+-- host's. In a compiled language every record, declared by the program or
+-- generated (GEN-8), holds its fields in the host's convention: building
+-- one is the outbound boundary for its fields and reading a field the
+-- inbound one, and the value crosses to a host as it is. Every record of a
+-- dynamic language holds morloc values.
 hostRecords :: Lang -> Int -> [Type] -> MorlocMonad (Set.Set TVar)
 hostRecords lang g ts = do
   reg <- MM.gets stateLangRegistry
@@ -1152,7 +1171,7 @@ hostRecords lang g ts = do
       ( do
           c <- inferConcreteType lang (Idx g t)
           return $ case c of
-            NamF _ (FV _ (CV cv)) _ _ | cv /= "struct" -> Just v
+            NamF {} -> Just v
             _ -> Nothing
         ) `MM.recoverRejected` (CMS.put st0 >> return Nothing)
 
@@ -1181,9 +1200,9 @@ subTypes scope = go Set.empty
       | otherwise =
           let seen = foldr Set.insert seen0 (typeKeys scope t0)
            in case expandT scope t0 of
-                t@(NamT _ _ ps rs) -> t : concatMap (go seen) (ps <> map snd rs)
+                t@(NamT _ _ ps rs) -> t : concatMap (go seen) (tyArgs ps <> map snd rs)
                 t@(FunT as r) -> t : concatMap (go seen) (r : as)
-                t@(AppT h as) -> t : concatMap (go seen) (h : as)
+                t@(AppT h as) -> t : concatMap (go seen) (h : tyArgs as)
                 t@(EffectT _ x) -> t : go seen x
                 t@(OptionalT x) -> t : go seen x
                 t -> [t]
@@ -1194,7 +1213,7 @@ readsHostRecord :: HostView -> Selector -> Type -> Bool
 readsHostRecord hv@(HostView scope _ hostRecs _ _) sel t = case (sel, expandT scope t) of
   (SelectorKey (k, rest) [], NamT _ v _ rs) ->
     Set.member v hostRecs || maybe False (readsHostRecord hv rest) (lookup (Key k) rs)
-  (SelectorIdx (i, rest) [], AppT _ ts) | i < length ts -> readsHostRecord hv rest (ts !! i)
+  (SelectorIdx (i, rest) [], AppT _ (tyArgs -> ts)) | i < length ts -> readsHostRecord hv rest (ts !! i)
   _ -> False
 
 -- | 'ForeignCallerReceive' Suspend. A remote call whose result is a
@@ -1287,7 +1306,7 @@ forceLayers _ _ e = e
 insertExportBoundaries :: Bool -> Int -> Type -> PolyHead -> PolyHead
 insertExportBoundaries isCommand cidx t (PolyHead lang midx args body) =
   let inputTs = case t of FunT inputs _ -> inputs; _ -> []
-      thunkArgIds = [ann a | isCommand, (a, EffectT _ _) <- zip args inputTs]
+      thunkArgIds = [ann a | isCommand, (a, EffectT _ _) <- zipSame args inputTs]
       retT = case t of FunT _ ret -> ret; t' -> t'
       body' = suspendThunkArgs thunkArgIds body
       body'' = forceExportReturn cidx retT body'
@@ -1303,6 +1322,7 @@ insertExportBoundaries isCommand cidx t (PolyHead lang midx args body) =
     go ids (PolyLet i e1 e2) = PolyLet i (go ids e1) (go ids e2)
     go ids (PolyReturn e) = PolyReturn (go ids e)
     go ids (PolyApp e es) = PolyApp (go ids e) (map (go ids) es)
+    go ids (PolyPat g app) = PolyPat g (fmap (go ids) app)
     go ids (PolyCacheBody lbl cm cargs e) = PolyCacheBody lbl cm cargs (go ids e)
     go ids (PolyEval ti e) = PolyEval ti (go ids e)
     go ids (PolyDoBlock ti e) = PolyDoBlock ti (go ids e)

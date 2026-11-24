@@ -10,6 +10,17 @@ run_command: ["python3"]
 serial_type: "str"
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
+fork_workers: true
+# Record kinds the compiler generates definitions for (GEN-2). A record with
+# no form of its own in this language takes the default kind.
+generated_types:
+  prefix: mlc_types
+  records:
+    default: dict
+    kinds:
+      dict: { form: dict, legacy: [dict, OrderedDict] }
+      dataclass: { form: dataclass, class: dataclass }
+      pydantic: { form: pydantic, class: pydantic }
 # Python reuses a pyc whose whole-second mtime and size match its source, so
 # a same-size edit in the same second would run the old code; the build
 # removes the bytecode of every file it sources (PY-3). The check compiles a
@@ -29,6 +40,7 @@ preamble:
   # process with a user file that happens to share the name.
   - 'sys.path = [os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}"), os.path.expanduser("{{state}}/modules/python")] + sys.path'
   - "import importlib"
+  - "import builtins as __morloc_builtins"
   - "import pymorloc as morloc"
   - '_mlc_source_roots = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")), os.path.expanduser("."), os.path.expanduser("{{lib}}")]'
   - 'sys.path = sys.path + _mlc_source_roots[:2]'
@@ -46,7 +58,7 @@ ldRealNaN: "float('nan')"
 # Constructors
 ldListStyle: bracket
 ldTupleConstructor: ""
-ldRecordConstructor: "OrderedDict"
+ldRecordConstructor: "dict"
 
 # Access styles
 ldIndexStyle: zero_bracket
@@ -83,22 +95,22 @@ ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
 ldAssignOp: "="
 ldAndOp: "and"
 ldOrOp: "or"
+ldNotOp: "not"
 ldLambdaTemplate: "lambda {{args}}: {{body}}"
 ldDoBlockExpr: "(lambda: {{expr}})"
 ldDoBlockBlock: ""
 ldPartialTemplate: "functools.partial({{fn_with_context}})"
 ldImportTemplate: "{{namespace}} = _mlc_import_source(\"{{module_path}}\")"
-ldSocketPathTemplate: "os.path.join(global_state[\"tmpdir\"], {{socket}})"
+ldSocketPathTemplate: "_mlc_socket_paths[{{socket}}]"
 ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
 ldReturnTemplate: "return({{expr}})"
 ldReservedPrefixes: ["__mm_", "__morloc"]
 ldManifoldPrefix: "__mm_"
+ldBuiltinQualifier: "__morloc_builtins."
+ldKeywords: ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]
 ldFuncDefHeader: "def {{name}}({{args}}):"
 ldBlockStyle: indent
-ldErrorWrapOpen: "try:"
-ldErrorWrapClose:
-  - "except Exception as e:"
-  - "    raise RuntimeError(f\"{e!s}\\n  at {{name}} [py] (mid={{mid}}{{srcloc_suffix}})\")"
+ldFrameLabelStmt: "mlc_frame_labels[id({{fname}}.__code__)] = \"{{label}}\""
 ldPatternStyle: fstring
 ldQuoteTerminator: '"""'
 ldQuoteTerminatorEsc: '\"\"\"'

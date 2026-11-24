@@ -1,0 +1,18 @@
+-- A phantom argument with a form in another language only (`Tag` is a
+-- Rust type): a Python function takes the record without a Python form of
+-- the argument.
+module main (g)
+
+import root-py
+
+type Tag
+type Rust => Tag = "Tag"
+
+record Loc k where
+  pos :: Int
+
+source Py from "f.py" ("pos")
+pos :: Loc Tag -> Int
+
+g :: Int -> Int
+g x = pos {pos = x}

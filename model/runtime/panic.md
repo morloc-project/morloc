@@ -113,7 +113,7 @@ says, as it would from a crash.
 
 ### PANIC-6 An error in user code is the call's failure
 Status: implemented
-Checked by: golden:rust-user-panic, golden:rust-error
+Checked by: golden:rust-user-panic, golden:rust-error, golden:cpp-user-thread-failure
 
 An exception, error or condition a foreign function raises that its
 language's error handling catches (a Python `Exception`, an R condition,
@@ -166,7 +166,14 @@ in the generated source, and the runtime's own frames, above the panic
 machinery, are recognised; otherwise, or
 with no deciding frame, as in a pool built without line tables, the panic
 is the runtime's. Rust pools build with line tables so inlined frames are
-named. Paths are compared as written and absolute; the backtrace is read in
+named, and with merging of identical functions turned off, in the compiler
+and, on macOS, in the linker: a merged body carries one function's debug
+information for both, so a frame could name the other side's source. The
+switch is unstable, so pool builds enable it on a stable toolchain with
+RUSTC_BOOTSTRAP. The release-mode classifier tests reproduce a pool build
+only with the same flags (`RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zmerge-functions=disabled
+cargo test --release -p rustmorloc -- panic_classifier`); without them the
+test whose runtime code is identical to a user function fails. Paths are compared as written and absolute; the backtrace is read in
 std's full format, which names files absolutely whatever the working
 directory. The walk costs time in proportion to the stack's depth, paid
 only by a panic whose location is ambiguous.
@@ -218,23 +225,22 @@ caller raises again; and the nexus decides the exit status.
 
 ### PANIC-14 A failed check on data the runtime built ends the pool
 Status: implemented
-Checked by: a_region_outside_a_runtime_built_value_ends_the_pool, a_region_outside_an_input_value_is_a_catchable_error, a_fold_call_with_a_null_value_ends_the_process, a_reference_past_every_volume_made_is_not_lost_shared_memory, a_defect_reading_a_made_volume_that_cannot_be_mapped_ends_every_pool, a_failed_release_never_ends_the_pool, in_a_debug_build_a_wrong_length_in_a_pool_ends_the_pool, golden:spec-dim-3-3
+Checked by: a_region_outside_a_runtime_built_value_ends_the_pool, a_region_outside_an_input_value_is_a_catchable_error, a_reference_past_every_volume_made_is_not_lost_shared_memory, a_defect_reading_a_made_volume_that_cannot_be_mapped_ends_every_pool, a_failed_release_never_ends_the_pool, in_a_debug_build_a_wrong_length_in_a_pool_ends_the_pool, golden:spec-dim-3-3
 
 A structural check that fails on a value libmorloc or the Rust pool built
-from its own schema -- a value `@read` produced, a fold accumulator, a
+from its own schema -- a value `@read` produced, a
 stream layout, a value another pool passed by reference (ruled 2026-10-29),
 and in a debug build a value the program built whose array lengths break
 its schema (DIM-3 in the language spec: a value inline in a packet, or in a
 file FMT-3 marks as the program's) -- is a compiler or runtime defect and
-ends the pool, as does a fold call
-with a null argument or a slot index out of range. Failing to map the volume a
+ends the pool. Failing to map the volume a
 by-reference value lies in is not a defect when that volume was made (a
 descriptor or address-space limit, a cleaner removing a file-backed
 volume): this process has lost shared memory, and SHM-17 applies. A
 reference into a volume never made is a defect. `@unpack` refuses bytes
 that claim to be a by-reference packet, as an error user code can catch:
-only a pool passes a value by reference. A stale fold handle
-stays a catchable error: a user's thread can outlive its call.
+only a pool passes a value by reference. A late fold put
+stays a catchable error (FOLD-1): a user's thread can outlive its call.
 
 ### PANIC-15 Every sourced Rust function's panic is the user's
 Status: implemented

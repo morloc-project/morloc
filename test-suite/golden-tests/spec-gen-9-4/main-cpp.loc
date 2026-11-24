@@ -1,0 +1,120 @@
+-- GEN-9: a parameterized record holding a parameterized `data` type is
+-- defined from its declaration: the record's field is the `data` type at
+-- the record's parameter, and both are templates a source names at its
+-- arguments (`R<int>`, `Choice<int>`). The Rust twin is
+-- main-rust.loc.
+module main (fooTrip, barTrip, fnHeld, fbHeld, outerPicked, vecTrip, sTrip, choiceTrip, holderTrip, intTrip, strTrip, picked, duoTrip, roseTrip, tagTrip, dateTrip, intChoice, i32Choice)
+
+import root-cpp
+
+data Choice a = Pick a | Skip
+
+-- Each arm holds one of the two parameters.
+data Duo a b = One a | Two b
+
+data Rose a = Rose a [Rose a]
+
+-- A parameter no arm holds is no parameter of the native type.
+data Tag a = Tagged Int
+
+-- A record on a cycle through a template's argument: the same instance
+-- whether the template or the record is met first.
+record Holder where
+  hc :: Choice ?Holder
+
+-- Named like a standard type.
+data Vec a = V a | E
+
+-- A template's parameter it does not hold is no parameter of a record
+-- holding it.
+data D a b = Only a
+
+record S a b where
+  x :: D a b
+
+-- A `data` cycle through a template's argument.
+data Foo a = Leaf a | Node [Foo a]
+data Bar = B (Foo Bar) | Z
+
+-- Templates holding a function: at a record's argument, and held by
+-- another template at its parameter.
+data Fn a = FLeaf a | FF (Int -> Int)
+
+record RF where
+  rs :: [Fn RF]
+
+data Bf a = BV a | BF (Int -> Int)
+data Fb a = A2 (Bf a) | N2
+
+newtype Date = Str
+type Cpp => Date = "MlcDate"
+
+instance Packable Str Date where
+  source Cpp from "t.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+record R a where
+  d :: Choice a
+  n :: Int
+
+source Cpp from "t.hpp" ("same", "isPicked", "outerPicked", "one")
+same :: a -> a
+isPicked :: R Int -> Bool
+-- A template at an instance of itself is that instance, which a source names.
+outerPicked :: Choice (Choice Int) -> Bool
+one :: a -> Int
+
+intTrip :: R Int -> R Int
+intTrip r = same r
+
+strTrip :: R Str -> R Str
+strTrip r = same r
+
+picked :: R Int -> Bool
+picked r = isPicked r
+
+duoTrip :: Duo Int Str -> Duo Int Str
+duoTrip x = same x
+
+roseTrip :: Rose Int -> Rose Int
+roseTrip x = same x
+
+tagTrip :: Tag Str -> Tag Str
+tagTrip x = same x
+
+-- A packed value in an arm.
+dateTrip :: R Date -> R Date
+dateTrip x = same x
+
+-- Two morloc types that may be one native type: one instance.
+intChoice :: Choice Int -> Choice Int
+intChoice x = same x
+
+i32Choice :: Choice I32 -> Choice I32
+i32Choice x = same x
+
+choiceTrip :: Choice ?Holder -> Choice ?Holder
+choiceTrip x = same x
+
+holderTrip :: Holder -> Holder
+holderTrip x = same x
+
+vecTrip :: Vec Int -> Vec Int
+vecTrip x = same x
+
+sTrip :: S Int Str -> S Int Str
+sTrip x = same x
+
+fooTrip :: Foo Bar -> Foo Bar
+fooTrip x = same x
+
+barTrip :: Bar -> Bar
+barTrip x = same x
+
+mkRF :: Int -> RF
+mkRF x = {rs = []}
+
+fnHeld :: Int -> Int
+fnHeld x = one (FLeaf (mkRF x))
+
+fbHeld :: Int -> Int
+fbHeld x = one (A2 (BV x))

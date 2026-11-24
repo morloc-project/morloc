@@ -12,7 +12,7 @@ Checked by: every_process_wide_value_is_registered, every_registry_row_names_a_v
 
 ### STATE-2 Per-thread state a manifold builds does not outlive its thread
 Status: implemented
-Checked by: golden:threaded-sourced-callbacks, golden:spec-host-7-1, cschema_cache_is_freed_when_its_thread_ends, a_drain_leaves_nothing_behind_on_its_thread, deep_recursive_value_dropped_concurrently
+Checked by: golden:threaded-sourced-callbacks, golden:spec-host-7-1, golden:parallel-span-threads, cschema_cache_is_freed_when_its_thread_ends, a_drain_leaves_nothing_behind_on_its_thread, deep_recursive_value_dropped_concurrently
 
 A manifold may run on a thread a sourced function starts (HOST-7). A
 `thread` row such a call can reach either frees its value when the thread
@@ -20,9 +20,10 @@ ends, or holds nothing once the frame that filled it returns. The schema
 conversion cache is freed by its destructor. The recursive-value drain
 keeps its worklist in the frame of the drop that started it, and a shared
 recursive value is drained by the owner that finds itself unique when it
-drops, on whichever thread that is. A thread that outlives the call (a
-persistent host pool) keeps what a failed call left in its tracker; see
-issues/rust-closures-threads.md.
+drops, on whichever thread that is. The runtime's parallel helpers outlive
+their calls and are emptied at the end of each pick of a job (WPOOL-3);
+threads that user code keeps keep what a failed call left in their tracker
+(see issues/rust-closures-threads.md).
 
 ### STATE-3 A packet a closure captures is only read by the closure's calls
 Status: implemented
@@ -91,19 +92,27 @@ call behind).
 
 ### STATE-6 A trace boundary leaves the frame stack at the depth it found
 Status: implemented
-Checked by: a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth, a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth, tla:FrameStack, tla:FrameStack_reset_at_dispatch.bug, tla:FrameStack_no_closure_boundary.bug, tla:FrameStack_pass_keeps_depth.bug, golden:spec-diag-5-1, golden:frame-stack-suspension-boundary
+Checked by: a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth, a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth, golden:cpp-closure-exception-type, tla:FrameStack, tla:FrameStack_reset_at_dispatch.bug, tla:FrameStack_no_closure_boundary.bug, tla:FrameStack_pass_keeps_depth.bug, golden:spec-diag-5-1, golden:frame-stack-suspension-boundary
 
-The boundaries are a pool's dispatch, `@try` and every closure: a function
+The boundaries are a pool's dispatch, `@try`, every closure -- a function
 value code outside morloc may call and whose failure it may catch,
-whether a lambda, a partial application or a suspension. The thunk `@try`
+whether a lambda, a partial application or a suspension -- and each span
+of a parallel call (WPOOL-4). The thunk `@try`
 makes of a pure body is run by the `@try` at once and is no boundary. Each
 saves the depth on entry and sets no depth but that one. Left normally,
 it finds the saved depth; dispatch checks this, which covers every
 boundary inside it, and a mismatch is a broken runtime invariant that
 ends the pool (PANIC-13). Left by a failure, it restores the saved depth
 on every path. A user failure also takes the labels above the saved depth,
-innermost first, into its message: `@try` and dispatch report it, and a
-closure raises it again as a failure carrying that message. A closed pipe
+innermost first: `@try` and dispatch report them after its message. A Rust
+closure raises it again as a failure carrying that message. A C++ closure
+raises the same exception again, of the type it was thrown with, so
+sourced C++ can catch it by type, and keeps the labels beside it in a table
+the process shares (a forked child gets an empty one). A report of
+that same exception on any thread (`@try`, dispatch, or an exception no
+handler holds, PANIC-6) adds them before its own and drops them. The table
+keeps the latest 256 such failures; a C++ failure a handler replaces with
+another is reported without them. A closed pipe
 or an infrastructure error passes through unchanged and carries no trace.
 So sourced code that catches a failure, or enters a nested dispatch on the
 same thread, finds the stack as it left it. Model: `tla/FrameStack.tla`
@@ -134,8 +143,11 @@ so neither the pointer's control block nor a `weak_ptr` ever sees a
 deferred step; the outermost release empties the worklist, and the
 worklist is freed when its thread ends. An arm that can be neither moved
 nor copied, and a value user code builds itself, are released as C++
-releases them. In Rust a generated type's arms are
-`RecBox`es, which release a deep chain the same way.
+releases them. In Rust a generated type's arms, and the node of
+a generated record that refers to itself, are standard `Arc`s in generated
+types whose drop calls the crate's release hook; in a pool the hook is the
+same drain (`rustmorloc::rec_release`), which releases a deep chain the
+same way.
 
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented
@@ -169,7 +181,7 @@ library, which holds the environment lock across prepare) follow it.
 
 ### INIT-3 A value set on first use without a lock is published by compare-and-swap
 Status: implemented
-Checked by: first_uses_on_many_threads_share_one_value_and_one_side_effect, a_child_forked_while_another_thread_builds_gets_a_value_at_once, no_runtime_value_waits_for_another_thread_to_initialise_it, tla:OncePublish, tla:OncePublish_oncelock.bug, tla:OncePublish_effect_each.bug
+Checked by: first_uses_on_many_threads_share_one_value_and_one_side_effect, a_child_forked_while_another_thread_builds_gets_a_value_at_once, a_dropped_cell_drops_its_published_value, a_schema_node_is_converted_once_and_freed_with_it, no_runtime_value_waits_for_another_thread_to_initialise_it, tla:OncePublish, tla:OncePublish_oncelock.bug, tla:OncePublish_effect_each.bug
 
 The standard library's once cells make later callers wait while one thread
 initialises; a fork in that window leaves the child waiting forever on a
@@ -182,6 +194,9 @@ starting the lifeline's watcher. Nothing waits, so a child either inherits
 the published value or builds its own. Between the publication and the
 side effect another thread, or a child forked in that window, sees the
 value without the effect; a side effect that panics is not retried.
+A schema node keeps the runtime's form of itself, and that form its text,
+the same way, so each is built at most once per node rather than once per
+packet; they are freed with the node.
 Model: `tla/OncePublish.tla`.
 
 ## Classes

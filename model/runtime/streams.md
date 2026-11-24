@@ -29,7 +29,8 @@ Status: implemented
 Checked by: a_process_dying_inside_a_stream_does_not_hang_the_rest
 
 The slot lock detects a dead holder; the slot is then poisoned and every
-later operation on it fails.
+later operation on it fails. Reclaiming a poisoned slot frees none of its
+blocks (SLOT-39).
 
 ### SLOT-5 Closing a stream frees its path in every process
 Status: implemented
@@ -152,21 +153,32 @@ before it are still written, and the footer records the failure.
 
 ### SLOT-15 Close and flush return once their batches are in the file
 Status: implemented
-Checked by: a_flush_makes_its_elements_readable_from_the_open_file, a_closed_stream_refuses_writes_and_its_path_reopens_at_once, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, tla:StreamQueue_reader_no_wait.bug, tla:StreamQueue_close_before_tail.bug
+Checked by: a_flush_makes_its_elements_readable_from_the_open_file, a_closed_stream_refuses_writes_and_its_path_reopens_at_once, a_closed_file_is_synced_unless_it_is_a_call_temp, a_file_under_the_run_temp_root_is_not_synced_whoever_made_it, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, tla:StreamQueue_reader_no_wait.bug, tla:StreamQueue_close_before_tail.bug
 
 A close queues the unflushed elements and a close marker and waits for the
 custodian to write them and the footer; writes after it fail, and its path
 reopens at once. A flush waits likewise, so a reader of the open file sees
-what was flushed. A discard writes what was queued, drops the unflushed
-elements, and leaves the temporary footer. Whether close and flush should
+what was flushed. A close also makes the file's data durable (fdatasync),
+except a file `@tmpfile` made in the writing process, which its call
+removes, or any file under the run's temp root, which the run removes
+(the custodian is often another process than the one that made it); an error closing the file (a filesystem that writes back at
+close) fails the stream. A discard writes what was queued, drops the unflushed elements,
+and leaves the temporary footer. Whether close and flush should
 instead return at once, with the wait moved to readers, waits on a
 benchmark (issues/streams.md).
 
 ### SLOT-16 Stdout and stderr streams go through the queue
 Status: implemented
-Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns
+Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns, a_stdout_sub_packet_reaches_the_sink_in_parts_that_make_the_packet, threads_write_one_stdio_stream_at_once_and_keep_each_write_whole, a_forked_child_writes_its_parents_stdout_in_write_order, a_forked_stdout_writer_that_exits_without_flushing_loses_nothing, a_forked_child_cannot_close_its_parents_stdout, golden:collect-threads-stdout, golden:collect-fold-cpp, golden:spec-strm-8-8, tla:StdioBracket, tla:StdioBracket_write_pinned.bug, tla:StdioBracket_child_closes.bug
 
-The nexus's stdout and stderr writer is the custodian's consumer. A pool
+The nexus's stdout and stderr writer is the custodian's consumer. A
+sub-packet reaches it as its header block, payload and padding, which it
+writes in order without joining them. Any process holding the handle, a
+thread of the opening process or a process forked from it, writes a
+stdout or stderr stream, several at once, each write whole (SLOT-11); a
+write is the same shared-memory append as a file stream's. Only the
+process that opened a standard stream closes it, and only it reads
+standard input, which travels over the nexus socket. A pool
 finishes the stdio streams a call left open before replying, so a call's
 output precedes its result. A write returns once its batches are queued,
 not written; text a pool prints to the shared stdout meanwhile may land
@@ -199,15 +211,18 @@ once, never while the slot uses it, and never leaked.
 
 ### SLOT-19 A queued close frees its slot once, after the footer
 Status: implemented
-Checked by: only_a_detached_or_dead_closer_leaves_the_slot_to_the_custodian, a_call_sweep_pauses_the_calls_streams_and_their_writer_frees_the_slots, tla:SlotRelease, tla:SlotRelease_detached_releases.bug, tla:SlotRelease_detached_waits.bug
+Checked by: only_a_detached_or_dead_closer_leaves_the_slot_to_the_custodian, a_call_sweep_pauses_the_calls_streams_and_their_writer_frees_the_slots, a_stop_after_the_closer_died_frees_the_slot, tla:SlotRelease, tla:SlotRelease_detached_releases.bug, tla:SlotRelease_detached_waits.bug, tla:SlotRelease_stop_first.bug, tla:SlotRelease_closer_then_stop.bug
 
 A close names its closer on the queue. A waiting closer (`@close`, a
 flush-and-close at the end of a run) frees the slot once the custodian has
 written the footer (SLOT-15). The sweep that ends a nexus-evaluated
 daemon call closes each stream the call left open detached: it queues the
 close and returns, and the custodian frees the slot after writing the
-footer, as it does for a waiting closer that died. Every free checks under
-the slot lock that the slot still holds the stream being closed.
+footer, as it does for a waiting closer that died. A stop ends the
+custodian's wait for its closer, after it frees the slot of a closer
+already gone: it reads its stop word before it looks at the closer, so a
+closer gone before the stop is seen. Every free checks under the slot lock that the slot still
+holds the stream being closed.
 
 ### SLOT-20 A write buffer grows to its stream's sub-packet size
 Status: implemented
@@ -238,16 +253,23 @@ least every 100 ms, as a released slot's word may be reused.
 
 ### SLOT-22 A stream's writer and custodian wake each other only when one sleeps
 Status: implemented
-Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug
+Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, stopping_a_writer_that_waits_for_its_closer_returns_at_once, a_stop_between_an_idle_writers_check_and_its_sleep_ends_it_at_once, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug, tla:QueueWake_tail_only.bug
 
 The custody queue takes no lock. A side about to sleep on a queue word
-(the push count, for the custodian; the done count, for a writer or a
+(the queue's bell, for the custodian; the done count, for a writer or a
 closer) reads the word, registers on its waiter count, and sleeps only
 while the word still holds what it read. A side that moves a word moves it
 first and then wakes its sleepers only when the count is non-zero; both
 orders are sequentially consistent, so either the mover sees the
-registration or the sleeper sees the moved word. Stopping and failing a
-stream wake unconditionally.
+registration or the sleeper sees the moved word. A push moves the bell
+after the push count, and a stop after the custodian's stop word; the
+custodian reads the bell before it looks at its stop word and the queue,
+so a stop or push after that look ends its sleep. Stopping and failing a
+stream wake unconditionally; a writer asleep on the done count when the
+custodian stops sees it only at the end of its slice (QueueWake allows
+this and does not time it). The bell is part of the queue's layout in
+shared memory, which the processes of a run share only with processes of
+their own build (LIFE-6).
 
 ### SLOT-23 Threads reading one file share its slots and its cache bound
 Status: implemented
@@ -261,6 +283,214 @@ a handle's slots in the process stay within `MORLOC_IFILE_CACHE_BYTES`:
 a slot evicts its own entries to make room, and serves a sub-packet
 uncached when the handle has no room for it.
 
+
+### SLOT-33 A stdout batch is compressed only when the output is packets
+Status: implemented
+Checked by: a_stdout_stream_takes_the_level_the_nexus_recorded, golden:stdout-stream-compression, golden:stdout-raw-bodies
+
+Before it dispatches a call, the nexus records in the stream registry the
+level stdout batches are written at, for the form it writes them in: for
+output whose frames it
+forwards (packets, voidstar), its `-z` level, or none, which leaves the
+`@write` level; for every other form, which it decodes before writing,
+level 0, so `@write` levels on `@stdout` need not agree there. A pool
+writing to `@stdout` takes that level; `@stderr` and file streams keep
+theirs. Each run has its own registry, so a nested run takes nothing from
+an enclosing one. A daemon records none: it refuses `@stdout`.
+
+### SLOT-34 A slice caches only the sub-packets at its ends
+Status: implemented
+Checked by: a_slice_caches_only_the_sub_packets_at_its_ends
+
+An IFile slice reads the sub-packets it spans from the handle's cache when
+they are there. Of those it decompresses, it keeps in the cache (SLOT-23)
+only the first and the last, which a neighbouring slice may read again;
+the others are freed when the slice returns. A slice across many
+sub-packets therefore leaves at most two of them cached.
+
+### SLOT-38 A strided or field-tail slice holds one sub-packet at a time
+Status: implemented
+Checked by: a_strided_slice_is_the_slice_copied_element_by_element, a_strided_slice_releases_each_sub_packet_it_has_passed
+
+An IFile slice with a step other than 1, or with a field tail, takes one
+run from each sub-packet it spans: the run's first element and count
+follow arithmetically from the cumulative counts, one binary search per
+run. It copies a run before it reads the next sub-packet, and once the
+walk has passed a sub-packet, a decompressed copy that SLOT-34 does not
+keep is freed and the pages of an uncompressed interior one are dropped
+from the process's mapping. A fixed-width result (a fixed-width element,
+or a field tail to one) is copied into a block sized once, by a strided
+copy of each run. A Str result is sized by a first pass over the runs and
+copied by a second, which decompresses each interior compressed
+sub-packet twice; a second pass that finds other strings fails the slice.
+Any other result is deep-copied element by element and consolidated into
+one block. Every route gives the value the slice selects, and a fixed-width
+result its bytes.
+
+### SLOT-39 A poisoned slot's reclaim leaks its blocks
+Status: implemented
+Checked by: reclaiming_a_poisoned_slot_frees_none_of_its_blocks, a_writer_dying_between_queueing_and_replacing_its_buffer_releases_it_once, tla:WriteBufferHandoff, tla:WriteBufferHandoff_free_on_poison.bug, tla:WriteBufferHandoff_unlocked_reclaim.bug
+
+A slot's block fields (path, schema, sub-packet entries, write buffer,
+custody queue) change only under the slot's lock, and a guard of that slot
+is the only way to change them. So does a channel's graph: its block (in
+the entries field), its nodes and the batches they hold, and its failure
+message change only through the channel view of the slot's guard. The
+producer side of a slot's custody queue (pushes, the close, and taking
+spares) is reached only through the producer capability of the slot's
+guard; the queue's waits and reads need no guard. A holder that dies inside
+an update leaves them possibly mid-swap: the next taker poisons the slot
+(SLOT-4), and its reclaim frees none of those blocks, nor any of a
+channel's graph. A block already handed to the custody queue is released
+once, by the custodian; the slot's copy leaks. At most one write buffer and
+the path, schema and entries blocks (with a channel's queued batches) leak
+per death, until the volume is torn down.
+
+### SLOT-35 A `@write` batch that fails leaves no trace, or fails its stream
+Status: implemented
+Checked by: a_batch_with_a_failing_element_leaves_no_trace, a_batch_failing_in_placement_is_absent_or_fails_the_stream, the_first_failure_of_a_queue_is_the_one_reported, a_forked_child_whose_put_raised_fails_its_parents_stdio_stream, golden:spec-strm-9-1
+
+Under the slot lock and before the stream's level is pinned, `@write` to
+an output stream or a channel resolves the path of every handle-form
+stream field in its batch; the elements are then written with those
+paths. A field naming a stream that is closed at that point, or one with
+no path (a channel, stdio), fails the call before any element is
+appended: no element of the batch reaches the file or a reader, the
+stream's counts and level are those before the call, and later batches'
+elements are written as if the call had not been made (an index capacity
+the call grew stays, so later sub-packets may be cut elsewhere; cuts carry
+no meaning, SLOT-11). Any other failure while
+the batch is placed is undone the same way so long as none of its elements
+has been handed on (queued for the file or pushed to a reader): what it
+placed is uncounted. A buffer handed on that holds only
+earlier batches' elements does not count. The batch's elements are counted
+only once all are placed, and the level is pinned once the batch has
+handed bytes on, or when it ends. A failure after a hand-off fails the
+stream instead: the error
+is returned, the batch's unhanded bytes are dropped, later writes are
+refused with the failure, an output stream keeps its temporary footer
+(SLOT-28) and a channel's reader gets the failure after what was handed
+on. A `@collect` sink's write or put into a stream that raised before or
+after the write (STRM-9) fails the output stream the same way, from any
+process that holds its handle, a forked child of a stdio stream's opener
+included, so the opener's close returns the failure; a stream already
+closed or failed is left as it is. A user's own `@write` that fails before
+a hand-off still leaves no trace. When the writer and the custodian fail a stream at once, the first
+failure recorded is the one reported. A relptr of the write buffer's own bytes
+that will not shift when its index grows is a defect: the writer panics
+inside the slot lock, which fails the stream (SLOT-14). What was
+handed on stays in the file, where a reader reads it as data (SLOT-29).
+A failure that ends the process (SHM-17) is outside this item.
+
+### SLOT-36 A batch is encoded in place and committed whole
+Status: implemented
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, in_place_runs_read_as_zero_and_mix_with_single_rooms, an_in_place_batch_that_fails_is_absent_or_fails_its_stream, a_thread_encoding_in_place_does_no_other_stream_operation, an_arena_rewound_inside_an_in_place_batch_keeps_its_blocks, an_in_place_element_that_ends_outside_its_room_poisons_the_stream, two_threads_writing_in_place_leave_their_batches_whole, an_in_place_batch_does_not_survive_a_fork_or_its_thread, an_arena_ended_inside_an_in_place_batch_discards_its_streams_after, a_run_of_elements_wider_than_a_sub_packet_is_placed_one_by_one, a_batch_left_open_at_the_end_of_its_call_is_aborted, a_leaf_batch_writes_the_bytes_the_copy_path_writes, leaf_rooms_on_poisoned_spares_write_the_bytes_the_copy_path_writes, a_leaf_str_that_is_not_text_aborts_its_batch, a_leaf_write_refuses_what_is_not_a_leaf_or_not_its_flags, a_list_of_leaves_batch_writes_the_bytes_the_copy_path_writes, list_of_leaves_rooms_on_poisoned_spares_write_the_bytes_the_copy_path_writes, a_list_of_leaves_with_a_leaf_that_is_not_text_aborts_its_batch, a_list_of_leaves_write_refuses_what_is_not_one, a_later_stream_on_a_slot_holds_no_byte_of_an_earlier_one
+
+A language binding may write a `@write` batch to an output stream (a file,
+or an unstaged standard output or error) by
+encoding each element straight into the stream's write buffer, inside one
+transaction on the slot lock, which it begins, places elements into, and
+commits or aborts. Channels, staged streams, and element types that are
+tables or hold stream fields are refused at begin and written as SLOT-35
+says, from the binding's value. An element is placed with exactly its
+portable size and is cut into sub-packets as the copy path cuts it, so the
+file's bytes are those the runtime's own encoding writes. A leaf element
+(a `Str`, or an array of fixed-width numbers that the binding holds in its
+wire form) is placed and written whole by the runtime from the binding's
+bytes, with `mlc_write_place_bytes`: its slot, zero up to where its body
+starts, the body (checked as text when it is a `Str`, FMT-10), and zero
+from the body's end to the end of its rounded room. A leaf `Str` that is
+not text aborts the batch before the call returns, and the binding raises
+its own error, naming its language and the byte. A list of such leaves
+(a `[Str]`, or a list of such arrays) is placed and written whole the
+same way, with `mlc_write_place_pieces` from each leaf's bytes: its slot,
+zero up to its leaves' headers, the headers, each body with zero before it
+up to its alignment, and zero from the last body to the end of the room.
+A leaf in it that is not text aborts the batch after part of the room was
+written, and the binding's error names the byte as for one leaf. Any other element's room
+is zeroed when it is placed, so a field the encoder leaves alone reads as
+zero. Every byte of a room is therefore its element's or zero, whatever
+the block held before. The binding reports where its encoding ended at its next call; an
+end outside the room is a defect. A room may end past the encoding, by
+the size's alignment slack, and that tail stays zero. An `Int` placed as
+its slot alone, in a run or a room of that size, that is not written
+inline is a defect too.
+
+A buffer that fills is sealed into the writer's pending list and, once the
+queue has room, a spare or fresh block takes the slot's place; a buffer
+that fills before the batch has placed anything in it holds earlier
+batches' elements alone and is handed on at once, as outside a batch, so
+every pending block holds some of the batch's own. An element larger than
+a sub-packet gets a pending block of its own. Every block the transaction allocates is
+the slot's from the start, so no eval arena releases it. Pending blocks
+are queued (SLOT-12) and the element counts and the level pin change only
+at commit, so an aborted batch leaves no trace and pins no level. Growing
+the block or its index is published to the slot at once and survives an
+abort. Abort frees the writer's private blocks, never giving them to the
+spare ring, whose only producer is the custodian, and puts back the
+buffer the batch started in with the counts it started from. A commit
+cannot be undone once a block holding its batch's elements is queued:
+when the stream refuses a later one, the writer frees the blocks it did
+not queue, leaves the slot without a buffer and fails the stream. Refused
+before that, the batch is absent.
+
+While a transaction is open its thread does no other stream operation, so
+encoder code that reaches another stream cannot hold two slot locks; a
+close or discard of a stream meanwhile returns at once and runs when the
+transaction ends, reporting a failure on stderr (an exception to SLOT-15);
+one that ends in a defect leaves those streams to the run's end (SLOT-13).
+A transaction still open when its call ends is a defect: it is aborted
+and the process panics (PANIC-1). A thread that ends with a
+transaction open ends its process, and a writer that dies inside the
+transaction fails the stream (SLOT-14); its private blocks stay allocated
+until the namespace ends. A forked child forgets a transaction its
+parent's thread had open. Pending blocks are bytes outside the queue's
+bound (SLOT-32) for the length of one batch.
+
+The protocol of blocks, counts, spares, zeroing and the GIL is modelled in
+`tla/EncodeInPlace.tla`, with a bug variant for each of its rules; the
+refusals, fork and thread rules are checked by the tests above.
+
+### SLOT-37 Every binding writes an output file's batches in place
+Status: implemented
+Checked by: an_in_place_batch_writes_the_bytes_the_copy_path_writes, python_waits_for_a_stream_lock_only_without_the_gil, golden:write-in-place, golden:write-in-place-failure-cpp, golden:write-in-place-failure-py, golden:write-in-place-failure-r, golden:write-in-place-wait-py
+
+The C++, Rust, Python and R bindings write a `@write` batch to an output
+file through SLOT-36's transaction, and with `mlc_write` from their own
+value when begin refuses. Each encodes the canonical bytes, which a test
+per binding and a golden writing the same values from several languages
+compare byte for byte. An error in the encoder aborts the batch: C++ and
+Rust through a guard, R in one `R_UnwindProtect` around the batch, whose
+cleanup aborts the transaction when an R error unwinds it. R writes a
+batch given as a list or as a character vector of Str in place, sizing
+each element as it places it; a batch given as an atomic vector, factor
+or integer64 vector takes the copy path. The leaves (SLOT-36) each binding
+hands to the runtime: C++ a `std::string` for a `Str` and a
+`std::vector<T>` whose `T` is exactly the element's wire number, and a
+`std::vector` of either for a list of them; Python a
+`str` (known text), a `bytes` or `bytearray` for a `Str`, and a
+C-contiguous buffer whose items are the wire numbers; R an element of a
+character vector (after its NA check) and a raw vector for a `Str` or a
+`[U8]`, and a double vector for a `[Real]`. Other elements take the room.
+
+A Python writer takes the slot lock with the GIL released, then sizes,
+places and writes each element of a list; a batch given as bytes or a
+numpy array takes the copy path. It
+opens the batch with `MLC_WRITE_NOWAIT`: a placement that would wait for
+queue room places nothing and returns `MLC_WRITE_WOULD_BLOCK`, and the
+writer then waits in `mlc_write_wait` with the GIL released, sizes the
+element again and places it; an abort, which runs the closes deferred
+during the batch, runs with the GIL released too. Before its first wait a list batch is
+replaced by a shallow copy, so the batch is one state of the list (its
+elements as each is written); a bytearray, which another thread could
+change during a wait, takes the copy path. The commit runs with the GIL
+released. Python code that runs during the encode (a dict key's __eq__, a
+finalizer) may release the GIL, and an element that no longer fits the
+room it was sized for fails the batch. So that another Python thread then
+given the GIL cannot deadlock with the writer, pymorloc.c makes no call
+that may wait for an output stream's slot lock or queue with the GIL held
+(`tla/EncodeInPlace.tla` models the GIL with a third Python thread that
+mutates the writers' objects and takes the slot lock).
 
 ### SLOT-24 A batch's block outlives every compression job that reads it
 Status: implemented
@@ -277,7 +507,7 @@ submits it.
 
 ### SLOT-25 A reader decodes its batch inside its claim
 Status: implemented
-Checked by: a_batch_decoded_in_place_is_the_batch_next_returns, a_decoder_that_fails_still_releases_its_claim, golden:next-decode-failure
+Checked by: a_batch_decoded_in_place_is_the_batch_next_returns, a_decoder_that_fails_still_releases_its_claim, golden:next-decode-failure, an_ifile_slice_decoded_in_place_is_the_slice_block, a_slice_checks_only_the_records_it_reads, a_slice_decoder_that_fails_releases_every_copy, a_slice_fails_when_its_handle_closes_between_pieces, a_dropped_slice_page_reads_back, slice_pieces_read_onto_one_list, a_slice_piece_that_fails_is_held_for_after_the_runtime, golden:ifile-slice-in-place, golden:ifile-slice-decode-failure
 
 `@next` from a C++ or Rust pool claims the next sub-packet as SLOT-23's
 readers do and hands it to the pool's decoder while the process keeps the
@@ -290,9 +520,21 @@ released (pages behind the cursor are dropped, idle mappings unmapped). A
 decoder reports failure by return value, never by unwinding through the
 runtime, and the claim is released either way.
 
+A unit-step IFile slice with no field tail, read from a C++ or Rust pool, is
+handed to the same decoder one piece per sub-packet it spans, in order, on
+the calling thread, after a callback with the total count. A piece is that
+sub-packet's run clipped to the slice, under a header of the run's own: read
+where it is mapped when the sub-packet is uncompressed and aligned,
+otherwise from its shared-memory copy (SLOT-34 decides which copies are
+kept). Only the clipped records and what they address are checked. Before
+each piece the handle's generation is checked, so a close between pieces
+fails the slice; nothing a piece is given outlives its callback, and a
+failing callback ends the slice with every copy released. Pages of a wholly
+read uncompressed sub-packet are dropped from the process's mapping.
+
 ### SLOT-26 A reader decodes ahead of its claim without claiming
 Status: implemented
-Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, readers_sharing_a_cursor_read_each_sub_packet_once, an_arena_ending_leaves_the_sub_packets_decoded_ahead, a_disabled_cache_decodes_nothing_ahead, a_reset_cursor_reads_the_stream_again
+Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, readers_sharing_a_cursor_read_each_sub_packet_once, an_arena_ending_leaves_the_sub_packets_decoded_ahead, a_disabled_cache_decodes_nothing_ahead, a_reset_cursor_reads_the_stream_again, two_streams_read_at_different_speeds_each_read_in_order, requests_in_turn_read_two_compressed_streams_in_order
 
 A reader whose previous claim ended where its new one starts (no other
 reader claimed in between, so the sub-packets after are likely its own)
@@ -314,15 +556,15 @@ is simply not kept.
 
 ### SLOT-27 Decoding ahead runs beside the reader and is joined before use
 Status: implemented
-Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, batches_read_in_place_beside_other_allocations_read_back_as_written, a_reset_cursor_reads_the_stream_again, tla:AheadJob, tla:AheadJob_drop_without_join.bug, tla:AheadJob_serve_before_join.bug
+Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, batches_read_in_place_beside_other_allocations_read_back_as_written, a_reset_cursor_reads_the_stream_again, a_cursor_reset_mid_stream_reads_the_stream_again, a_pass_holds_twice_the_frame_workers_in_frames_and_decodes_on_two, a_refused_frame_worker_narrows_a_pass_decoded_ahead, tla:AheadJob, tla:AheadJob_drop_without_join.bug, tla:AheadJob_serve_before_join.bug
 
 After a claim, a slot that holds less than a pass of sub-packets decoded
 ahead starts one job on a thread of its own for the next pass. A pass
 takes sub-packets until it holds twice as many frames as frame workers or
 8 MiB, so small sub-packets decode many at once and large ones, whose
 frames already decode in parallel, one at a time beside the reader. The job allocates the pass's blocks (or takes
-blocks the slot handed it), decodes their frames on the frame workers,
-relocates them, and frees nothing; it reads the compressed bytes where the
+blocks the slot handed it), decodes their frames on at most two frame
+workers (ZIP-10), relocates them, and frees nothing; it reads the compressed bytes where the
 slot maps them, past the claim that started it. The slot joins the job
 before it serves, keeps, releases or drops any of its blocks: at its next
 claim, at a cursor reset, and before it unmaps its file. Pages a reader
@@ -340,11 +582,14 @@ reservations settle where they were made. A job that panics leaves the
 blocks it allocated where the slot releases them. Before the stream
 registry is unmapped, the passes of every idle slot are joined and their
 blocks released. Joining waits for one pass at most: dropping or resetting
-a slot, which joins, waits that long. Model: `tla/AheadJob.tla`.
+a slot, which joins, waits that long. A pass decodes on at most two threads, so one that holds a single
+sub-packet of more than 2w frames (w the frame workers; the first pick is
+taken whatever its size) can take up to w/2 times as long as the same
+decode on w threads; a drop or reset waits that long. Model: `tla/AheadJob.tla`.
 
 ### SLOT-32 The streams one process writes share a bound on queued bytes
 Status: implemented
-Checked by: streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth, many_compressed_streams_stay_within_the_queue_bytes
+Checked by: streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth, many_compressed_streams_stay_within_the_queue_bytes, a_later_stream_on_a_slot_holds_no_byte_of_an_earlier_one
 
 The process that writes streams (SLOT-10) holds the queue of each stream
 it counts to a depth of at most `L / (n * s)`, never below one, where `L`
@@ -355,7 +600,14 @@ of these; a writer stops being counted before it leaves its queue, so no
 depth is set on a queue after its writer has left it. A producer waiting
 under a lowered depth sees a raised one within its wait slice, and
 batches queued before a depth was lowered stand until written. A stream
-keeps at most one written buffer for reuse. A block larger than `s` (an
+keeps at most one written buffer for reuse. A spare keeps the bytes of
+the batches it last held, and a slot keeps its queue, its spares and its
+buffer from one stream to the next, so a later stream, in a
+daemon another client's call, can fill a block an earlier one wrote. No
+byte a buffer held for one stream reaches another stream's output: every
+room is written whole or zeroed when it is placed (SLOT-36), and a
+sub-packet carries only the rooms placed in it. Under `MORLOC_SHM_POISON=1`
+the custodian fills a block it gives back as a spare with the poison byte. A block larger than `s` (an
 oversize element or a staged batch) is queued only into an empty queue,
 so a stream holds at most two: one queued and one being filled.
 
@@ -376,49 +628,99 @@ How a file ends records why its writer stopped; this section says how each
 reader treats each ending. An issue (issues/streams.md) records what is
 wrong with it.
 
-### SLOT-28 A stream file ends in one of five states
+### SLOT-28 A stream file ends in one of six states
 Status: implemented
-Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, a_writer_killed_inside_the_slot_lock_fails_the_stream
+Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, a_writer_killed_inside_the_slot_lock_fails_the_stream, a_batch_failing_in_placement_is_absent_or_fails_the_stream
 
 | End state | How a file gets it |
 |---|---|
 | final footer, CLOSED | `@close` (SLOT-15) |
 | final footer, PAUSED | a remote child returns the stream without `@close`; the file is complete and may be appended to |
-| final footer, FAILED | the stream's writer died inside the slot lock (SLOT-14), or daemon recovery stopped the custodian (SLOT-13) |
-| temporary footer | the stream is still being written; or it was discarded, its handle dropped or its run ended without `@close`, with its unflushed elements dropped (SLOT-13); or its custodian failed to write (an I/O error such as a full disk), after which it writes nothing more; or its custodian was killed after writing a batch |
+| final footer, FAILED | the stream's writer died inside the slot lock (SLOT-14), or daemon recovery stopped the custodian (SLOT-13); or a run whose packet stdout failed after its header (SLOT-40) |
+| final footer, REPAIRED | `morloc-nexus file --repair` closed a file that was in another state; it holds every complete sub-packet the file had, which may be fewer than its writer meant to write |
+| temporary footer | the stream is still being written; or it was discarded, its handle dropped or its run ended without `@close`, with its unflushed elements dropped (SLOT-13); or its custodian failed to write (an I/O error such as a full disk), after which it writes nothing more; or a batch failed after part of it was queued (SLOT-35), after which what was queued is still written; or its custodian was killed after writing a batch |
 | no footer | the custodian was killed before writing any footer; the machine stopped (power loss, kernel panic); or the file was cut short outside morloc (an interrupted copy, a full disk) |
 
-Every footer follows the last complete sub-packet, so in the first four
+Every footer follows the last complete sub-packet, so in the first five
 states the data ends at the footer. A file whose bytes were cut after a
 complete sub-packet is indistinguishable from the last state.
 
-### SLOT-29 An input stream reads every complete batch and ends, whatever the end state
-Status: draft
+### SLOT-29 A reader opens a stream file by its end state
+Status: implemented
+Checked by: a_failed_file_is_refused_at_every_open, a_file_with_no_footer_reads_its_complete_batches_as_an_istream_only, closed_paused_and_repaired_files_open, a_piped_stream_holding_another_packet_is_refused, golden:stream-end-states
+
+| End state | IStream open, `@load` | IFile open | `file --validate` |
+|---|---|---|---|
+| final CLOSED or PAUSED | opens | opens | passes |
+| final REPAIRED | opens | opens | passes, and says repaired |
+| final FAILED | refused | refused | fails |
+| temporary footer | opens (SLOT-31) | refused (SLOT-30) | fails |
+| no footer | opens (SLOT-31) | refused (SLOT-30) | fails |
 
 `@next` on an IStream walks the sub-packets in order and, past the last
-one, returns an empty batch, in every end state. With a final or
-temporary footer the walk stops at the footer; with no footer it scans
-forward and stops at the last complete sub-packet, or fails if a
-sub-packet's header extends past the end of the file. The footer's status
-is parsed and not consulted: a FAILED file reads as a CLOSED one. A
-reader of a file still being written sees the batches its writer had
-flushed when the reader opened it (SLOT-15).
+one, returns an empty batch; with a temporary footer the walk stops at the
+footer, with no footer at the last complete sub-packet, and a reader of a
+file still being written sees the batches its writer had flushed when the
+reader opened it (SLOT-15): a file just opened has no footer until its first
+batch, so an IStream cannot refuse one that has none (SLOT-31). A refused
+file is read only after `morloc-nexus file --repair` gives it a REPAIRED
+footer.
+A packet stream read from a pipe (`@stdin`, an IStream argument read from
+`-`) gives every complete batch, then fails when the input ends without a
+final footer, inside a sub-packet, with a FAILED one, or at a packet that
+is neither data nor a footer; a consumer may have acted on the earlier
+batches, and its run fails.
 
 ### SLOT-30 An indexed file opens only with a final footer
 Status: implemented
-Checked by: ifile_rejects_footerless_stream
+Checked by: ifile_rejects_footerless_stream, an_index_out_of_order_is_not_trusted, index_counts_that_disagree_with_the_footer_are_not_trusted, an_ifile_refuses_permuted_counts, an_ifile_refuses_an_index_that_skips_the_first_sub_packet, an_ifile_refuses_an_index_that_skips_the_last_sub_packet, an_ifile_open_runs_the_index_walk_in_a_debug_build, a_read_refuses_a_sub_packet_whose_count_differs_from_the_index, a_writer_cannot_build_a_footer_whose_counts_disagree_with_its_total, concat_refuses_a_source_without_a_final_footer
 
 `@open` as an IFile needs the per-sub-packet element counts that only a
 final footer records, so it refuses a file in the temporary-footer or
-no-footer state. It does not consult the status: a FAILED file opens.
+no-footer state, and refuses a FAILED one (SLOT-29).
 
-### SLOT-31 What a reader reports at an ending that is not a clean close
+The index is checked at open without reading the sub-packets (ruled
+2026-11-02): its entries lie in order inside the body, at least a header
+apart, the last sub-packet ends before the footer, and the counts add up
+to the footer's total. A file that fails this reads as one without a final
+footer. In a debug build (one with code checks), or with
+`MORLOC_VERIFY_INDEX=1`, the open also walks the sub-packets and refuses a
+file whose footer's index differs from them. In every build, a read
+that loads a sub-packet fails when the sub-packet holds a different
+number of elements than the index gives it. `@concat` and `@append`, which
+write a new footer, always walk, and refuse a damaged footer or one that
+differs from the sub-packets; `@concat` also refuses a source without a
+final footer or with a FAILED one, and its footer is REPAIRED when any
+source's is, CLOSED otherwise. `@append` refuses a FAILED or REPAIRED
+file, so a repaired file is never extended into one that reads as closed. A writer refuses to write a final footer whose counts do not
+add up or whose entries are out of order.
+
+### SLOT-31 What an IStream reports at a temporary footer or none
 Status: draft
 
 Open; needs a ruling and a model (issues/streams.md). The endings in
-SLOT-28 tell a reader why its writer stopped, except in one case: a
+SLOT-28 tell a reader why its writer stopped (SLOT-29), except two: a
+file with no footer is both a stream just opened (or between a batch and
+its footer) and one whose writer was killed or that was cut short, and a
 temporary footer is written both by a stream still being written, which a
 reader may legitimately read while it grows, and by a stream discarded or
 killed, whose file will never change again. The registry of the process
 tree that writes a stream can tell the two apart while that tree runs; a
 reader on another machine, or after the tree has ended, cannot.
+
+### SLOT-40 A run's packet output ends in a final footer whatever its outcome
+Status: implemented
+Checked by: a_stdout_stream_still_open_at_the_end_is_failed, golden:stream-end-states
+
+Standard output in the packet or voidstar form ends in a final footer
+over its complete sub-packets: CLOSED when the run succeeds, FAILED when
+it fails after the stream's header was written. A stream still open when
+the run ends did not finish: its footer says FAILED and the run fails. A
+footer that cannot be written fails the run. A run killed by a signal
+it cannot handle (SIGKILL) writes no footer: IFile, `--validate` and a
+pipe reader refuse it (SLOT-29), and an IStream of such a file is SLOT-31's
+open case.
+`-o FILE` writes to a file beside FILE and renames it onto FILE only when
+the run succeeds; a failed run leaves FILE as it was. A device or a pipe
+named by `-o` is written in place. A text form (json, jsonl, csv) has no
+footer, and its completeness is the run's exit status.

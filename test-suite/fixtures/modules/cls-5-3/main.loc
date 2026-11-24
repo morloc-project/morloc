@@ -1,0 +1,6 @@
+module main (f)
+
+import .lib (Base, Sz)
+
+f :: Bool -> Str
+f x = sz x

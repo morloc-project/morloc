@@ -11,9 +11,9 @@ indexmap = { version = "2", features = ["serde"] }
 # so the `random` default feature (which pulls rand + getrandom) is
 # disabled. Keep `std` for the std::hash::Hasher impl.
 twox-hash = { version = "2", default-features = false, features = ["xxhash64", "std"] }
-nix = { version = "0.29", features = ["signal", "socket", "mman", "process", "fs", "user"] }
 clap = { version = "4", features = ["derive", "wrap_help"] }
 thiserror = "2"
+simdutf8 = "0.1"
 # `zstdmt` unlocks the multithreaded encoder used by
 # compression::choose_workers for >=1 MiB payloads. Without this feature
 # `Encoder::multithread` does not exist.

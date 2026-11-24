@@ -1,0 +1,48 @@
+-- A parallel map runs its spans on threads that end before the caller reads
+-- the results (STATE-2): a table view, a closure from another pool and a
+-- list read from shared memory must survive their span thread, here with
+-- released blocks poisoned. A child forked inside a span, on the calling
+-- thread or a span thread, exits there with FORK-17's status instead of
+-- running more spans.
+module main (tables, closures, lists, forks)
+
+import root-cpp
+import root-py
+import table-py
+import table-cpp
+import parallel-cpp
+
+source Py from "src.py" ("makeTable", "bigList", "addHeadLen")
+source Cpp from "src.hpp" ("tableSum", "listSum", "forkEach")
+
+makeTable :: Int -> Table {idx = Int, value = Real}
+tableSum :: Table {idx = Int, value = Real} -> Real
+bigList :: Int -> [Real]
+addHeadLen :: [Real] -> Real -> Real
+listSum :: [Real] -> Real
+forkEach :: Int -> Int
+
+fourWorkers :: ParOpts
+fourWorkers = .(.workers = 4, .chunkSize = 1, .chunking = FixedChunks) defaultParOpts
+
+mkAdd :: Int -> (Real -> Real)
+mkAdd i = addHeadLen (bigList i)
+
+apply :: Real -> (Real -> Real) -> Real
+apply x f = f x
+
+--' Sum tables built by parallel spans
+tables :: Int -> [Real]
+tables n = map tableSum (pmapWith fourWorkers makeTable (range 0 n))
+
+--' Apply closures built by parallel spans
+closures :: Int -> [Real]
+closures n = map (apply 1.0) (pmapWith fourWorkers mkAdd (range 0 n))
+
+--' Sum lists built by parallel spans
+lists :: Int -> [Real]
+lists n = map listSum (pmapWith fourWorkers bigList (range 0 n))
+
+--' Map a forking function in parallel
+forks :: Int -> [Int]
+forks n = pmapWith fourWorkers forkEach (range 0 n)

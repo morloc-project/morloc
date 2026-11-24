@@ -430,12 +430,8 @@ unsafe fn cache_entry_is_valid(
         libc::unlink(indirection_filename);
         return false;
     }
-    let filename_bytes = std::slice::from_raw_parts(
-        data.add(payload_start),
-        payload_len.min(4096),
-    );
-    let ref_filename_str = match std::str::from_utf8(filename_bytes) {
-        Ok(s) => s.trim_end_matches('\0').to_string(),
+    let ref_filename_str = match crate::packet_ffi::file_path(data.add(payload_start), payload_len) {
+        Ok(s) => s.to_string(),
         Err(_) => { libc::unlink(indirection_filename); return false; }
     };
     let ref_cstring = match CString::new(ref_filename_str.as_bytes()) {
@@ -728,8 +724,7 @@ impl<'r> Walker<()> for HashWalk<'r> {
                         self.fold(std::slice::from_raw_parts(data.add(8), 8));
                     } else {
                         let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
-                        let limb_data = shm::rel2abs(relptr)?;
-                        self.fold(std::slice::from_raw_parts(limb_data, size * 8));
+                        self.fold(crate::voidstar::int_limb_bytes(size, relptr)?);
                     }
                 }
                 SerialType::IFile | SerialType::OStream | SerialType::IStream => {
@@ -916,19 +911,16 @@ pub(crate) unsafe fn hash_morloc_packet(
     if cmd_type == crate::packet::PACKET_TYPE_CALL {
         let midx = { (*header).command.call.midx };
         *hash_out = crate::utility::mix(seed, midx as u64);
-        let offset = { (*header).offset } as usize;
-        let length = { (*header).length } as usize;
-        let arg_data = packet.add(32 + offset);
-        let mut arg_start = 0usize;
-        while arg_start < length {
-            let arg_size = morloc_packet_size(arg_data.add(arg_start), &mut err);
-            if !err.is_null() {
-                *errmsg = err;
-                return false;
-            }
-            let arg_bytes = std::slice::from_raw_parts(arg_data.add(arg_start), arg_size);
+        for span in crate::packet_ffi::call_args(packet, header) {
+            let span = match span {
+                Ok(s) => s,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return false;
+                }
+            };
+            let arg_bytes = std::slice::from_raw_parts(packet.add(span.start), span.len());
             *hash_out = crate::utility::mix(*hash_out, hash::xxh64_with_seed(arg_bytes, *hash_out));
-            arg_start += arg_size;
         }
     } else if cmd_type == crate::packet::PACKET_TYPE_DATA {
         let voidstar = get_morloc_data_packet_value(packet, schema, &mut err);

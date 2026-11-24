@@ -1,0 +1,16 @@
+-- GEN-9: a recursive parameterized record used at an argument holding it
+-- through a list is generated at that argument.
+module main (nest, firstVal)
+
+import root-cpp
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+source Cpp from "indirect.hpp" ("same", "firstVal")
+same :: a -> a
+firstVal :: Container [Container Int] -> Int
+
+nest :: Container [Container Int] -> Container [Container Int]
+nest x = same x

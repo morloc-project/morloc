@@ -15,8 +15,6 @@ record Caller where
 
 record Cpp => Holder = "Holder"
 record Cpp => Caller = "Caller"
-record Py => Holder = "dict"
-record Py => Caller = "dict"
 
 source Cpp from "host.hpp"
   ( "tick" as tickH

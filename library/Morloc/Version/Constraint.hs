@@ -34,6 +34,7 @@ module Morloc.Version.Constraint
   , Version
   ) where
 
+import Morloc.Data.Zip (zipWithSame)
 import Data.Char (isDigit)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -54,7 +55,7 @@ bumpLast (Version xs) = Version (init xs ++ [last xs + 1])
 -- | Segment-wise comparison with zero-padding: @0.9 < 0.10@, @0.98 == 0.98.0@.
 compareVersion :: Version -> Version -> Ordering
 compareVersion (Version a) (Version b) =
-  mconcat (zipWith compare (pad a) (pad b))
+  mconcat (zipWithSame compare (pad a) (pad b))
   where
     n = max (length a) (length b)
     pad xs = xs ++ replicate (n - length xs) 0

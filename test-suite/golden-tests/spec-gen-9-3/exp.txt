@@ -1,0 +1,6 @@
+3
+{"label":"r","kids":[{"label":"k","kids":[],"alts":[]}],"alts":[{"Pick":[{"label":"p","kids":[],"alts":[]}]},"Skip"]}
+{"d":{"Node":[{"xs":[{"d":"Leaf","tag":"x"},{"d":{"Node":[{"xs":[]}]},"tag":"z"}]}]},"tag":"y"}
+3
+{"label":"r","kids":[{"label":"k","kids":[],"alts":[]}],"alts":[{"Pick":[{"label":"p","kids":[],"alts":[]}]},"Skip"]}
+{"d":{"Node":[{"xs":[{"d":"Leaf","tag":"x"},{"d":{"Node":[{"xs":[]}]},"tag":"z"}]}]},"tag":"y"}

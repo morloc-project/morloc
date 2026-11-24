@@ -8,9 +8,10 @@ There is no cache spec yet; these are gaps until one is written.
   version; a header or module those files load in turn is covered only when
   it is listed under `hash-include`.
 - **A Python or R pool finds a sourced file by searching, not by the path
-  that was hashed.** [read] data/lang/py/lang.yaml:22-26 searches the
-  program dir, then `.`, then `{{lib}}`; the R pool's `.morloc.source` does
-  the same. SRC-8 checks the absolute path recorded at build, which refuses
+  that was hashed.** [read] The Python pool searches `_mlc_source_roots`
+  (data/lang/py/lang.yaml:34, walked in pool.py:108-121): the program dir,
+  then `.`, then `{{lib}}`; the R pool's `.morloc.source`
+  (data/lang/r/lang.yaml:34) does the same. SRC-8 checks the absolute path recorded at build, which refuses
   the run when that file is missing; but if the recorded path is not the
   first match of the search (a build run from another directory), the pool
   can load a file that was never hashed.
@@ -32,8 +33,8 @@ There is no cache spec yet; these are gaps until one is written.
   no item says what a handle contributes to a key (path, content hash, or
   path plus size and mtime).
 - **Unverified 64-bit keys.** [read] Neither key nor data hash is checked on
-  a hit; a data-hash collision skips the write (cache.rs:579-585); an empty
-  pool hash is 0, so programs sharing a label share keys (cache.rs:109-117).
+  a hit; a data-hash collision skips the write (cache.rs:559-563); an empty
+  pool hash is 0, so programs sharing a label share keys (cache.rs:109-118).
 - **Padding hashed.** [read] cache.rs ~800, ~817 hash all `width` bytes;
   padding is not zero (shared-memory.md). Spurious misses, never wrong hits.
 - **Absolute path in the key file.** [read] A cache shared under another
@@ -41,7 +42,7 @@ There is no cache spec yet; these are gaps until one is written.
 - **Nested program writes the outer summary.json.** [reproduced] A program
   run from a pool inherits `MORLOC_SUMMARY` / `MORLOC_RUN_DIR`;
   morloc-nexus/src/orchestrate.rs:360 strips them only for replay children.
-- [read] morloc-nexus/src/main.rs:416: relative `--log-dir` stays relative
+- [read] morloc-nexus/src/main.rs:455-457: relative `--log-dir` stays relative
   for nested programs.
 - [observed] Violates NET-4: cache dir and log run dirs are 0755, and
   `.morloc-debug` lands in the CWD.

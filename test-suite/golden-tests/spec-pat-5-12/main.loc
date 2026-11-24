@@ -1,0 +1,19 @@
+-- Spec PAT-5: a getter on a record with a PatternAccessible instance goes
+-- through the instance.
+module main (f, first)
+import root-py
+
+record Box a where
+  foo :: Str
+instance PatternAccessible Box where
+  source Py from "h.py" ("walker" as __extract_pattern__)
+
+source Py from "h.py" ("mk", "same")
+mk :: Int -> Box Int
+same :: Str -> Str
+
+f :: Int -> Str
+f x = same (.foo (mk x))
+
+first :: Box Int -> Str
+first b = .foo b

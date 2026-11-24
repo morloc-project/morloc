@@ -1,0 +1,130 @@
+-- A function value that crosses languages carries values of a type with a
+-- Packable instance in its captures, its arguments and its result; each
+-- is converted to its wire form on the way out and back on the way in,
+-- whatever language built the function value, as an ordinary argument is.
+-- `Wrapped` is an Int on the wire, a struct in C++ and Rust, and a class
+-- in Python and R.
+--
+--   cppTwoCaps   C++ partial application holding two Wrapped, applied in Python
+--   cppLambda    C++ lambda capturing two Wrapped, applied in Python
+--   cppOneCap    C++ partial application holding one Wrapped
+--   cppArg       C++ function value given a Wrapped by Python
+--   cppResult    C++ function value returning a Wrapped to Python
+--   rsResult     Rust function value returning a list of Wrapped to Python
+--   rsCaps       Rust partial application holding two Wrapped
+--   cppCached    a cached C++ call with a Wrapped argument, run twice
+--   rsCached     a cached Rust call with a Wrapped argument, run twice
+--   pyCaps       Python lambda capturing two Wrapped, applied in C++
+--   pyArg        Python function value given a Wrapped by C++
+--   pyResult     Python function value returning a Wrapped to C++
+--   rCaps        R lambda capturing two Wrapped, applied in C++
+--   rArg         R function value given a Wrapped by C++
+--   rResult      R function value returning a Wrapped to C++
+module main (cppTwoCaps, cppLambda, cppOneCap, cppArg, cppResult, rsResult, rsCaps, cppCached, rsCached, pyCaps, pyArg, pyResult, rCaps, rArg, rResult)
+
+import root
+import root-py
+import root-rust
+import root-cpp
+import root-r
+
+newtype Wrapped = Int
+type Rust => Wrapped = "MyWrap"
+type Cpp => Wrapped = "MyWrapC"
+type Py => Wrapped = "WrapPy"
+type R => Wrapped = "WrapR"
+
+instance Packable Int Wrapped where
+  source Rust from "wrap.rs" ("pack_wrap" as pack, "unpack_wrap" as unpack)
+  source Cpp from "wrap.hpp" ("pack_wrap_cpp" as pack, "unpack_wrap_cpp" as unpack)
+  source Py from "wrap.py" ("pack_wrap" as pack, "unpack_wrap" as unpack)
+  source R from "wrap.R" ("pack_wrap_r" as pack, "unpack_wrap_r" as unpack)
+
+source Py from "wrap.py" ("key_py" as keyP, "py_apply" as pyApply, "py_apply_w" as pyApplyW, "py_mk" as pyMk, "py_return" as pyReturn)
+source Cpp from "wrap.hpp" ("mk_wrapped_cpp" as mkC, "key_cpp" as keyC, "apply_int_cpp" as cppApply, "apply_wrapped_cpp" as cppApplyW, "apply_mk_cpp" as cppApplyMk)
+source R from "wrap.R" ("key_r" as keyRr, "r_mk" as rMk)
+source Rust from "wrap.rs" ("mk_wrapped" as mkR, "key_rust" as keyR)
+
+pyApply :: (Int -> Int) -> Int -> Int
+keyP :: Wrapped -> Int
+cppApply :: (Int -> Int) -> Int -> Int
+cppApplyW :: (Wrapped -> Int) -> Wrapped -> Int
+cppApplyMk :: (Int -> Wrapped) -> Int -> Int
+keyRr :: Wrapped -> Int
+rMk :: Int -> Wrapped
+pyApplyW :: (Wrapped -> Int) -> Wrapped -> Int
+pyMk :: Int -> Wrapped
+pyReturn :: (Int -> a) -> Int -> a
+mkC :: Int -> Wrapped
+keyC :: Wrapped -> Int
+mkR :: Int -> Wrapped
+keyR :: Wrapped -> Int
+
+addTwoC :: Wrapped -> Wrapped -> Int -> Int
+addTwoC q r x = keyC q + keyC r + x
+
+addOneC :: Wrapped -> Int -> Int
+addOneC q x = keyC q + x
+
+useC :: Int -> Wrapped -> Int
+useC k w = keyC w + k
+
+mkFromC :: Int -> Int -> Wrapped
+mkFromC k x = mkC (k + x)
+
+mkListR :: Int -> Int -> [Wrapped]
+mkListR k x = [mkR (k + x), mkR x]
+
+addTwoR :: Wrapped -> Wrapped -> Int -> Int
+addTwoR q r x = keyR q + keyR r + x
+
+cppTwoCaps :: Int -> Int
+cppTwoCaps n = pyApply (addTwoC (mkC n) (mkC 1)) 1
+
+cppLambda :: Int -> Int
+cppLambda n = pyApply (\x -> x + keyC q + keyC r) 1 where
+  q = mkC n
+  r = mkC 2
+
+cppOneCap :: Int -> Int
+cppOneCap n = pyApply (addOneC (mkC n)) 1
+
+cppArg :: Int -> Int
+cppArg n = pyApplyW (useC n) (pyMk 3)
+
+cppResult :: Int -> Int
+cppResult n = keyC (pyReturn (mkFromC n) 4)
+
+rsResult :: Int -> Int
+rsResult n = sum (map keyR (pyReturn (mkListR n) 2))
+
+rsCaps :: Int -> Int
+rsCaps n = pyApply (addTwoR (mkR n) (mkR 1)) 1
+
+cppCached :: Int -> Int
+cppCached n = a@keyC (mkC n)
+
+rsCached :: Int -> Int
+rsCached n = b@keyR (mkR n)
+
+pyCaps :: Int -> Int
+pyCaps n = cppApply (\x -> x + keyP q + keyP r) 1 where
+  q = pyMk n
+  r = pyMk 3
+
+pyArg :: Int -> Int
+pyArg n = cppApplyW (\w -> keyP w + n) (mkC 3)
+
+pyResult :: Int -> Int
+pyResult n = cppApplyMk (\x -> pyMk (x + n)) 4
+
+rCaps :: Int -> Int
+rCaps n = cppApply (\x -> x + keyRr q + keyRr r) 1 where
+  q = rMk n
+  r = rMk 3
+
+rArg :: Int -> Int
+rArg n = cppApplyW (\w -> keyRr w + n) (mkC 3)
+
+rResult :: Int -> Int
+rResult n = cppApplyMk (\x -> rMk (x + n)) 4

@@ -20,5 +20,5 @@ produce sink = sink [1,2,3]
 -- `@stream` emits one result per batch and `@fold` one for the whole
 -- stream; a formatter cannot do both.
 --' @render -t/--total=showAcc @fold=step @init=zero @combine=merge @stream
-run :: <IO> ()
+run :: <IO> (Collect Int)
 run = @collect produce

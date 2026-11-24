@@ -22,9 +22,7 @@ record ImageMetadata where
   height :: Int
   channels :: Int
 
-record Py => ImageMetadata = "dict"
 record Cpp => ImageMetadata = "ImageMetadata"
-record R => ImageMetadata = "list"
 
 -- Color statistics record
 record ColorStats where
@@ -35,19 +33,11 @@ record ColorStats where
   stddevGreen :: Real
   stddevBlue :: Real
 
-record Py => ColorStats = "dict"
-record Cpp => ColorStats = "struct"
-record R => ColorStats = "list"
-
 -- Filtered result with metadata
 record FilteredResult where
   pixels :: [[Real]]
   metadata :: ImageMetadata
   stats :: ColorStats
-
-record Py => FilteredResult = "dict"
-record Cpp => FilteredResult = "struct"
-record R => FilteredResult = "list"
 
 -- Python I/O functions
 source Py from "image_io.py" ("createTestImage", "pixelsToDict")

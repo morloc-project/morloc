@@ -15,6 +15,7 @@ and 'Treeify' to inspect and manipulate the AST before code generation.
 module Morloc.Frontend.AST
   ( findEdges
   , findExport
+  , findExportIndex
   , findExportSet
   , findFixityMap
   , setExport
@@ -60,6 +61,12 @@ findExport e0 = case f e0 of
       (Just export) -> Just export
       Nothing -> f (ExprI i (ModE j es))
     f _ = Nothing
+
+-- | The index of the 'Export' declaration in a module expression.
+findExportIndex :: ExprI -> Maybe Int
+findExportIndex (ExprI i (ExpE _)) = Just i
+findExportIndex (ExprI _ (ModE _ es)) = listToMaybe (mapMaybe findExportIndex es)
+findExportIndex _ = Nothing
 
 -- | Replace the 'Export' declaration in a module expression.
 setExport :: Export -> ExprI -> ExprI

@@ -15,9 +15,6 @@ source Py from "helpers.py" ("py_touch" as pyTouch)
 pyTouch :: Int -> Int
 
 record Pair = Pair { a :: Int, b :: Int }
-record Cpp => Pair = "struct"
-record Rust => Pair = "struct"
-record Py => Pair = "dict"
 
 pick :: Bool -> Int -> Int -> Int
 pick c k x = (? c = (\y -> touch y + k) : (\y -> y * 2)) x

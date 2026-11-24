@@ -26,9 +26,7 @@ record MarketParams where
   riskFreeRate :: Real
   timeToMaturity :: Real
 
-record Py => MarketParams = "dict"
 record Cpp => MarketParams = "MarketParams"
-record R => MarketParams = "list"
 
 -- Statistical summary
 record PriceDistribution where
@@ -40,9 +38,7 @@ record PriceDistribution where
   ciLower :: Real
   ciUpper :: Real
 
-record Py => PriceDistribution = "dict"
 record Cpp => PriceDistribution = "PriceDistribution"
-record R => PriceDistribution = "list"
 
 -- Python I/O and formatting
 source Py from "market_io.py" ("createMarketParams", "formatResults")

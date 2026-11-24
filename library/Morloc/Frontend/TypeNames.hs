@@ -21,9 +21,14 @@ module Morloc.Frontend.TypeNames
   ( resolveTypeNames
   , reservedTypeNames
   , isReservedTypeName
+  , homePath
   ) where
 
 import qualified Data.Set as Set
+import Control.Exception (SomeException, try)
+import qualified Data.Yaml.Config as YC
+import System.Directory (doesFileExist, makeAbsolute)
+import System.FilePath (addTrailingPathSeparator, makeRelative, splitDirectories, takeDirectory)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG
@@ -41,14 +46,14 @@ reservedTypeNames =
     [ "Unit", "Real", "F32", "F64", "Int", "I8", "I16", "I32", "I64"
     , "U8", "UInt", "U16", "U32", "U64", "Bool", "Str", "List", "Optional"
     , "Vector", "Matrix", "Table", "ArrowTable", "Record", "Rec"
-    , "IFile", "IStream", "OStream", "Cell", "Try", "Closure"
+    , "IFile", "IStream", "OStream", "Cell", "Collect", "Try", "Closure"
     , "PatternChain", "PatternAccessible"
     , "Keys", "ListToSet", "Size", "ProjectField", "Singleton", "Restrict"
     ]
 
 isReservedTypeName :: Text -> Bool
 isReservedTypeName t =
-  Set.member t reservedTypeNames || numbered "Tuple" || numbered "Tensor"
+  Set.member t reservedTypeNames || isTupleName t || numbered "Tensor"
   where
     numbered p = case T.stripPrefix p t of
       Just n -> not (T.null n) && T.all (`elem` ['0' .. '9']) n
@@ -77,6 +82,40 @@ resolveTypeNames d = do
       qualifier m
         | length [k | k <- Map.keys d, bare k == bare m] > 1 = unMVar m
         | otherwise = bare m
+  srcMap <- MM.gets stateSourceMap
+  library <- MM.asks configLibrary
+  projectRoot <- MM.gets stateProjectRoot
+  packages <-
+    MM.liftIO . fmap Map.fromList $
+      mapM
+        (\(m, (ExprI i _, _)) -> (,) m <$> packageOf library projectRoot (Map.lookup i srcMap >>= srcLocPath))
+        (Map.toList d)
+  let homes =
+        Map.fromList
+          [ (canonical m v, TypeHome (homePath (Map.findWithDefault Nothing m packages) m) n)
+          | (m, (e, _)) <- Map.toList d
+          , v@(TV n) <- localTypes e
+          , not (isReservedTypeName n)
+          ]
+  -- Two modules whose generated types share one module path (`geo-util`
+  -- and `geo_util`) and declare a type of one name would generate one name
+  -- for two types (GEN-5).
+  let namesAt =
+        Map.fromListWith Set.union
+          [ ((homePath (Map.findWithDefault Nothing m packages) m, n), Set.singleton m)
+          | (m, (e, _)) <- Map.toList d
+          , TV n <- localTypes e
+          , not (isReservedTypeName n)
+          ]
+  case [(path, n, Set.toList ms) | ((path, n), ms) <- Map.toList namesAt, Set.size ms > 1] of
+    (path, n, ms) : _ ->
+      let named m = pretty (T.dropWhile (== '.') (unMVar m)) <> "." <> pretty n
+       in MM.throwRejected $
+            "The public name" <+> pretty (T.intercalate "." (path <> [n]))
+              <+> "would name both" <+> hsep (punctuate " and" (map named ms))
+              <> ", whose modules hold their generated types under one path; rename one of them"
+    [] -> return ()
+  MM.modify' $ \s -> s {stateTypeHomes = homes, stateModulePackages = Map.mapMaybe id packages}
   result <- DAG.synthesize (resolveModule canonical) rewriteEdge d
   case result of
     Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
@@ -131,6 +170,79 @@ resolveModule canonical m e children = do
               <+> squotes (pretty alias) <+> "from" <+> squotes (pretty from)
               <+> "and also declares a type of that name; remove the import or rename one of them"
       | otherwise = return ()
+
+-- | A module's path below the generated-type prefix (GEN-4), given the key
+-- of the package its file belongs to. Components split at @.@ and @-@
+-- becomes @_@; installed names hold no @_@, so the mapping is one to one for
+-- them. A stdlib module's path starts with its name; a module of library @l@
+-- is placed under @_lib@ and @l@. A package's local submodule (@.lib.x@) is
+-- placed under the package, so its path is the same while the package is
+-- developed and once it is installed. A module of no library (a script, a
+-- program's package, their local imports) goes under @_local@. No name
+-- produces a component starting with @_@.
+homePath :: Maybe Text -> MVar -> [Text]
+homePath package (MV name) = case package of
+  Just p
+    | T.isPrefixOf "." name -> keyParts p <> parts (T.dropWhile (== '.') name)
+    -- the package's own module, built where it is developed, keyed by its
+    -- header: placed as it is once installed
+    | [l, pn] <- T.splitOn "/" p
+    , not ("/" `T.isInfixOf` name)
+    , T.takeWhile (/= '.') name == pn ->
+        keyParts (l <> "/" <> name)
+    | otherwise -> keyParts name
+  Nothing -> "_local" : parts (T.dropWhile (== '.') name)
+  where
+    parts = map (T.replace "-" "_") . filter (not . T.null) . T.splitOn "."
+    keyParts k = case T.splitOn "/" k of
+      [l, rest] -> ["_lib", T.replace "-" "_" l] <> parts rest
+      _ -> parts k
+
+-- | The key of the package a module file belongs to (@name@ for stdlib,
+-- else @library/name@): that of the nearest @package.yaml@ in its directory
+-- or above it, searching no higher than the module plane (for an installed
+-- module) or the project root (for any other). An installed package is
+-- named by its place in the plane (PKG-3); any other by its @library@ and
+-- @name@. Nothing when there is none, or it names no library and name.
+packageOf :: Path -> Maybe Path -> Maybe Path -> IO (Maybe Text)
+packageOf _ _ Nothing = return Nothing
+packageOf library projectRoot (Just file0) = do
+  -- An implicit main module has no file of its own; it is the entry file,
+  -- in the project root.
+  file <- case (file0, projectRoot) of
+    ("", Just root) -> makeAbsolute (root </> "main.loc")
+    ("", Nothing) -> makeAbsolute "main.loc"
+    _ -> makeAbsolute file0
+  lib <- makeAbsolute library
+  root <- traverse makeAbsolute projectRoot
+  let limit
+        | addTrailingPathSeparator lib `isPrefixOf` file = Just lib
+        | otherwise = root
+      within dir = maybe False (\l -> addTrailingPathSeparator l `isPrefixOf` addTrailingPathSeparator dir) limit
+      go dir
+        | not (within dir) = return Nothing
+        | otherwise = do
+            let f = dir </> "package.yaml"
+            found <- doesFileExist f
+            if found
+              then do
+                -- A package.yaml that cannot be read is reported where the
+                -- loader reads it; here it names no package.
+                meta <- try (YC.loadYamlSettings [f] [] YC.ignoreEnv) :: IO (Either SomeException PackageMeta)
+                let installed = case splitDirectories (makeRelative lib dir) of
+                      [l, n] | addTrailingPathSeparator lib `isPrefixOf` addTrailingPathSeparator dir -> Just (key (T.pack l) (T.pack n))
+                      _ -> Nothing
+                return $ case (installed, meta) of
+                  (Just k, _) -> Just k
+                  (Nothing, Right m)
+                    | not (T.null (packageName m)), Just l <- packageLibrary m -> Just (key l (packageName m))
+                  _ -> Nothing
+              else if takeDirectory dir == dir then return Nothing else go (takeDirectory dir)
+  go (takeDirectory file)
+  where
+    key l n
+      | l == "std" = n
+      | otherwise = l <> "/" <> n
 
 -- | The general types a module declares.
 localTypes :: ExprI -> [TVar]

@@ -31,14 +31,20 @@ back out on the way out.
 -}
 module Morloc.CodeGenerator.Guest.Futhark
   ( futharkGuest
-  , FutharkEntry
-  , hostSigTypes
+  , hostEntryTypes
+  , hostTypeOfFT
+  , FutharkEntry (..)
+  , FutharkType (..)
+  , FNum (..)
+  , TupleOps (..)
   , decomposeSig
   , resolveFutharkBuild
   , backendLinkFlags
   , futharkBackends
   ) where
 
+import Morloc.Data.Zip (indexed, zipWithSameM_)
+import qualified Morloc.BaseTypes as BT
 import Data.Aeson (FromJSON (..), eitherDecodeFileStrict', withObject, (.!=), (.:), (.:?))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -62,45 +68,50 @@ import qualified Morloc.System as MS
 -- Parsed manifest entry
 -- ---------------------------------------------------------------------------
 
--- | A Futhark ABI type: either a fixed-width numeric element at some array rank
--- (0 = scalar, 1 = vector, 2 = matrix, ...), or a non-nested tuple of such types.
--- 'TupleInfo' is present only on manifest-derived types (it names the C ABI
--- functions); morloc-derived types carry 'Nothing'. Structural equality
--- ('sameShape') ignores it.
-data FutharkType
-  = FTNum Text Int
-  | FTTuple (Maybe TupleInfo) [FutharkType]
+-- | A fixed-width numeric element at an array rank (0 = scalar, 1 = vector,
+-- 2 = matrix, ...).
+data FNum = FNum Text Int
+  deriving (Show, Eq)
+
+-- | A Futhark ABI type: a number, or a non-nested tuple of numbers. A tuple
+-- read from the manifest carries its C ABI functions ('TupleOps') and, with
+-- each field, the field's projector ('AbiFT'); one implied by a morloc
+-- signature carries nothing ('ShapeFT').
+data FutharkType t p
+  = FTNum FNum
+  | FTTuple t [(p, FNum)]
   deriving (Show)
 
+type ShapeFT = FutharkType () ()
+
+type AbiFT = FutharkType TupleOps Text
+
 -- | The opaque-record C ABI for one tuple type, read from the manifest.
-data TupleInfo = TupleInfo
+data TupleOps = TupleOps
   { tiCtype :: Text -- ^ e.g. "struct futhark_opaque_tup2_f32_f32 *" (includes '*')
   , tiNew :: Text -- ^ constructor, e.g. "futhark_new_opaque_tup2_f32_f32"
   , tiFree :: Text -- ^ "futhark_free_opaque_tup2_f32_f32"
-  , tiProjects :: [Text] -- ^ per-field projectors, in field order
   }
   deriving (Show)
 
--- | Structural equality that ignores the C ABI ops. Used to compare a
--- morloc-derived type against a manifest-derived one.
-sameShape :: FutharkType -> FutharkType -> Bool
-sameShape (FTNum e1 r1) (FTNum e2 r2) = e1 == e2 && r1 == r2
-sameShape (FTTuple _ as) (FTTuple _ bs) = length as == length bs && and (zipWith sameShape as bs)
+-- | Equality of shape, ignoring what each side knows of the C ABI.
+sameShape :: FutharkType a b -> FutharkType c d -> Bool
+sameShape (FTNum x) (FTNum y) = x == y
+sameShape (FTTuple _ as) (FTTuple _ bs) = map snd as == map snd bs
 sameShape _ _ = False
 
 -- | True when this shape lowers to an @mlc::Tensor@ (rank>=2), i.e. it needs
--- the tensor.hpp include. Scalars (rank 0) and vectors (rank 1, plain
--- std::vector) do not; tuples inherit the need from any component.
-usesTensor :: FutharkType -> Bool
-usesTensor (FTNum _ r) = r >= 2
-usesTensor (FTTuple _ fs) = any usesTensor fs
+-- the tensor.hpp include.
+usesTensor :: FutharkType t p -> Bool
+usesTensor (FTNum (FNum _ r)) = r >= 2
+usesTensor (FTTuple _ fs) = any (\(_, FNum _ r) -> r >= 2) fs
 
 -- | One entry point parsed from the Futhark manifest.
 data FutharkEntry = FutharkEntry
   { feName :: Text
   , feCFun :: Text
-  , feInputs :: [FutharkType]
-  , feOutput :: FutharkType
+  , feInputs :: [AbiFT]
+  , feOutput :: AbiFT
   }
   deriving (Show)
 
@@ -240,7 +251,7 @@ futharkBuild srcs opts = do
       { bpObjects = os
       , bpHeaders = hs
       , bpIncludeDirs = [outDir]
-      , bpLinkFlags = backendLinkFlags backend
+      , bpLinkFlags = backendLinkFlags P.hostPlatform backend
       , bpManifests = jsons
       , bpDevice = boDevice opts
       }
@@ -248,6 +259,7 @@ futharkBuild srcs opts = do
 -- returns (object, header, manifest) paths
 buildOne :: Text -> Path -> GuestSource -> MorlocMonad (Path, Path, Path)
 buildOne backend outDir gs = do
+  envPrefix <- MM.gets stateEnvPrefix
   let stem = takeBaseName (gsPath gs)
       outStem = outDir </> stem
       cFile = outStem <.> "c"
@@ -259,7 +271,9 @@ buildOne backend outDir gs = do
         T.unwords ["futhark", backend, "--library", "-o", q outStem, q (gsPath gs)]
       -- $CC when set: a conda/pixi toolchain names its own compiler, and on
       -- macOS without the command-line tools /usr/bin/gcc is only a stub.
-      gccCmd = T.unwords ["${CC:-cc}", "-O2", "-c", q cFile, "-o", q oFile]
+      -- PKG-13: the environment's headers.
+      envInclude = maybe [] (\p -> ["-isystem", q (p </> "include")]) envPrefix
+      gccCmd = T.unwords (["${CC:-cc}", "-O2"] <> envInclude <> ["-c", q cFile, "-o", q oFile])
   MM.runCommand "Futhark.build" futCmd
   MM.runCommand "Futhark.build" gccCmd
   pure (oFile, hFile, jsonFile)
@@ -268,16 +282,15 @@ buildOne backend outDir gs = do
 -- exact libraries and their locations vary by CUDA/ROCm install layout and
 -- Futhark version, so a user targeting an unusual layout supplements these via
 -- @-X cpp:flags=-L/path@ etc.
-backendLinkFlags :: Text -> [Text]
-backendLinkFlags "multicore" = ["-lpthread", "-lm"]
-backendLinkFlags "opencl" = case P.hostPlatform of
-  -- macOS ships OpenCL only as a framework. One element, since the package
-  -- flags are deduplicated and a lone "-framework" could be merged away.
-  P.Darwin -> ["-framework OpenCL", "-lm"]
-  _ -> ["-lOpenCL", "-lm"]
-backendLinkFlags "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
-backendLinkFlags "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]
-backendLinkFlags _ = ["-lm"]
+backendLinkFlags :: P.Platform -> Text -> [Text]
+backendLinkFlags _ "multicore" = ["-lpthread", "-lm"]
+backendLinkFlags platform "opencl" = case platform of
+  -- macOS ships OpenCL only as a framework.
+  P.Darwin -> ["-framework", "OpenCL", "-lm"]
+  P.Linux -> ["-lOpenCL", "-lm"]
+backendLinkFlags _ "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
+backendLinkFlags _ "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]
+backendLinkFlags _ _ = ["-lm"]
 
 -- | The Futhark compiler backends morloc knows how to build and link.
 futharkBackends :: [Text]
@@ -352,17 +365,17 @@ stripArray = go 0
 -- resolve a manifest type string into a FutharkType. Scalars and arrays are
 -- parsed directly; a bare opaque name is looked up in the types registry (a
 -- tuple). Arrays of tuples and nested tuples are rejected.
-resolveType :: Text -> Map Text RawType -> Text -> MorlocMonad FutharkType
+resolveType :: Text -> Map Text RawType -> Text -> MorlocMonad AbiFT
 resolveType name reg s =
   let (rank, base) = stripArray s
    in if base `Set.member` elemTokenSet
-        then pure (FTNum base rank)
+        then pure (FTNum (FNum base rank))
         else
           if rank == 0
             then resolveOpaque name reg s
             else MM.throwRejected (badFut name <> "arrays of tuples are not supported")
 
-resolveOpaque :: Text -> Map Text RawType -> Text -> MorlocMonad FutharkType
+resolveOpaque :: Text -> Map Text RawType -> Text -> MorlocMonad AbiFT
 resolveOpaque name reg key = case Map.lookup key reg of
   Nothing -> MM.throwRejected (badFut name <> "unknown opaque type " <> pretty key)
   Just rt
@@ -371,9 +384,9 @@ resolveOpaque name reg key = case Map.lookup key reg of
         MM.throwRejected (badFut name <> "unsupported opaque kind " <> pretty (rtKind rt))
     | otherwise -> case (rtRecord rt, rtCtype rt, rtFree rt) of
         (Just (RawRecord newFn fields), Just ct, Just freeFn) -> do
-          zipWithM_ (checkFieldLabel name) [0 ..] fields
-          fts <- mapM (resolveField name reg) fields
-          pure (FTTuple (Just (TupleInfo ct newFn freeFn [p | RawField _ p _ <- fields])) fts)
+          mapM_ (uncurry (checkFieldLabel name)) (indexed fields)
+          pfs <- mapM (\f@(RawField _ p _) -> (,) p <$> resolveField name reg f) fields
+          pure (FTTuple (TupleOps ct newFn freeFn) pfs)
         _ -> MM.throwRejected (badFut name <> "opaque type " <> pretty key <> " is not a supported tuple")
 
 -- Futhark labels tuple fields "0","1",...; codegen binds morloc field k to the
@@ -385,12 +398,12 @@ checkFieldLabel name i (RawField lbl _ _) =
     MM.throwRejected
       (badFut name <> "unexpected Futhark tuple field order (field " <> pretty i <> " labelled " <> pretty lbl <> ")")
 
-resolveField :: Text -> Map Text RawType -> RawField -> MorlocMonad FutharkType
+resolveField :: Text -> Map Text RawType -> RawField -> MorlocMonad FNum
 resolveField name reg (RawField _ _ fty) = do
   ft <- resolveType name reg fty
   case ft of
     FTTuple{} -> MM.throwRejected (badFut name <> "nested tuples are not supported")
-    _ -> pure ft
+    FTNum n -> pure n
 
 checkOne :: Map Text FutharkEntry -> SourcedSig -> MorlocMonad (SourcedSig, FutharkEntry)
 checkOne entries sig = do
@@ -406,11 +419,11 @@ checkOne entries sig = do
           <> pretty (length argTs) <> " arguments but the entry takes "
           <> pretty (length (feInputs entry))
       )
-  zipWithM_ (compareFT entryName) argTs (feInputs entry)
+  zipWithSameM_ (compareFT entryName) argTs (feInputs entry)
   compareFT entryName retT (feOutput entry)
   pure (sig, entry)
 
-compareFT :: Text -> FutharkType -> FutharkType -> MorlocMonad ()
+compareFT :: Text -> ShapeFT -> AbiFT -> MorlocMonad ()
 compareFT name expected actual =
   unless (sameShape expected actual) $
     MM.throwRejected
@@ -418,12 +431,15 @@ compareFT name expected actual =
           <> showFT expected <> " but the entry has " <> showFT actual
       )
 
-showFT :: FutharkType -> MDoc
-showFT (FTNum e r) = pretty e <> " rank-" <> pretty r
-showFT (FTTuple _ fs) = "(" <> joinCommaD (map showFT fs) <> ")"
+showFT :: FutharkType t p -> MDoc
+showFT (FTNum n) = showNum n
+showFT (FTTuple _ fs) = "(" <> joinCommaD (map (showNum . snd) fs) <> ")"
+
+showNum :: FNum -> MDoc
+showNum (FNum e r) = pretty e <> " rank-" <> pretty r
 
 -- decompose a morloc signature into the futhark types it implies
-decomposeSig :: TypeU -> MorlocMonad ([FutharkType], FutharkType)
+decomposeSig :: TypeU -> MorlocMonad ([ShapeFT], ShapeFT)
 decomposeSig t0 = do
   let (args, ret) = unfoldFun (stripForall t0)
   fargs <- mapM morlocToFT args
@@ -442,35 +458,44 @@ unfoldFun t = ([], t)
 -- the surface shape of a morloc type, as this guest cares about it
 data MShape = MArr Text Int | MTup [TypeU] | MOther
 
--- Classify a morloc type. Tuples (checked before the Vector/Matrix pattern,
--- since both are AppU-headed) become MTup with their field types; a numeric
--- container becomes MArr (element constructor, rank = number of Nat dim args).
+-- Classify a morloc type. Tuples (checked before the array pattern, since
+-- both are AppU-headed) become MTup with their field types; a numeric array
+-- (`Vector`, `Matrix`, `Tensor3`..`Tensor5`, with as many Nat dimension
+-- arguments as its rank) becomes MArr; a bare type name is a rank-0 scalar.
 classifyMorloc :: TypeU -> MShape
 classifyMorloc (EffectU _ t) = classifyMorloc t
 classifyMorloc (AppU (VarU (TV nm)) args)
   | isTupleName nm = MTup (fst (partitionKindArgs kindOfU args))
   | otherwise = case fst (partitionKindArgs kindOfU args) of
       [VarU (TV e)]
-        | all (maybe True fillsNat . kindOfU) args ->
-            MArr e (length [a | a <- args, maybe False fillsNat (kindOfU a)])
+        | Just r <- arrayRank nm
+        , all (maybe True fillsNat . kindOfU) args
+        , length [a | a <- args, maybe False fillsNat (kindOfU a)] == r ->
+            MArr e r
       _ -> MOther
+  where
+    -- The heads the C++ host maps: std::vector, then mlc::Tensor2..5.
+    arrayRank n
+      | TV n == BT.vector = Just 1
+      | TV n == BT.matrix = Just 2
+      | otherwise = lookup n [(unTVar (BT.tensor k), k) | k <- [3 .. 5]]
 classifyMorloc (VarU (TV e)) = MArr e 0
 classifyMorloc _ = MOther
 
 -- map a single morloc argument/return type to its futhark ABI type
-morlocToFT :: TypeU -> MorlocMonad FutharkType
+morlocToFT :: TypeU -> MorlocMonad ShapeFT
 morlocToFT t = case classifyMorloc t of
-  MArr e r
-    | Just tok <- Map.lookup e elemToken -> pure (FTNum tok r)
   MTup fields
     | length fields > 8 -> unsupported t "tuples with more than 8 fields are not supported"
-    | otherwise -> FTTuple Nothing <$> mapM morlocToFTField fields
-  _ -> unsupportedType t
+    | otherwise -> FTTuple () <$> mapM (fmap ((,) ()) . morlocToFTField) fields
+  _ -> FTNum <$> morlocToFTField t
 
-morlocToFTField :: TypeU -> MorlocMonad FutharkType
+morlocToFTField :: TypeU -> MorlocMonad FNum
 morlocToFTField t = case classifyMorloc t of
+  MArr e r
+    | Just tok <- Map.lookup e elemToken -> pure (FNum tok r)
   MTup _ -> unsupported t "nested tuples are not supported"
-  _ -> morlocToFT t
+  _ -> unsupportedType t
 
 unsupportedType :: TypeU -> MorlocMonad a
 unsupportedType t =
@@ -496,27 +521,19 @@ cppScalar' :: Text -> Text
 cppScalar' e = Map.findWithDefault "void" e cppScalar
 
 -- the single rank/shape -> C++ type rule
-hostTypeOfFT :: FutharkType -> MDoc
-hostTypeOfFT (FTNum e 0) = pretty (cppScalar' e)
-hostTypeOfFT (FTNum e 1) = "std::vector<" <> pretty (cppScalar' e) <> ">"
-hostTypeOfFT (FTNum e r) = "mlc::Tensor" <> pretty r <> "<" <> pretty (cppScalar' e) <> ">"
-hostTypeOfFT (FTTuple _ fs) = "std::tuple<" <> joinCommaD (map hostTypeOfFT fs) <> ">"
+hostTypeOfFT :: FutharkType t p -> MDoc
+hostTypeOfFT (FTNum n) = hostTypeOfNum n
+hostTypeOfFT (FTTuple _ fs) = "std::tuple<" <> joinCommaD (map (hostTypeOfNum . snd) fs) <> ">"
 
--- total morloc -> FutharkType shape map, used only post-check for rendering
-mshapeToFT :: TypeU -> FutharkType
-mshapeToFT t = case classifyMorloc t of
-  MArr e r -> FTNum (Map.findWithDefault e e elemToken) r
-  MTup fs -> FTTuple Nothing (map mshapeToFT fs)
-  MOther -> FTNum "void" 0
+hostTypeOfNum :: FNum -> MDoc
+hostTypeOfNum (FNum e 0) = pretty (cppScalar' e)
+hostTypeOfNum (FNum e 1) = "std::vector<" <> pretty (cppScalar' e) <> ">"
+hostTypeOfNum (FNum e r) = "mlc::Tensor" <> pretty r <> "<" <> pretty (cppScalar' e) <> ">"
 
-renderHostType :: TypeU -> MDoc
-renderHostType = hostTypeOfFT . mshapeToFT
-
--- render the host C++ types for a sourced signature's arguments and return
-hostSigTypes :: TypeU -> ([MDoc], MDoc)
-hostSigTypes t0 =
-  let (args, ret) = unfoldFun (stripForall t0)
-   in (map renderHostType args, renderHostType ret)
+-- | The host C++ types of an entry's arguments and return, read from the
+-- manifest after 'checkOne' has matched them to the signature.
+hostEntryTypes :: FutharkEntry -> ([MDoc], MDoc)
+hostEntryTypes e = (map hostTypeOfFT (feInputs e), hostTypeOfFT (feOutput e))
 
 -- ---------------------------------------------------------------------------
 -- Glue: render the C++ bridge (pure; types are pre-rendered by the pass)
@@ -642,14 +659,14 @@ renderEntryText ge =
 
     header =
       retTy <> " " <> glueName entry <> "("
-        <> T.intercalate ", " ["const " <> aty <> "& x" <> tshow i | (i, aty) <- zip [0 :: Int ..] argTys]
+        <> T.intercalate ", " ["const " <> aty <> "& x" <> tshow i | (i, aty) <- indexed argTys]
         <> ") {"
 
 -- Build every entry input in order, threading the running list of frees (all
 -- non-null, most-recent first) so each construction's null-guard can clean up
 -- everything created before it. Returns (setup+guard lines, arg tokens for the
 -- call, success-path free lines).
-buildInputs :: [FutharkType] -> ([Text], [Text], [Text])
+buildInputs :: [AbiFT] -> ([Text], [Text], [Text])
 buildInputs = go (0 :: Int) []
   where
     go _ frees [] = ([], [], frees)
@@ -661,29 +678,31 @@ buildInputs = go (0 :: Int) []
 -- Marshal one host value into the futhark ABI. Scalars pass by value; arrays are
 -- created with futhark_new_* and null-checked; tuples recurse over their fields
 -- and then build the opaque. Every guard frees the intermediates built so far.
-marshalIn :: Text -> Text -> [Text] -> FutharkType -> ([Text], Text, [Text])
-marshalIn _ hostExpr frees (FTNum _ 0) = ([], hostExpr, frees)
-marshalIn nm hostExpr frees ft@(FTNum e r) =
-  let decl =
-        arrayCType ft <> "* " <> nm <> " = futhark_new_" <> e <> "_" <> tshow r
-          <> "d(ctx, " <> hostExpr <> ".data(), " <> dimsOf hostExpr r <> ");"
-      guardLines = nullGuard nm frees
-      freeThis = "futhark_free_" <> e <> "_" <> tshow r <> "d(ctx, " <> nm <> ");"
-   in (decl : guardLines, nm, freeThis : frees)
-marshalIn nm hostExpr frees (FTTuple (Just ti) fields) =
-  let (fieldLines, fieldToks, freesAfter) = goFields 0 frees fields
-      decl = tiCtype ti <> " " <> nm <> " = nullptr;"
-      call = tiNew ti <> "(ctx, &" <> nm <> ", " <> T.intercalate ", " fieldToks <> ")"
+marshalIn :: Text -> Text -> [Text] -> AbiFT -> ([Text], Text, [Text])
+marshalIn nm hostExpr frees (FTNum n) = marshalNum nm hostExpr frees n
+marshalIn nm hostExpr frees (FTTuple ops fields) =
+  let (fieldLines, fieldToks, freesAfter) = goFields 0 frees (map snd fields)
+      decl = tiCtype ops <> " " <> nm <> " = nullptr;"
+      call = tiNew ops <> "(ctx, &" <> nm <> ", " <> T.intercalate ", " fieldToks <> ")"
       guardLines = opaqueGuard nm call freesAfter
-      freeThis = tiFree ti <> "(ctx, " <> nm <> ");"
+      freeThis = tiFree ops <> "(ctx, " <> nm <> ");"
    in (fieldLines ++ [decl] ++ guardLines, nm, freeThis : freesAfter)
   where
     goFields _ fr [] = ([], [], fr)
     goFields k fr (f : fs) =
-      let (lns, tok, fr') = marshalIn (nm <> "_" <> tshow k) (getField hostExpr k) fr f
+      let (lns, tok, fr') = marshalNum (nm <> "_" <> tshow k) (getField hostExpr k) fr f
           (lnsR, toksR, frR) = goFields (k + 1) fr' fs
        in (lns ++ lnsR, tok : toksR, frR)
-marshalIn _ hostExpr frees (FTTuple Nothing _) = ([], hostExpr, frees) -- unreachable: manifest carries ops
+
+marshalNum :: Text -> Text -> [Text] -> FNum -> ([Text], Text, [Text])
+marshalNum _ hostExpr frees (FNum _ 0) = ([], hostExpr, frees)
+marshalNum nm hostExpr frees n@(FNum e r) =
+  let decl =
+        arrayCType n <> "* " <> nm <> " = futhark_new_" <> e <> "_" <> tshow r
+          <> "d(ctx, " <> hostExpr <> ".data(), " <> dimsOf hostExpr r <> ");"
+      guardLines = nullGuard nm frees
+      freeThis = "futhark_free_" <> e <> "_" <> tshow r <> "d(ctx, " <> nm <> ");"
+   in (decl : guardLines, nm, freeThis : frees)
 
 -- guard for a freshly-created array pointer
 nullGuard :: Text -> [Text] -> [Text]
@@ -704,19 +723,18 @@ marshalThrow = "throw std::runtime_error(\"futhark: input marshalling failed\");
 
 -- The result out-parameter is always "&r", inlined at the call site. Returns
 -- (declaration, result-extraction lines, free lines for the result, return stmt).
-renderReturn :: FutharkType -> (Text, [Text], [Text], Text)
-renderReturn ft@(FTNum _ 0) =
-  (cppScalarOf ft <> " r = 0;", [], [], "return r;")
-renderReturn ft@(FTNum e r) =
+renderReturn :: AbiFT -> (Text, [Text], [Text], Text)
+renderReturn (FTNum n@(FNum _ 0)) =
+  (cppScalarOf n <> " r = 0;", [], [], "return r;")
+renderReturn (FTNum n@(FNum e r)) =
   let (readLines, value, freeLine) = readArray "r" e r
-   in ( arrayCType ft <> "* r = nullptr;"
+   in ( arrayCType n <> "* r = nullptr;"
       , readLines ++ ["futhark_context_sync(ctx);"]
       , [freeLine]
       , "return " <> value <> ";"
       )
-renderReturn (FTTuple mti fields) =
-  let ti = fromMaybe (error "Morloc bug: futhark tuple return without ABI ops") mti
-      pf = [projectField ti k f | (k, f) <- zip [0 ..] fields]
+renderReturn (FTTuple ti fields) =
+  let pf = [projectField k proj f | (k, (proj, f)) <- indexed fields]
       decls = concatMap pfDecls pf
       projs = map pfProj pf
       errFrees = concatMap pfErrFree pf
@@ -754,10 +772,9 @@ data ProjField = ProjField
   , pfValue :: Text
   }
 
-projectField :: TupleInfo -> Int -> FutharkType -> ProjField
-projectField ti k (FTNum e 0) =
+projectField :: Int -> Text -> FNum -> ProjField
+projectField k proj (FNum e 0) =
   let p = "p" <> tshow k
-      proj = tiProjects ti !! k
    in ProjField
         { pfDecls = [cppScalar' e <> " " <> p <> " = 0;"]
         , pfProj = "_pc |= " <> proj <> "(ctx, &" <> p <> ", r);"
@@ -766,9 +783,8 @@ projectField ti k (FTNum e 0) =
         , pfSuccFree = []
         , pfValue = p
         }
-projectField ti k (FTNum e r) =
+projectField k proj (FNum e r) =
   let p = "p" <> tshow k
-      proj = tiProjects ti !! k
       (readLines, value, freeLine) = readArray p e r
    in ProjField
         { pfDecls = ["futhark_" <> e <> "_" <> tshow r <> "d* " <> p <> " = nullptr;"]
@@ -778,7 +794,6 @@ projectField ti k (FTNum e r) =
         , pfSuccFree = [freeLine]
         , pfValue = value
         }
-projectField _ _ (FTTuple _ _) = error "Morloc bug: nested futhark tuple return"
 
 -- Read a futhark array pointer 'ptr' (element token 'e', rank 'r') into a host
 -- value. Shared by top-level array returns and tuple array fields. Returns
@@ -827,13 +842,11 @@ dimsOf :: Text -> Int -> Text
 dimsOf e 1 = "(int64_t)" <> e <> ".size()"
 dimsOf e r = T.intercalate ", " [e <> ".shape(" <> tshow d <> ")" | d <- [0 .. r - 1]]
 
-arrayCType :: FutharkType -> Text
-arrayCType (FTNum e r) = "futhark_" <> e <> "_" <> tshow r <> "d"
-arrayCType _ = "void"
+arrayCType :: FNum -> Text
+arrayCType (FNum e r) = "futhark_" <> e <> "_" <> tshow r <> "d"
 
-cppScalarOf :: FutharkType -> Text
-cppScalarOf (FTNum e _) = cppScalar' e
-cppScalarOf _ = "void"
+cppScalarOf :: FNum -> Text
+cppScalarOf (FNum e _) = cppScalar' e
 
 -- ---------------------------------------------------------------------------
 -- small helpers

@@ -32,6 +32,7 @@ module Morloc.CodeGenerator.Docstrings
   , underOptional
   ) where
 
+import Morloc.Data.Zip (indexedFrom, zipSame, zipWithSame, zipWithSameM)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -63,7 +64,7 @@ processDocstrings e@(AnnoS (Idx i t) _ _) = do
   sgmap <- MM.gets stateSignatures
   argdoc <- case GMap.lookup i sgmap of
     (GMapJust (Monomorphic (TermTypes (Just et) _ _))) -> return $ edocs et
-    (GMapJust (Polymorphic _ _ et _)) -> return $ edocs et
+    (GMapJust (Polymorphic _ _ et)) -> return $ edocs et
     _ -> case t of
       (FunT ts _) -> return $ ArgDocSig defaultValue (take (length ts) (repeat defaultValue)) defaultValue
       _ -> return $ ArgDocAlias defaultValue
@@ -154,7 +155,7 @@ resolveNestedTypes = go []
               (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
               _ -> return t
       AppT f as -> do
-        as' <- mapM (go seen) as
+        as' <- mapM (traverse (go seen)) as
         entry <- case f of
           VarT v | render (pretty v) `notElem` seen -> lookupName v
           _ -> return Nothing
@@ -163,14 +164,16 @@ resolveNestedTypes = go []
           -- into its body, which is then resolved like a type written in
           -- place: `Pair Int` with `type Pair a = (a, a)` is `(Int, Int)`.
           (VarT v, Just [(vs, body, _, _, TypedefAlias)])
-            | params <- [p | Left (p, _) <- vs]
-            , length params == length as' ->
-                go (render (pretty v) : seen) (substituteAll (zip params as') (typeOf body))
+            | length vs == length as' ->
+                -- substituted before erasure, so a Nat or Str argument
+                -- reaches the body (DIM-8)
+                go (render (pretty v) : seen)
+                  (typeOf (instantiateParams [(p, argU x) | (p, x) <- paramPairs vs as'] body))
           _ -> bindNamed <$> go seen f <*> pure as'
       FunT as b -> FunT <$> mapM (go seen) as <*> go seen b
       NamT o v ps fields -> do
         let seen' = render (pretty v) : seen
-        ps' <- mapM (go seen') ps
+        ps' <- mapM (traverse (go seen')) ps
         fields' <- mapM (\(k, ft) -> (,) k <$> go seen' ft) fields
         return (NamT o v ps' fields')
       EffectT es b -> EffectT es <$> go seen b
@@ -191,30 +194,20 @@ resolveNestedTypes = go []
       | length ps == length as = NamT o v as fields
     bindNamed f as = AppT f as
 
-    -- Simultaneous substitution. Each parameter is first renamed to a
-    -- name no written type can carry, then each of those is replaced by
-    -- its argument, so an argument that mentions a later parameter's
-    -- name is not substituted a second time.
-    substituteAll :: [(TVar, Type)] -> Type -> Type
-    substituteAll binds t0 =
-      let fresh = [TV ("$" <> MT.show' i) | i <- [0 :: Int ..]]
-          renamed = foldr (\(p, fv) t -> substituteTVar p (VarT fv) t) t0 (zip (map fst binds) fresh)
-       in foldr (\(fv, a) t -> substituteTVar fv a t) renamed (zip fresh (map snd binds))
-
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
 processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
   -- one doc per argument of the type: missing ones default, extras are dropped
   let argdocs = take (length ts) (argdocs0 <> repeat defaultValue)
-  (ts0, argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
-  ts' <- mapM resolveNestedTypes ts0
+  reduced <- zipWithSameM (reduceArgDoc i) ts (map ArgDocAlias argdocs)
+  resolved <- mapM (\(t0, a) -> (\t' -> (t', a)) <$> resolveNestedTypes t0) reduced
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
   mapM_ (rejectAuthoredMime loc) (cmddoc : retdoc : argdocs)
   cmdargs <-
     sequence
       [ makeCmdArg (loc <> "argument #" <> pretty n) t' a'
-      | (n, t', a') <- zip3 [(1 :: Int) ..] ts' argdocs'
+      | (n, (t', a')) <- indexedFrom 1 resolved
       ]
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
@@ -279,7 +272,7 @@ processArgDoc i t r = do
       cmdargs <-
         sequence
           [ makeCmdArg (loc <> "field " <> pretty k) ty (ArgDocAlias dv)
-          | ((k, ty), (_, dv)) <- zip ts entries
+          | ((k, ty), (_, dv)) <- zipSame ts entries
           ]
       return $
         CmdDocSet
@@ -414,14 +407,14 @@ reduceArgDocFrom seen i t@(VarT v) arg
       _ -> return ()
 
 reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
-  let args = map (ArgDocAlias . snd) rs
-      keys = map fst rs
-  entries <- zipWithM (reduceArgDocFrom (Set.insert v seen) i) ts args
   -- A field's reduced doc keeps whatever shape its type gave it (a `data`
   -- field carries its constructors, a record field its own fields); the
   -- entry keeps the field-level variables from any of them.
-  let args' = map (argDocTop . snd) entries
-  return (NamT o v ps (zip keys (map fst entries)), ArgDocRec arg (zip keys args'))
+  let reduceField t (k, r) = do
+        (t', d) <- reduceArgDocFrom (Set.insert v seen) i t (ArgDocAlias r)
+        return ((k, t'), (k, argDocTop d))
+  entries <- zipWithSameM reduceField ts rs
+  return (NamT o v ps (map fst entries), ArgDocRec arg (map snd entries))
 -- An argument that may be omitted is documented as the type it holds.
 reduceArgDocFrom seen i (OptionalT t) arg = do
   (t', arg') <- reduceArgDocFrom seen i t arg
@@ -438,7 +431,7 @@ argDocTop (ArgDocSig r _ _) = r
 makeCmdArg :: MDoc -> Type -> ArgDoc -> MorlocMonad CmdArg
 makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
   -- Set the metavar default for groups to the record type name
-  let typedEntries = zipWith (\(k, t) (_, r) -> (k, (t, r))) rs entries
+  let typedEntries = zipWithSame (\(k, t) (_, r) -> (k, (t, r))) rs entries
   resolveArgDocVars loc typedEntries recType arg
 makeCmdArg loc t (ArgDocRec r _) = resolveArgDocVars loc [] t r
 makeCmdArg loc t (ArgDocAlias r) = resolveArgDocVars loc [] t r
@@ -784,21 +777,6 @@ makeOptMeta (AppT _ _) = "VAL" -- weird stuff, choose your own metadata
 makeOptMeta (NamT _ v _ _) = unTVar v
 makeOptMeta (EffectT _ t) = "<E>" <> makeOptMeta t
 makeOptMeta (OptionalT t) = "?" <> makeOptMeta t
-makeOptMeta (NatLitT n) = MT.show' n
-makeOptMeta (NatAddT _ _) = "NAT"
-makeOptMeta (NatMulT _ _) = "NAT"
-makeOptMeta (NatSubT _ _) = "NAT"
-makeOptMeta (NatDivT _ _) = "NAT"
-makeOptMeta (VoidT k) = case k of
-  KindNat -> "NAT"
-  KindInt -> "INT"
-  KindStr -> "STR"
-  KindRec -> "REC"
-  KindList _ -> "LIST"
-  KindSet _ -> "SET"
-  KindType -> "TYPE"
-makeOptMeta (StrLitT _) = "STR"
-makeOptMeta (StrConcatT _ _) = "STR"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do

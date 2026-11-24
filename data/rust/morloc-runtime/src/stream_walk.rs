@@ -345,10 +345,10 @@ pub(crate) struct ArgsCursor<'a> {
 }
 
 impl<'a> ArgsCursor<'a> {
-    fn new(args: &'a [crate::intrinsics::IFileWalkArg]) -> Self {
+    pub(crate) fn new(args: &'a [crate::intrinsics::IFileWalkArg]) -> Self {
         Self { args, pos: 0 }
     }
-    fn next_one(&mut self) -> Result<&'a crate::intrinsics::IFileWalkArg, MorlocError> {
+    pub(crate) fn next_one(&mut self) -> Result<&'a crate::intrinsics::IFileWalkArg, MorlocError> {
         if self.pos >= self.args.len() {
             return Err(MorlocError::Other(
                 "walk: ran out of runtime args (bracket step expected an index/bound)".into(),
@@ -358,7 +358,7 @@ impl<'a> ArgsCursor<'a> {
         self.pos += 1;
         Ok(r)
     }
-    fn next_three(&mut self) -> Result<
+    pub(crate) fn next_three(&mut self) -> Result<
         (Option<i64>, Option<i64>, Option<i64>),
         MorlocError,
     > {
@@ -371,34 +371,34 @@ impl<'a> ArgsCursor<'a> {
         Ok((opt(&a), opt(&b), opt(&c)))
     }
     fn remaining(&self) -> usize { self.args.len() - self.pos }
-}
-
-/// Walk steps from the start of the value and deep-copy the resulting
-/// value into a fresh SHM block. Entry point for non-bracket-only
-/// paths (the BracketIndexOnly / BracketSliceOnly fast paths bypass
-/// this).
-pub(crate) fn walk_into_fresh(
-    value_schema: &Schema,
-    src: &SubpacketSrc,
-    steps: &[WalkStep],
-    args: &[crate::intrinsics::IFileWalkArg],
-) -> Result<AbsPtr, MorlocError> {
-    // Infer the result schema for the whole walk so we can allocate
-    // the output once. infer_chain_schema is a pure static walk over
-    // the input schema -- no disk reads.
-    let result_schema = infer_chain_schema(value_schema, steps)?;
-    let dst = shm::shcalloc(1, result_schema.width)?;
-    let mut cursor = ArgsCursor::new(args);
-    let mut parts: Vec<AbsPtr> = Vec::new();
-    let walked = walk_into(src, src.arr_base(), value_schema,
-                           steps, &mut cursor, dst, &result_schema, &mut parts)
-        .and_then(|()| match cursor.remaining() {
+    /// An error unless every runtime arg was consumed.
+    pub(crate) fn finish(&self) -> Result<(), MorlocError> {
+        match self.remaining() {
             0 => Ok(()),
             n => Err(MorlocError::Other(format!(
                 "walk: {} unconsumed runtime arg(s) -- pattern/args arity mismatch", n
             ))),
-        });
-    one_block(dst, &result_schema, parts, walked)
+        }
+    }
+}
+
+/// Walk steps from the start of the value and deep-copy the resulting
+/// value, of `result_schema` (`infer_chain_schema` of the walk), into a
+/// fresh SHM block.
+pub(crate) fn walk_into_fresh(
+    value_schema: &Schema,
+    result_schema: &Schema,
+    src: &SubpacketSrc,
+    steps: &[WalkStep],
+    args: &[crate::intrinsics::IFileWalkArg],
+) -> Result<AbsPtr, MorlocError> {
+    let dst = shm::shcalloc(1, result_schema.width)?;
+    let mut cursor = ArgsCursor::new(args);
+    let mut parts: Vec<AbsPtr> = Vec::new();
+    let walked = walk_into(src, src.arr_base(), value_schema,
+                           steps, &mut cursor, dst, result_schema, &mut parts)
+        .and_then(|()| cursor.finish());
+    one_block(dst, result_schema, parts, walked)
 }
 
 /// The value built at `root` from `parts` as one block, which is how a pool
@@ -709,25 +709,36 @@ pub(crate) fn broadcast_slice_tail(
         b
     };
     let data_abs = src.array_data(arr, elem_w)?;
-    // The tail's runtime args (any BracketIndex/BracketSlice in the
-    // tail) apply uniformly to every element of the slice, matching
-    // `map (\e -> e.[i]) slice`. Snapshot the arg cursor, rewind
-    // before each element, then advance once after the loop so the
-    // outer caller sees a single consumption of the tail's args.
-    let snapshot_pos = args.pos;
-    let mut per_iter_consumed: Option<usize> = None;
-    for (k, i) in slice.positions().enumerate() {
+    let positions: Vec<usize> = slice.positions().collect();
+    for_each_broadcast(args, tail, n_out, |k, args| {
         let elem_src_ptr = unsafe {
-            (data_abs as *const u8).add(i * elem_w) as AbsPtr
+            (data_abs as *const u8).add(positions[k] * elem_w) as AbsPtr
         };
         let elem_dst_ptr = unsafe {
             (buf_ptr as *mut u8).add(k * out_elem_w) as AbsPtr
         };
-        args.pos = snapshot_pos;
         walk_into(
             src, elem_src_ptr, elem_schema,
             tail, args, elem_dst_ptr, out_elem_schema, parts,
-        )?;
+        )
+    })?;
+    write_array_header(out, n_out, buf_ptr)
+}
+
+/// Run `each` for the `n` elements of a broadcast, giving every element
+/// the same runtime args for `tail` (`map (\e -> e.[i]) slice`), and
+/// leave `args` past one consumption of the tail's args.
+pub(crate) fn for_each_broadcast(
+    args: &mut ArgsCursor<'_>,
+    tail: &[WalkStep],
+    n: usize,
+    mut each: impl FnMut(usize, &mut ArgsCursor<'_>) -> Result<(), MorlocError>,
+) -> Result<(), MorlocError> {
+    let snapshot_pos = args.pos;
+    let mut per_iter_consumed: Option<usize> = None;
+    for k in 0..n {
+        args.pos = snapshot_pos;
+        each(k, args)?;
         let consumed = args.pos - snapshot_pos;
         match per_iter_consumed {
             None => per_iter_consumed = Some(consumed),
@@ -741,20 +752,15 @@ pub(crate) fn broadcast_slice_tail(
             _ => {}
         }
     }
-    // Advance the outer cursor once past the tail's arg budget.
-    // For empty slices no iteration ran, so we compute the count
-    // statically from the tail's step shapes instead of observing it.
-    let per_iter = match per_iter_consumed {
-        Some(c) => c,
-        None => count_walk_args(tail),
-    };
-    args.pos = snapshot_pos + per_iter;
-    let data_rel = if buf_ptr.is_null() {
-        shm::RELNULL
-    } else {
-        shm::abs2rel(buf_ptr)?
-    };
-    let header = shm_types_crate::Array { size: n_out, data: data_rel };
+    args.pos = snapshot_pos + per_iter_consumed.unwrap_or_else(|| count_walk_args(tail));
+    Ok(())
+}
+
+/// Write an `Array { size: n, data }` header for the bank at `buf` (null
+/// when empty) into `out`.
+pub(crate) fn write_array_header(out: AbsPtr, n: usize, buf: AbsPtr) -> Result<(), MorlocError> {
+    let data_rel = if buf.is_null() { shm::RELNULL } else { shm::abs2rel(buf)? };
+    let header = shm_types_crate::Array { size: n, data: data_rel };
     unsafe {
         std::ptr::copy_nonoverlapping(
             &header as *const shm_types_crate::Array as *const u8,
@@ -768,7 +774,7 @@ pub(crate) fn broadcast_slice_tail(
 /// Count the number of runtime args a chain of WalkSteps would
 /// consume. Each BracketIndex uses 1, each BracketSlice uses 3, Field
 /// uses 0. Groups accumulate the counts of every child chain.
-/// Used by `broadcast_slice_tail` to skip the tail's arg budget when
+/// Used by `for_each_broadcast` to skip the tail's arg budget when
 /// the slice is empty (no iteration to observe consumption).
 pub(crate) fn count_walk_args(steps: &[WalkStep]) -> usize {
     let mut n = 0;

@@ -7,13 +7,24 @@ import copy
 import array
 import struct
 import socket as _socket
-from collections import OrderedDict
 import functools
 import importlib
 import importlib.util
 
 
 global_state = dict()
+
+
+class _SocketPaths(dict):
+    """Socket path by socket file name, joined once per name."""
+
+    def __missing__(self, name):
+        path = os.path.join(global_state["tmpdir"], name)
+        self[name] = path
+        return path
+
+
+_mlc_socket_paths = _SocketPaths()
 
 # The language preamble (runtime bootstrap: `import pymorloc as morloc`, path
 # setup) and the generated schema/closure tables run at module top, in the
@@ -24,8 +35,17 @@ global_state = dict()
 # of no arguments) has a closure codec as its result codec, and so on
 # through any depth. Defined ahead of the generated closure table, which
 # is built from it.
+def _mlc_wrong_data_form(type_name, value):
+    raise TypeError("Expected a value of the `data` type %s, but got %s" % (type_name, type(value).__name__))
+
+
 def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
     return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
+
+# A value whose type has a packer: its schema and the functions that turn a
+# native value into its wire form and back.
+def mlc_wire_codec(schema, to_wire, from_wire):
+    return ("__mlc_wire__", schema, to_wire, from_wire)
 
 # AUTO include preamble start
 # <<<BREAK>>>
@@ -113,7 +133,7 @@ def _mlc_import_source(module_path):
 
 
 def _mlc_load_source_file(module_path, candidate):
-    key = "_mlc_src_" + "".join(c if c.isalnum() else "_" for c in module_path)
+    key = "_mlc_src_" + "".join(c if c.isascii() and c.isalnum() else "_%x_" % ord(c) for c in module_path)
     spec = importlib.util.spec_from_file_location(key, candidate)
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module
@@ -187,20 +207,30 @@ def _mlc_is_closure_codec(codec):
     return isinstance(codec, tuple) and len(codec) == 4 and codec[0] == "__mlc_closure__"
 
 
+def _mlc_is_wire_codec(codec):
+    return isinstance(codec, tuple) and len(codec) == 4 and codec[0] == "__mlc_wire__"
+
+
 def mlc_encode(value, codec, self_contained=False):
-    # Serialize a native value by its codec: a closure is reified first. A
+    # Serialize a native value by its codec: a closure is reified first, and
+    # a value whose type has a packer is converted to its wire form. A
     # self-contained packet embeds the value rather than referencing a
     # shared-memory block, for a value that must outlive this dispatch.
     if _mlc_is_closure_codec(codec):
         return morloc.put_value(mlc_reify(value, MLC_HOME_LANG), codec[1], self_contained)
+    if _mlc_is_wire_codec(codec):
+        return morloc.put_value(codec[2](value), codec[1], self_contained)
     return morloc.put_value(value, codec, self_contained)
 
 
 def mlc_decode(pkt, codec):
     # Deserialize a packet by its codec: a closure is reflected into a
-    # callable that calls back to its home pool.
+    # callable that calls back to its home pool, and a value whose type has a
+    # packer is converted from its wire form.
     if _mlc_is_closure_codec(codec):
         return mlc_reflect_from_tuple(morloc.get_value(pkt, codec[1]), codec[2], codec[3])
+    if _mlc_is_wire_codec(codec):
+        return codec[3](morloc.get_value(pkt, codec[1]))
     return morloc.get_value(pkt, codec)
 
 
@@ -268,13 +298,165 @@ def mlc_reify(f, home_lang):
     return (home_lang, mid, packets)
 
 
+# FORK-17
+_MLC_FORK_TOOL = 4
+
+
+def _mlc_fork_watch():
+    pool_file = __file__
+    f = sys._getframe(1)
+    user = None
+    while f is not None and f.f_code.co_filename != pool_file:
+        user = f
+        f = f.f_back
+    if f is None or user is None:
+        return
+    target = user
+
+    def leave(*_):
+        if sys._getframe(1) is target:
+            morloc.exit_forked()
+
+    mon = getattr(sys, "monitoring", None)
+    if mon is None:
+        def profile(frame, event, _arg):
+            if event == "return" and frame is target:
+                morloc.exit_forked()
+        sys.setprofile(profile)
+        return
+    if mon.get_tool(_MLC_FORK_TOOL) is None:
+        mon.use_tool_id(_MLC_FORK_TOOL, "morloc-fork")
+    E = mon.events
+    for ev in (E.PY_RETURN, E.PY_YIELD, E.PY_UNWIND):
+        mon.register_callback(_MLC_FORK_TOOL, ev, leave)
+    mon.set_local_events(_MLC_FORK_TOOL, target.f_code, E.PY_RETURN | E.PY_YIELD)
+    mon.set_events(_MLC_FORK_TOOL, E.PY_UNWIND)
+
+
+os.register_at_fork(after_in_child=_mlc_fork_watch)
+
+
+def mlc_gather(schema, f):
+    # @gather through a temp-file stream: the handle is the stream, and the
+    # result is what @load gives (NATIVE-9).
+    path = morloc.mlc_tmpfile()
+    o = morloc.mlc_open_ostream(schema, path)
+    f(o)
+    morloc.mlc_close(o)
+    xs = morloc.mlc_load(schema, path)
+    morloc.mlc_unlink_tmp(path)
+    return xs
+
+
+def mlc_gather_native(schema, f):
+    # A gather held in this pool's own list, each batch in the form @load
+    # would give it (NATIVE-9).
+    acc = []
+    h = morloc.mlc_gather_new(acc)
+    try:
+        f(h)
+    except BaseException:
+        morloc.mlc_side_drop(h)
+        raise
+    return morloc.mlc_gather_take(h, schema, acc)
+
+
+def _mlc_fold_combine(init, combine, values):
+    if not values:
+        return copy.deepcopy(init)
+    acc = values[0]
+    for v in values[1:]:
+        acc = combine(acc, v)
+    return acc
+
+
+def mlc_fold(schema, init, step, combine, f):
+    # fold.md: each thread's slot starts from its own copy of init (FOLD-6);
+    # forked children's batches are stepped from another (FOLD-3).
+    h = morloc.mlc_fold_new(init)
+    try:
+        f(h)
+    except BaseException:
+        morloc.mlc_fold_drop(h)
+        raise
+    side = []
+
+    def replay(batch):
+        if not side:
+            side.append(copy.deepcopy(init))
+        side[0] = step(side[0], batch)
+
+    values = morloc.mlc_fold_take(h, schema, replay)
+    return _mlc_fold_combine(init, combine, values + side)
+
+
+def mlc_fold_file(schema, init, step, combine, f):
+    # FOLD-9: the handle is a stream; its batches are stepped once the
+    # producer returns.
+    path = morloc.mlc_tmpfile()
+    o = morloc.mlc_open_ostream(schema, path)
+    try:
+        f(o)
+    finally:
+        morloc.mlc_close(o)
+    acc = [copy.deepcopy(init)]
+
+    def each(batch):
+        acc[0] = step(acc[0], batch)
+
+    i = morloc.mlc_open_istream(schema, path)
+    try:
+        morloc.mlc_replay(schema, i, each)
+    finally:
+        morloc.mlc_close(i)
+        morloc.mlc_unlink_tmp(path)
+    return acc[0]
+
+
+def mlc_sink_write(schema, level, batch, h):
+    # SIDE-12, SLOT-35: a sink's write that raises fails its stream.
+    try:
+        morloc.mlc_write(schema, level, batch, h)
+    except BaseException:
+        morloc.mlc_sink_failed(h)
+        raise
+
+def mlc_fold_put(schema, step, h, batch):
+    # SIDE-12: a put that raises fails its sink.
+    try:
+        _mlc_fold_put(schema, step, h, batch)
+    except BaseException:
+        morloc.mlc_sink_failed(h)
+        raise
+
+
+def _mlc_fold_put(schema, step, h, batch):
+    # FOLD-1, FOLD-9
+    if h >= 0:
+        morloc.mlc_write(schema, 0, batch, h)
+        morloc.mlc_flush(h)
+        return
+    native, value, fresh = morloc.mlc_fold_checkout(h)
+    if not native:
+        morloc.mlc_side_put(h, schema, batch)
+        return
+    try:
+        if fresh:
+            value = copy.deepcopy(value)
+        value = step(value, batch)
+    except BaseException:
+        morloc.mlc_fold_failed(h)
+        raise
+    morloc.mlc_fold_store(h, value)
+
+
 def mlc_spawn(f, handle, schema):
     # Start the producer `f` on the channel as a separate dispatch in its
     # home pool, without waiting for it. The channel travels as the
     # producer's OStream argument, after its captured values.
     home, mid, packets = mlc_reify(f, MLC_HOME_LANG)
     packets = list(packets) + [morloc.put_value(handle, schema, True)]
-    sock = os.path.join(global_state["tmpdir"], "pipe-" + home)
+    sock = _mlc_socket_paths["pipe-" + home]
     morloc.mlc_spawn(sock, mid, packets, handle)
 
 
@@ -353,7 +535,7 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     home_lang, mid, captured = tup
     # A [U8] decodes as a list (NATIVE-7); foreign_call takes packets as bytes.
     captured = [bytes(p) for p in captured]
-    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    sock = _mlc_socket_paths["pipe-" + home_lang]
     def _call(*args):
         own = [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
         return _mlc_call_released(sock, mid, list(captured) + own, own, res_codec)
@@ -420,7 +602,7 @@ def _mlc_papply_remote(f, origin, xs):
         more = [mlc_encode(x, c, True) for x, c in zip(xs, arg_codecs)]
         return mlc_reflect_from_tuple(
             (home_lang, mid, list(packets) + more), arg_codecs[len(xs):], res_codec)
-    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    sock = _mlc_socket_paths["pipe-" + home_lang]
     own = [mlc_encode(x, c) for x, c in zip(xs[:take], arg_codecs)]
     tup = _mlc_call_released(sock, smid, list(packets) + own, own, None)
     g = mlc_reflect_from_tuple(tup, arg_codecs[take:], res_codec)
@@ -439,6 +621,27 @@ def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
     return _wrapper
 
 
+# The trace label (DIAG-5) of each named generated function, keyed by the
+# id of its code object; each function's definition adds its entry (EMIT-3).
+mlc_frame_labels = {}
+
+
+def _mlc_failure_message(e):
+    # A failure as text: its message, then the label of each named generated
+    # function its traceback passes through, innermost first.
+    try:
+        msg = str(e)
+    except Exception:
+        msg = f"a {type(e).__name__} whose message cannot be read"
+    labels = []
+    tb = e.__traceback__
+    while tb is not None:
+        label = mlc_frame_labels.get(id(tb.tb_frame.f_code))
+        if label is not None:
+            labels.append(label)
+        tb = tb.tb_next
+    return msg + "".join("\n  at " + label for label in reversed(labels))
+
 # AUTO include manifolds start
 # <<<BREAK>>>
 # AUTO include manifolds end
@@ -451,11 +654,8 @@ def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
 
 def _with_debug_trace(msg: str) -> str:
     # Concatenate the morloc debug trace (if --debug was compiled in
-    # and any frames were recorded) with the raised exception's
-    # message. Returns msg unchanged when no trace is present. Each
-    # manifold catch also appends its own "  at <name> [py] (mid=...,
-    # srcloc)" line to the message via string concat, so non-debug
-    # tracebacks still compose across pools.
+    # and any frames were recorded) with the failure's message. Returns
+    # msg unchanged when no trace is present.
     trace = morloc.debug_drain_frames()
     return f"{msg}\n{trace}" if trace else msg
 
@@ -491,7 +691,8 @@ def run_job(client_fd: int) -> None:
             except morloc.MorlocPipeClosed as e:
                 result = morloc.make_pipe_closed_packet(str(e))
             except Exception as e:
-                result = morloc.make_fail_packet(_with_debug_trace(str(e)))
+                result = morloc.make_fail_packet(_with_debug_trace(_mlc_failure_message(e)))
+                e.__traceback__ = None
             # A process forked by user code during this call exits as soon
             # as the call returns in it (FORK-12).
             morloc.exit_if_forked()
@@ -548,11 +749,12 @@ def run_job(client_fd: int) -> None:
         morloc.shm_tracker_flush()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
-        # close child copy
-        morloc.close_socket(client_fd)
 
 
 if __name__ == "__main__":
+    # @try renders a caught failure with the same trace as dispatch (DIAG-5).
+    morloc.set_failure_message(_mlc_failure_message)
+
     # Line-buffer stderr so diagnostic output is not lost when pool is killed.
     # stdout is left fully buffered for performance (genome-scale piping) and
     # flushed explicitly after each job and during shutdown.

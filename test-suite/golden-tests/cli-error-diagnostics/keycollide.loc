@@ -20,8 +20,6 @@ record Opts where
   --' @default 1
   count :: Int
 
-record py => Opts = "dict"
-
 collideTally :: Str -> Opts -> Int
 
 --' Count things

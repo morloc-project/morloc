@@ -18,6 +18,8 @@ SERIES = [
     ("COPY-4", "cpp.closure", "nexus-cpp", "closure", [500000], 500000, [0], 0),
     ("COPY-5", "cpp.tupleStep", "nexus-cpp", "tupleStep", [250000], 250000, [0], 0),
     ("COPY-6", "cpp.mixedLoop", "nexus-cpp", "mixedLoop", [400], 400, [2], 2),
+    ("COPY-8", "rs.letAlias", "nexus-rs", "letAlias", [1000, 10000], 1000, [0, 10000], 0),
+    ("COPY-8", "cpp.letAlias", "nexus-cpp", "letAlias", [250000], 250000, [0], 0),
 ]
 
 QUICK_SCALE = 10

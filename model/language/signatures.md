@@ -4,7 +4,8 @@ What a signature declares: one term with many implementations, terms without sig
 
 ### SIG-1 A signature declares one term
 Intent: proposed
-Code: conforms 2026-10-21
+Tests: spec-sig-1-1, spec-sig-1-2, spec-sig-1-3, spec-sig-1-4, spec-sig-1-5
+Code: deviates (issues/typecheck.md, issues/typeclasses.md)
 
 `f :: T` declares the term `f` with general type `T`. Every morloc
 definition of `f` and every sourced function named `f` in scope is an
@@ -32,14 +33,14 @@ Intent: open
 Code: unaudited
 
 A term without a signature gets the type inference gives it. Inference
-fails today for a point-free use of class methods and for a term that
-matches on constructors. Is that (a) the rule, with a rejection that asks
+fails today for a term that matches on constructors. Is that (a) the rule, with a rejection that asks
 for a signature, or (b) a gap, so that any term whose type is determined by
 its uses needs none?
 
 ### SIG-5 An exported term whose type keeps a class constraint
 Intent: ruled 2026-10-29
-Code: unaudited
+Tests: spec-sig-5-1, spec-sig-5-2, spec-sig-5-3, spec-sig-5-4, spec-sig-5-5, spec-sig-5-6
+Code: conforms 2026-11-07
 
 An export whose type has a free type variable, constrained or not, cannot
 be given an instance or a representation. It is left out of every generated
@@ -61,7 +62,7 @@ block is its own scope.
 ### SIG-7 A signature shadows a term imported with its whole module
 Intent: ruled 2026-10-14
 Tests: spec-sig-7-1, spec-sig-7-2, spec-sig-7-3
-Code: conforms 2026-10-14
+Code: deviates (issues/typeclasses.md)
 
 If a module imports `m` without an import list, and `m` exports `f`, a
 signature `f :: T` in the module declares a new term `f`, which replaces the
@@ -76,7 +77,7 @@ library gains a name the module already uses.
 
 ### SIG-8 A signature for a term imported by name is a compile error
 Intent: ruled 2026-10-14
-Tests: spec-sig-8-1, spec-sig-8-2, spec-sig-8-3, spec-sig-8-4, spec-sig-8-5
+Tests: spec-sig-8-1, spec-sig-8-2, spec-sig-8-3, spec-sig-8-4, spec-sig-8-5, spec-sig-8-6
 Code: conforms 2026-10-14
 
 If a module names `f` in an import list (`import m (f)`), or names a class
@@ -89,7 +90,7 @@ it out of the list.
 ### SIG-9 A definition without a signature adds an implementation
 Intent: ruled 2026-10-14
 Tests: spec-sig-9-1, spec-sig-9-2
-Code: conforms 2026-10-14
+Code: deviates (issues/typeclasses.md)
 
 A definition `f = e` with no signature for `f` in the module is one more
 implementation of the term `f` in scope (SIG-1, SIG-2), imported or local.
@@ -97,3 +98,21 @@ This is how a language module adds implementations to a language-agnostic
 module's terms. A definition the author meant as a new term, under a name
 the module imports, silently joins the imported term instead; giving every
 new term a signature avoids it.
+
+### SIG-10 Every type in a built program is known and checked statically
+Intent: ruled 2026-11-01
+Tests: spec-sig-10-1, spec-sig-10-2, spec-sig-10-3, spec-sig-10-4, spec-sig-10-5
+Code: deviates (compiler/issues/specialization.md)
+
+Every term in a program that `morloc make` builds has a type fixed at
+compile time, declared by a signature or inferred. A program in which a
+term's type cannot be determined, or in which a term does not check
+against its type, is rejected before any code is generated. Every
+definition is checked where it is defined, whether or not anything uses
+it, in the program's modules and in every module they import: one that no
+use at any type could make well-typed, such as `bad x = add x "x"` with
+no `Integral Str`, or a value that needs itself, is an error. A module may
+hold generic terms whose types are not yet resolved; no generic type
+remains in the exported commands of a built program (CMD-2). The check
+covers morloc code; that a sourced function matches its declared type is
+trusted (SRC-3).

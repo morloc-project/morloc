@@ -30,14 +30,10 @@ record LL where
   head :: Int
   tail :: ?LL
 
-record Py => LL = "dict"
-
 record Node where
   ident :: Int
   chain :: Pair Int
   left  :: ?Node
-
-record Py => Node = "dict"
 
 -- Non-recursive tuple alias whose second slot is the recursive LL
 -- record. The OUTER alias is plain; the recursion is one level in.

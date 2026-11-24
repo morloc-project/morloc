@@ -1,7 +1,7 @@
 -- A deep recursive value (depth 100000) on the paths that carry it
 -- through a Rust pool: saved as a data packet and loaded back, a rose
 -- tree whose recursion runs through a list arm, and a user record whose
--- cycle field is the runtime's deferred-release holder, printed by the
+-- cycle field is a plain Box released by its own Drop, printed by the
 -- nexus and parsed back from stdin. Every morloc function is tail
 -- recursive, so the values are built and consumed by native loops; what
 -- is pinned is the runtime and the generated destructors.
@@ -44,7 +44,7 @@ kidsSpine acc kids
 caterpillar :: Int -> Int
 caterpillar n = roseSpine 0 (caterpillarHelp n (Rose 1 []))
 
--- A user struct whose cycle field is `Option<RecBox<LL>>`.
+-- A user struct whose cycle field is `Option<Box<LL>>`.
 record LL where
   head :: Int
   tail :: ?LL

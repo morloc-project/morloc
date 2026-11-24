@@ -1,0 +1,16 @@
+-- One instance written in two declarations under different variable names: its
+-- pack and unpack are still one Packable instance, so the value is converted.
+module main (g)
+import root-py
+
+newtype Vec (n :: Nat) a = List a
+type Py => Vec n a = "V" n a
+
+instance Packable [a] (Vec n a) where
+  source Py from "m.py" ("pk" as pack)
+
+instance Packable [b] (Vec m b) where
+  source Py from "m.py" ("un" as unpack)
+
+source Py from "m.py" ("same" as g)
+g :: Vec 2 Int -> Vec 2 Int

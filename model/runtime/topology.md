@@ -47,20 +47,24 @@ nexus (one per program run, or one long-running daemon / MCP server)
 - Fork pools (Python, R) count the waits on another pool in progress (a
   foreign call's round trip, a channel read or write that sleeps) and fork a
   worker when that count reaches the live workers; a computing worker makes
-  calls queue. Idle workers accept on the pool's socket themselves (NET-9).
-- Surplus idle workers retire after 60 s (`MORLOC_POOL_IDLE_TIMEOUT_MS`);
-  R workers never retire (SHM-8).
+  calls queue. Idle workers accept on the pool's socket themselves; an
+  idle worker holds the last connection it kept, and revokes it when it
+  takes another (NET-9).
+- Surplus idle workers retire after 60 s (`MORLOC_POOL_IDLE_TIMEOUT_MS`),
+  in a fork pool only while fewer waits are in progress than the workers
+  that would be left (NET-9); R workers never retire (SHM-8).
 - Daemon request workers: number of pools + 4, clamped to [4, 32].
 
 ## Communication
 
 - A unix-socket connection carries one request packet and then one reply
-  packet at a time. A caller thread keeps one per C++ or Rust pool for its
-  next call (NET-7); a call into Python or R takes a connection of its own.
+  packet at a time. A caller thread keeps one per pool for its next call
+  (NET-7); a fork worker that takes another connection revokes the one it
+  held, and the caller retries a call it revoked (NET-9).
   Small values (at most the inline threshold, 64 KiB by default) travel
   inline; large ones as a relative pointer into shared
   memory, or, when shared memory is disabled, as the path of a temporary
-  file.
+  file (tables always use shared memory).
 - A command that calls no foreign function is pure: the nexus evaluates it
   itself and starts no pool.
 - A one-shot CLI run starts only the pools its command can reach; the

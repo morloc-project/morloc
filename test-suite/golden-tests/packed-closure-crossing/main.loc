@@ -78,7 +78,6 @@ record Ops where
   f :: Wrapped -> Int
 
 record Rust => Ops = "Ops"
-record Py => Ops = "dict"
 
 tickRust :: <IO> Int
 useOps :: Ops -> Wrapped -> Int

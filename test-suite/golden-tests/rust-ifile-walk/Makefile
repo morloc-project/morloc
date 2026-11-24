@@ -8,6 +8,9 @@ all:
 	./nexus testIntSlice    "/tmp/rust-ifw-slice.dat"  >> obs.txt 2>> obs.err
 	./nexus testIntTail     "/tmp/rust-ifw-tail.dat"   >> obs.txt 2>> obs.err
 	./nexus testRecordField "/tmp/rust-ifw-rec.dat"    >> obs.txt 2>> obs.err
+	./nexus testIndexInPool "/tmp/rust-ifw-pidx.dat"   >> obs.txt 2>> obs.err
+	./nexus testVarIndexInPool "/tmp/rust-ifw-pvar.dat" >> obs.txt 2>> obs.err
+	./nexus testIndexFieldInPool "/tmp/rust-ifw-pfld.dat" >> obs.txt 2>> obs.err
 	rm -f /tmp/rust-ifw-*.dat
 
 clean:

@@ -4,7 +4,8 @@ Each pool puts the runtime binder (rustmorloc, cppmorloc and the libmorloc
 C API, rmorloc, pymorloc) and its own generated names in the scope where
 user sources live, so a user file can collide with them. Spec gap:
 model/language/sources.md says nothing about which names a sourced file
-may use.
+may use. Python is the exception: each sourced file is its own module and
+calls are qualified (`__morloc_src_<name>.f`).
 
 - [read] Rust: sourced files are `include!`d at the crate root, where
   generated code still names the standard prelude (`Vec`, `Option`,
@@ -33,30 +34,25 @@ may use.
   exporting one is picked by the pool's calls through symbol interposition.
   Needs a ruling: rename the exports to a reserved prefix (an ABI change) or
   list them as reserved names.
-- [read] Manifold locals and sourced names share a frame: a manifold's
-  formals and temporaries are `n<N>`, `s<N>`, `helper<N>` (Grammars/Common.hs
-  argNamer and friends), and R, Python and Rust call sourced functions by
-  their bare or module-qualified name in that frame. An R or Rust sourced
-  function named `n3` is shadowed by a manifold parameter `n3`, silently
-  when it is passed as a value. Needs reserved local names per language, from the same namer
-  machinery as the manifold names.
+- [reproduced, 2026-11-04] C++ manifold locals and sourced names share a
+  frame: C++ locals are still `n<N>`, `s<N>`, `helper<N>`, loop `i<N>`/`u<N>`
+  and fixed binders (`__sock`, `__origin`, `__o`, `__c`, `__mlc_*`, `arm`,
+  `mlc_w`, `mlc_raw`), and C++ calls sources by bare name: sources named
+  `n0`/`n1` give "'n1' cannot be used as a function", silently a call of
+  the local when it is a `std::function` of the same signature. Python, R
+  and Rust locals take their reserved manifold prefix (Cpp.hs `cppLocals`
+  is empty). Waits on ruling R1 (the C++ reserved prefix).
 - [read] Generated R code calls base functions (`c`, `list`, `lapply`,
   `paste0`, `tryCatch`, ...) by name from the global environment, where a
   user source may have redefined them, as R's own code would see them.
   Needs a ruling: the user's responsibility, a load-time check that none
   is redefined, or reserved aliases.
-- [read] Python: a builtin source (no `from` path) is emitted as a bare
-  name in pool.py's module scope, which holds the pool's own names
-  (`dispatch`, `global_state`, `mlc_*`), so `source Py ("dispatch" as d)`
-  binds d to the pool's dispatch table rather than failing.
 - [reproduced, 2026-10-21] R's JIT compiles a small function only where
   its environment is the global one, so the R runtime's functions in
   `.__morloc` run interpreted (about 0.5 us more per call than compiled)
   except the twelve pool.R compiles at load (about 20 ms per pool start).
   Shipping the runtime as an installed R package would have R byte-compile
   its namespace once, at install.
-- Python files are isolated: each sourced file is its own module and calls
-  are qualified (`__morloc_src_<name>.f`).
 - [read, 2026-10-23] C++ declares no reserved prefixes or names in its
   lang.yaml, so SRC-6's build-time check covers nothing for C++: manifolds
   are `m<N>`/`m<N>_remote` (not the `__mm_` prefix), and the pool's macros
@@ -64,6 +60,28 @@ may use.
   `MLC_INTERNAL_ABORT`, `MLC_CATCH_FORCED_UNWIND`) expand a sourced function
   of the same name. Clean part: rename C++ manifolds to `__mm_<N>`, list the
   pool's prefixes and names, and extend ManifoldNameTests to C++ with a
-  check that every global the pool templates define is covered. The R list
-  misses `.morloc.source`, `.morloc.pooldir`, `.morloc.libdir` (`.morloc_`
-  does not match `.morloc.`).
+  check that every global the pool templates define is covered.
+
+  A C++ source with no file resolves to pool.cpp's own functions
+  (`interweave_strings`, ...); Python qualifies such a source through
+  `builtins` (ldBuiltinQualifier), C++ has no equivalent yet.
+- [reproduced 2026-11-02] SRC-6 checks only the names a program sources, but
+  a C++ header or an `include!`d Rust file puts its whole content in the
+  pool's scope. The 91 morloc.h macros the precompiled header brings in
+  (`FREE`, `ERRMSG`, `BUFFER_SIZE`, ...) break a user header that declares
+  `static const int BUFFER_SIZE = 8;`; a user template `to_voidstar` is
+  called by the pool (better overload match) and aborts it (Bn-5); a
+  crate-root `pub use Strand::*` with a `None` variant breaks every Rust
+  pool (Bn-6); generated C++ locals (`__o`, `mlc_w`) are outside every
+  reserved prefix. Cpp.hs reads a manifold's id back from its
+  name (`MT.drop 1`, `manifoldIdOf`), so renaming manifolds needs the id
+  passed through first. The C++ prefix needs a ruling (briefs/B14-B15.md).
+- [read 2026-11-02] Generated binders outside every reserved prefix: R
+  `mlc_clo` (data/lang/r/lang.yaml:98 `ldPartialTemplate`); Rust
+  `mlc_<n>_<j>` (Rust.hs:594) and `__a<i>` (Rust.hs:1127, :1319); C++
+  `e` (Cpp.hs:1466), `mlc_r` (:2436) and `__a<i>` (:2034). Users already
+  source `mlc_*` names (goldens string-encoding, native-morloc-3). The fix
+  is the per-language local prefix (LowerConfig `lcLocalPrefix`) for these
+  too, and a test that extracts every binder from generated pool text and
+  checks it is reserved; a namer-output test alone misses these. Qualifying sourced calls instead fails in R (root-r sources
+  base `c`, not in the global environment) and for Rust prelude names.

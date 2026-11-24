@@ -118,8 +118,7 @@ pub(crate) unsafe fn pool_dispatch_packet(
         // left open -- e.g. an exception unwound past @close on a broken
         // pipe. Without this, the claim persists in the nexus-scoped SHM
         // registry and every later invocation fails "@stdout already open"
-        // while the (daemon-mode) pool stays alive. Cheap on the common
-        // no-stdio path: a single thread-local read (see the fn's gate).
+        // while the (daemon-mode) pool stays alive.
         crate::stream::pool_reclaim_stdio_after_dispatch();
 
         if result.is_null() {
@@ -310,7 +309,7 @@ pub(crate) fn worker_idle_timeout() -> std::time::Duration {
 // STATE-7
 const WORKER_STACK_SIZE: usize = 8 << 20;
 
-fn worker_stack_size() -> usize {
+pub(crate) fn worker_stack_size() -> usize {
     let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: STATE-7: getrlimit only writes the struct it is given.
     let known = unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut lim) } == 0;
@@ -328,10 +327,10 @@ fn worker_stack_size() -> usize {
 const WORKER_ALTSTACK_SIZE: usize = 256 << 10;
 
 // A worker's alternate signal stack, released when the worker exits.
-struct AltStack { base: *mut c_void }
+pub(crate) struct AltStack { base: *mut c_void }
 
 impl AltStack {
-    unsafe fn install() -> Option<AltStack> {
+    pub(crate) unsafe fn install() -> Option<AltStack> {
         let base = libc::mmap(
             ptr::null_mut(), WORKER_ALTSTACK_SIZE,
             libc::PROT_READ | libc::PROT_WRITE,
@@ -455,7 +454,7 @@ unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig, kept:
         return Served::Closed;
     }
 
-    let keep = crate::ipc_ffi::take_keep_bit(data);
+    let keep = crate::ipc_ffi::request_asked_keep(client_fd);
     let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
     libc::free(data as *mut c_void);
     libc::fflush(ptr::null_mut()); // flush stdout
@@ -652,29 +651,54 @@ unsafe fn serve(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const 
 /// allocation, so a value set there is already in force and this leaves it
 /// alone.
 #[cfg(target_env = "gnu")]
-unsafe fn tune_allocator() {
+pub(crate) unsafe fn tune_allocator(heap: AllocatorTuning) {
     if std::env::var_os("MORLOC_MALLOC_TUNING").as_deref() == Some(std::ffi::OsStr::new("off")) {
         return;
     }
-    // Comfortably above a default 16 MiB sub-packet, so a batch and the values
-    // built from it stay on the heap and are reused rather than remapped.
-    const MMAP_THRESHOLD: libc::c_int = 32 * 1024 * 1024;
-    const TRIM_THRESHOLD: libc::c_int = 64 * 1024 * 1024;
-    const TOP_PAD: libc::c_int = 64 * 1024 * 1024;
-    if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
-        libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD);
-    }
-    if std::env::var_os("MALLOC_TRIM_THRESHOLD_").is_none() {
-        libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD);
-    }
-    if std::env::var_os("MALLOC_TOP_PAD_").is_none() {
-        libc::mallopt(libc::M_TOP_PAD, TOP_PAD);
-    }
+    let set = |env: &str, param: libc::c_int, value: Option<libc::c_int>| {
+        if let Some(v) = value {
+            if std::env::var_os(env).is_none() {
+                libc::mallopt(param, v);
+            }
+        }
+    };
+    set("MALLOC_MMAP_THRESHOLD_", libc::M_MMAP_THRESHOLD, heap.mmap_threshold);
+    set("MALLOC_TRIM_THRESHOLD_", libc::M_TRIM_THRESHOLD, Some(heap.trim_threshold));
+    set("MALLOC_TOP_PAD_", libc::M_TOP_PAD, Some(heap.top_pad));
 }
 
 /// Only glibc exposes these knobs; every other allocator keeps its own policy.
 #[cfg(not(target_env = "gnu"))]
-unsafe fn tune_allocator() {}
+pub(crate) unsafe fn tune_allocator(_heap: AllocatorTuning) {}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AllocatorTuning {
+    pub mmap_threshold: Option<libc::c_int>,
+    pub trim_threshold: libc::c_int,
+    pub top_pad: libc::c_int,
+}
+
+const STREAMING_POOL_HEAP: AllocatorTuning = AllocatorTuning {
+    mmap_threshold: Some(32 * 1024 * 1024),
+    trim_threshold: 64 * 1024 * 1024,
+    top_pad: 64 * 1024 * 1024,
+};
+
+pub(crate) fn fork_pool_heap() -> Option<AllocatorTuning> {
+    const DEFAULT: libc::c_int = 16 * 1024 * 1024;
+    let pad = match std::env::var("MORLOC_FORK_HEAP_PAD") {
+        Ok(v) if v.trim() == "off" => return None,
+        Ok(v) => match v.trim().parse::<libc::c_int>() {
+            Ok(n) if n >= 0 => n,
+            _ => {
+                eprintln!("morloc: ignoring MORLOC_FORK_HEAP_PAD={v:?}: not a byte count or `off`");
+                DEFAULT
+            }
+        },
+        Err(_) => DEFAULT,
+    };
+    Some(AllocatorTuning { mmap_threshold: None, trim_threshold: pad, top_pad: pad })
+}
 
 pub(crate) unsafe fn pool_main(
     argc: i32,
@@ -682,7 +706,9 @@ pub(crate) unsafe fn pool_main(
     config: *mut PoolConfig,
 ) -> i32 {
     crate::panic_ffi::install(None);
-    tune_allocator();
+    tune_allocator(STREAMING_POOL_HEAP);
+    // WPOOL-8: before any worker exists, the mask the workers get.
+    crate::par_pool::record_user_mask();
     if argc != 4 {
         let prog = if argc > 0 { CStr::from_ptr(*argv).to_string_lossy() } else { "pool".into() };
         eprintln!("Usage: {} <socket_path> <tmpdir> <shm_basename>", prog);

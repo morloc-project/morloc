@@ -1,0 +1,18 @@
+-- FMT-10: a call packet read from a file (call-packet mode) has every
+-- argument read as data from outside. An inline argument holding a Str
+-- that is not text, which a pool would read in place as the program's own,
+-- fails as data read from outside; the same call with text succeeds.
+module main (bad, good, count)
+
+import root-cpp
+
+source Cpp from "strs.hpp" ("bad", "good", "count")
+
+--' A list whose second Str is not UTF-8
+bad :: Int -> [Str]
+
+--' A list of two Strs
+good :: Int -> [Str]
+
+--' The number of Strs in a list
+count :: [Str] -> Int

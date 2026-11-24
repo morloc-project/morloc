@@ -1,0 +1,37 @@
+-- GEN-14: a field whose wire form has a fixed size (`Half` as an `F64`) or is
+-- an integer held inline (`Tenths` as an `Int`) is converted once, where it
+-- is written: saving a list converts each field once, and the values load
+-- back. Rust.
+module main (roundTrip)
+
+import root-rust
+
+newtype Tenths = Int
+type Rust => Tenths = "f64"
+
+instance Packable Int Tenths where
+  source Rust from "pk.rs" ("packTenths" as pack, "unpackTenths" as unpack)
+
+newtype Half = F64
+type Rust => Half = "i32"
+
+instance Packable F64 Half where
+  source Rust from "pk.rs" ("packHalf" as pack, "unpackHalf" as unpack)
+
+record R where
+  t :: Tenths
+  h :: Half
+  n :: Int
+
+source Rust from "pk.rs" ("mk", "unpacks", "summary")
+mk :: Int -> [R]
+unpacks :: Int -> Int
+summary :: [R] -> [Int]
+
+roundTrip :: Str -> Int -> <IO> [Int]
+roundTrip p k = do
+  let xs = mk k
+  s <- @save 0 p xs
+  let calls = unpacks 0
+  r <- @load p :: <IO> (Try Str [R])
+  match r | (Ok ys) = concat [[calls], summary ys] | (Err e) = []

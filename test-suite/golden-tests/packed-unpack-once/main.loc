@@ -1,0 +1,42 @@
+-- A packed value whose unpacked form has parts is unpacked once, not once
+-- per part read: `Outer` unpacks to a list of `Inner`, `P` to a tuple of
+-- them, in C++ and Rust. The unpackers of `Outer` and `P` log each call to
+-- calls.log.
+module main (mk, mkP, mkPR)
+
+import root-cpp
+import root-rust
+
+newtype Inner = Int
+type Cpp => Inner = "double"
+type Rust => Inner = "f64"
+
+instance Packable Int Inner where
+  source Cpp from "p.hpp" ("packInner" as pack, "unpackInner" as unpack)
+  source Rust from "p.rs" ("pack_inner" as pack, "unpack_inner" as unpack)
+
+newtype Outer = [Inner]
+type Cpp => Outer = "outer_t"
+
+instance Packable [Inner] Outer where
+  source Cpp from "p.hpp" ("packOuter" as pack, "unpackOuter" as unpack)
+
+newtype P = (Inner, Inner, Inner)
+type Cpp => P = "p_t"
+type Rust => P = "PT"
+
+instance Packable (Inner, Inner, Inner) P where
+  source Cpp from "p.hpp" ("packP" as pack, "unpackP" as unpack)
+  source Rust from "p.rs" ("pack_p" as pack, "unpack_p" as unpack)
+
+source Cpp from "p.hpp" ("mk", "mkP")
+source Rust from "p.rs" ("mk_p" as mkPR)
+
+--' Make an Outer of n elements
+mk :: Int -> Outer
+
+--' Make a P in C++
+mkP :: Int -> P
+
+--' Make a P in Rust
+mkPR :: Int -> P

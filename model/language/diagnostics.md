@@ -4,6 +4,7 @@ The compiler's error contract: never crash, every rejection located, warnings. P
 
 ### DIAG-1 The compiler never crashes
 Intent: proposed
+Tests: spec-diag-1-1, spec-diag-1-2
 Code: deviates (issues/diagnostics-docs.md)
 
 On any input, the compiler either builds the program or rejects it with a
@@ -11,7 +12,7 @@ diagnostic. An internal error, an uncaught exception or a crash is a defect.
 
 ### DIAG-2 Every rejection names a source location
 Intent: proposed
-Tests: spec-diag-2-1
+Tests: spec-diag-2-1, spec-diag-2-2, spec-diag-2-3
 Code: deviates (issues/programs.md)
 
 A rejection names the file, line and column of the construct that caused

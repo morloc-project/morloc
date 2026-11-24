@@ -1,0 +1,88 @@
+--- emptyCpp --show ---
+cpp 0:
+--- emptyCpp --count ---
+0
+--- emptyCpp --slice ---
+[]
+--- emptyPy --show ---
+py 0:
+--- emptyPy --count ---
+0
+--- emptyPy --slice ---
+[]
+--- emptyR --show ---
+r 0:
+--- emptyR --count ---
+0
+--- emptyR --slice ---
+[]
+--- emptyRust --show ---
+rust 0:
+--- emptyRust --count ---
+0
+--- emptyRust --slice ---
+[]
+--- tenCpp --show ---
+cpp 10: 0 1 2 3 4 5 6 7 8 9
+--- tenCpp --count ---
+10
+--- tenCpp --slice ---
+[1,2,3]
+--- tenCpp --other ---
+py 3: 1 2 3
+--- tenPy --show ---
+py 10: 0 1 2 3 4 5 6 7 8 9
+--- tenPy --count ---
+10
+--- tenPy --slice ---
+[1,2,3]
+--- tenPy --other ---
+cpp 3: 1 2 3
+--- tenR --show ---
+r 10: 0 1 2 3 4 5 6 7 8 9
+--- tenR --count ---
+10
+--- tenR --slice ---
+[1,2,3]
+--- tenR --other ---
+py 3: 1 2 3
+--- tenRust --show ---
+rust 10: 0 1 2 3 4 5 6 7 8 9
+--- tenRust --count ---
+10
+--- tenRust --slice ---
+[1,2,3]
+--- tenRust --other ---
+py 3: 1 2 3
+--- failCpp --mark ---
+OK
+1
+--- failCpp --count ---
+OK
+1
+--- failPy --mark ---
+OK
+1
+--- failPy --count ---
+OK
+1
+--- failR --mark ---
+OK
+1
+--- failR --count ---
+OK
+1
+--- failRust --mark ---
+OK
+1
+--- failRust --count ---
+OK
+1
+--- lateCpp --show ---
+OK
+--- latePy --show ---
+OK
+--- tenArgCpp 5 --plus ---
+[5,10]
+OK
+0

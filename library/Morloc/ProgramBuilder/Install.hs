@@ -50,8 +50,7 @@ import System.IO (hPutStrLn, stderr)
 -- | Finalize an installed program. The build step has already written
 -- @manifest.json@, the pools, and the launcher wrapper(s) into installDir.
 -- This function mirrors the package's files from its root into installDir
--- and copies the CLI wrapper to bin/. Program discovery reads
--- @exe/<name>/manifest.json@ in place, so no separate manifest copy is made.
+-- and copies the CLI wrapper to bin/.
 installProgram ::
   -- | configHome (e.g. ~/.local/share/morloc)
   String ->

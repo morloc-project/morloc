@@ -1,0 +1,25 @@
+-- STRM-5: a fold whose terms obey the laws answers the sequential fold
+-- for any split. Four Python threads put batches t*100 .. t*100+b for b
+-- in 0..4; the step counts each element's last digit into its accumulator
+-- in place, and the counts are those of one sequential fold.
+
+module main (counts)
+
+import root-py
+import map-py (Map)
+
+source Py from "impl.py"
+  ( "produce_threads" as threadsP, "zero_counts" as zeroCounts, "count_into" as countInto
+  , "merge_counts" as mergeCounts, "show_counts" as showCounts )
+
+threadsP :: ([I64] -> <IO> ()) -> <IO> ()
+zeroCounts :: Map Int Int
+countInto :: Map Int Int -> [I64] -> Map Int Int
+mergeCounts :: Map Int Int -> Map Int Int -> Map Int Int
+--' The counts
+showCounts :: Map Int Int -> Str
+
+--' Count last digits over four threads
+--' @render --n=showCounts @fold=countInto @init=zeroCounts @combine=mergeCounts
+counts :: <IO> (Collect I64)
+counts = @collect threadsP

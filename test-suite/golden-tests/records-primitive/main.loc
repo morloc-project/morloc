@@ -12,8 +12,6 @@ record Foo where
   things :: [Str]
   size :: Int
 record Cpp => Foo = "foo_t"
-record R   => Foo = "list"
-record Py  => Foo = "dict"
 
 source Py from "foo.py" ("addFlooz" as addFloozPy)
 source Cpp from "foo.hpp" ("addFlooz" as addFloozCpp)

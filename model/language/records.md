@@ -42,7 +42,7 @@ anonymous records, which pure nexus code, getters and views use.
 ### REC-5 Field access and update are getter and setter patterns
 Intent: proposed
 Tests: spec-rec-5-1, spec-rec-5-2, spec-rec-5-3, spec-rec-5-4, spec-rec-5-5, spec-rec-5-6, spec-rec-5-7, spec-rec-5-8
-Code: conforms 2026-11-01
+Code: deviates (issues/typecheck.md)
 
 `.f r` is the value of field `f` of `r`. `.(.f = e) r` is a new record equal
 to `r` except that `f` is `e`; `r` itself is unchanged. Naming a field the
@@ -56,3 +56,18 @@ Code: conforms 2026-10-21
 `record L => R = "name"` names the representation of `R` in language `L`.
 Field names and types come from the general declaration and are not
 repeated. What the named container must provide is in native-types.md.
+
+### REC-7 A user-written record struct holds exactly its record's fields
+Intent: ruled 2026-11-18
+Tests: spec-rec-7-1
+Code: conforms 2026-11-18
+
+In a compiled language, the struct a user-written form names
+(`record Rust => R = "S"`) has exactly the record's fields, and a value of
+it is built from them alone: no other field is filled. A type parameter no
+field of the record uses is usually not passed to the struct
+(`record Rust => Loc k = "LocT"`); a struct that takes it uses it in a
+field's type (through a trait, `<A as Kind>::Id`), since Rust refuses an
+unused parameter and a marker field (`PhantomData`) would be a field the
+record lacks.
+

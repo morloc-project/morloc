@@ -16,6 +16,7 @@ module UI
   , InitCommand (..)
   , InstallCommand (..)
   , TypecheckCommand (..)
+  , TypesCommand (..)
   , DumpCommand (..)
   , ListCommand (..)
   , ListKind (..)
@@ -27,6 +28,7 @@ module UI
   , LangSupportCommand (..)
   , EnvspecCommand (..)
   , VersionsCommand (..)
+  , LibraryCommand (..)
   ) where
 
 import Data.Int (Int64)
@@ -60,6 +62,8 @@ data CliCommand
   | CmdLangSupport LangSupportCommand
   | CmdEnvspec EnvspecCommand
   | CmdVersions VersionsCommand
+  | CmdLibrary LibraryCommand
+  | CmdTypes TypesCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -77,6 +81,8 @@ cliParser =
         <> langSupportSubcommand
         <> envspecSubcommand
         <> versionsSubcommand
+        <> librarySubcommand
+        <> typesSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -93,6 +99,7 @@ data MakeCommand = MakeCommand
   , makeForce :: Bool
   , makeInclude :: [String]
   , makeUnsafeSkipNullCheck :: Bool
+  , makeUnsafeSkipUtf8Check :: Bool
   , makeInlineSize :: Maybe Int64
   , makeNoShm :: Bool
   , makeTmpdir :: Maybe String
@@ -119,6 +126,7 @@ makeCommandParser =
     <*> optMakeForce
     <*> optMakeInclude
     <*> optUnsafeSkipNullCheck
+    <*> optUnsafeSkipUtf8Check
     <*> optInlineSize
     <*> optNoShm
     <*> optTmpdir
@@ -151,6 +159,34 @@ data VersionsCommand = VersionsCommand
 
 versionsCommandParser :: Parser VersionsCommand
 versionsCommandParser = pure VersionsCommand
+
+-- | @library add <library> <host:owner>@ records a library's origin (PKG-5);
+-- @library list@ prints every recorded origin.
+data LibraryCommand
+  = LibraryAdd String String
+  | LibraryList
+
+librarySubcommand :: Mod CommandFields CliCommand
+librarySubcommand =
+  command
+    "library"
+    ( info
+        ( CmdLibrary
+            <$> hsubparser
+              ( command
+                  "add"
+                  ( info
+                      ( LibraryAdd
+                          <$> argument str (metavar "LIBRARY" <> help "Library name, e.g. weena")
+                          <*> argument str (metavar "ORIGIN" <> help "Where its modules live, e.g. github:weena")
+                      )
+                      (progDesc "Record where a library's modules come from")
+                  )
+                  <> command "list" (info (pure LibraryList) (progDesc "List the libraries and their origins"))
+              )
+        )
+        (progDesc "Record and list library origins")
+    )
 
 versionsSubcommand :: Mod CommandFields CliCommand
 versionsSubcommand =
@@ -347,6 +383,32 @@ typecheckSubcommand =
 dumpSubcommand :: Mod CommandFields CliCommand
 dumpSubcommand =
   command "dump" (info (CmdDump <$> makeDumpParser) (progDesc "Dump parsed code"))
+
+-- | @types@ writes the generated type definitions of a program (GEN-13).
+data TypesCommand = TypesCommand
+  { typesConfig :: String
+  , typesVanilla :: Bool
+  , typesVerbose :: Int
+  , typesOut :: String
+  , typesLang :: Maybe String
+  , typesScript :: String
+  }
+
+makeTypesParser :: Parser TypesCommand
+makeTypesParser =
+  TypesCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> optVerbose
+    <*> strOption (long "out" <> short 'o' <> metavar "DIR" <> help "The directory to write the generated types under, one subdirectory per language")
+    <*> optional (strOption (long "lang" <> metavar "LANG" <> help "Write only this language's types (cpp, rust or py)"))
+    <*> optScript
+
+typesSubcommand :: Mod CommandFields CliCommand
+typesSubcommand =
+  command
+    "types"
+    (info (CmdTypes <$> makeTypesParser) (progDesc "Write a program's generated type definitions for use outside morloc"))
 
 data DumpCommand = DumpCommand
   { dumpConfig :: String
@@ -666,6 +728,19 @@ optDebugTrace =
                 ++ "$MORLOC_DEBUG_DIR (or $MORLOC_RUN_DIR/debug if --log-dir "
                 ++ "is set). Zero cost on the happy path; opt-in only for "
                 ++ "diagnostic builds."
+            )
+    )
+
+optUnsafeSkipUtf8Check :: Parser Bool
+optUnsafeSkipUtf8Check =
+  switch
+    ( long "unsafe-skip-utf8-check"
+        <> help
+            ( "Disable the check that a Str leaving a C++, R or Python pool "
+                ++ "is valid UTF-8. Unsafe: bytes that are not text then "
+                ++ "pass through raw output unchanged, and fail later, far "
+                ++ "from where they were made, in JSON output or in a "
+                ++ "language that decodes text."
             )
     )
 

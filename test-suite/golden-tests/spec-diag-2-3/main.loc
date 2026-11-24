@@ -1,0 +1,5 @@
+-- Spec DIAG-2: a re-exported term with no implementation is located at
+-- the export of everything.
+module main (*)
+
+import .a

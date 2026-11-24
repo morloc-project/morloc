@@ -1,0 +1,5 @@
+-- GEN-5: two modules whose generated types would share one module path
+-- (`geo-util` and `geo_util`, both `_local.geo_util`) are refused.
+module main (fa, fb)
+import .geo-util (fa)
+import .geo_util (fb)

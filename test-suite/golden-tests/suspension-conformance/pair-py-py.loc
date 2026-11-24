@@ -12,9 +12,6 @@ record Holder where
 record Caller where
   inc :: Int -> <IO> Int
 
-record Py => Holder = "dict"
-record Py => Caller = "dict"
-
 source Py from "host.py"
   ( "tick" as tickH
   , "mark" as markH

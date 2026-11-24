@@ -1,0 +1,100 @@
+-- OWN-7, COPY-7: a @fold whose step is a sourced function taking the
+-- accumulator by value is given the accumulator, never a copy of it. The
+-- step counts the calls that receive a fresh copy (one without the spare
+-- capacity it reserves); only each slot's own copy of init is one. Two
+-- producer threads hold two slots at once, so combine runs too, and adds
+-- 100 for each fresh value it is given. A step written in morloc over a
+-- sourced one passes the accumulator on as it was given.
+module main (foldRs, foldCpp, foldRs2, foldCpp2, foldAny, foldMorlocRs, foldMorlocCpp
+  , foldCombRs, foldCombCpp )
+
+import root-rust
+import root-cpp
+
+source Rust from "f.rs"
+  ( "produce" as produceR, "produce2" as produce2R, "init_acc" as initR
+  , "step" as stepR, "comb" as combR, "fresh" as freshR, "step_any" as stepAny, "bump" as bumpR )
+
+source Cpp from "f.hpp"
+  ( "produce" as produceC, "produce2" as produce2C, "init_acc" as initC
+  , "step" as stepC, "comb" as combC, "fresh" as freshC, "bump" as bumpC )
+
+produceR :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produce2R :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+stepAny :: b -> [I64] -> b
+bumpR :: [I64] -> [I64]
+initR :: [I64]
+stepR :: [I64] -> [I64] -> [I64]
+combR :: [I64] -> [I64] -> [I64]
+--' Calls that received a fresh copy
+freshR :: [I64] -> I64
+
+produceC :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+produce2C :: I64 -> ([I64] -> <IO> ()) -> <IO> ()
+bumpC :: [I64] -> [I64]
+initC :: [I64]
+stepC :: [I64] -> [I64] -> [I64]
+combC :: [I64] -> [I64] -> [I64]
+--' Calls that received a fresh copy
+freshC :: [I64] -> I64
+
+--' Fold n batches in Rust
+--' @with --n=freshR @fold=stepR @init=initR @combine=combR
+foldRs :: I64 -> <IO> (Collect I64)
+foldRs n = @collect (produceR n)
+
+--' Fold n batches in C++
+--' @with --n=freshC @fold=stepC @init=initC @combine=combC
+foldCpp :: I64 -> <IO> (Collect I64)
+foldCpp n = @collect (produceC n)
+
+--' Fold n batches from two Rust threads
+--' @with --n=freshR @fold=stepR @init=initR @combine=combR
+foldRs2 :: I64 -> <IO> (Collect I64)
+foldRs2 n = @collect (produce2R n)
+
+--' Fold n batches from two C++ threads
+--' @with --n=freshC @fold=stepC @init=initC @combine=combC
+foldCpp2 :: I64 -> <IO> (Collect I64)
+foldCpp2 n = @collect (produce2C n)
+
+--' Fold n batches with a step generic in its accumulator
+--' @with --n=freshR @fold=stepAny @init=initR @combine=combR
+foldAny :: I64 -> <IO> (Collect I64)
+foldAny n = @collect (produceR n)
+
+--' A step written in morloc over the Rust step
+stepMR :: [I64] -> [I64] -> [I64]
+stepMR acc xs = stepR acc (bumpR xs)
+
+--' A step written in morloc over the C++ step
+stepMC :: [I64] -> [I64] -> [I64]
+stepMC acc xs = stepC acc (bumpC xs)
+
+--' Fold n batches with a Rust step written in morloc
+--' @with --n=freshR @fold=stepMR @init=initR @combine=combR
+foldMorlocRs :: I64 -> <IO> (Collect I64)
+foldMorlocRs n = @collect (produceR n)
+
+--' Fold n batches with a C++ step written in morloc
+--' @with --n=freshC @fold=stepMC @init=initC @combine=combC
+foldMorlocCpp :: I64 -> <IO> (Collect I64)
+foldMorlocCpp n = @collect (produceC n)
+
+--' A combine written in morloc, Rust
+combMR :: [I64] -> [I64] -> [I64]
+combMR a b = combR a b
+
+--' A combine written in morloc, C++
+combMC :: [I64] -> [I64] -> [I64]
+combMC a b = combC a b
+
+--' Fold from two Rust threads with a combine written in morloc
+--' @with --n=freshR @fold=stepMR @init=initR @combine=combMR
+foldCombRs :: I64 -> <IO> (Collect I64)
+foldCombRs n = @collect (produce2R n)
+
+--' Fold from two C++ threads with a combine written in morloc
+--' @with --n=freshC @fold=stepMC @init=initC @combine=combMC
+foldCombCpp :: I64 -> <IO> (Collect I64)
+foldCombCpp n = @collect (produce2C n)

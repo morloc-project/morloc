@@ -28,15 +28,6 @@ here touch locks and ownership: model first.
   path finishes it (as the kernel dropping the flock allowed before).
   Should the custodian also finish it on its own when the opener is gone,
   at the cost of other live writers of the handle?
-- [measured] Possible speedup (SLOT-11): appending an element with
-  nested pointers (`[[Str]]`, optionals of arrays) walks the flattened
-  element to move its relative pointers to its place in the buffer
-  (stream.rs `append_one_element`). A `[[Str]]` element costs 305 ns, of
-  which flattening is 100 ns (stream_bench_string_elements with
-  BENCH_DEEP=1, 2026-10-12); a `Str` element, which skips the walk
-  (`shallow_array_slots`), 135 ns with 41 ns flattening. Flattening at the
-  buffer offset would drop the walk, about 80 ns per nested element, but
-  the flattener re-reads pointers it wrote, so every pointer write changes.
 - Open question (SLOT-16): a stdout write returns once its batches are
   queued, so raw text a pool prints to its inherited stdout while it streams
   to `@stdout` can land inside a frame; before, a single-threaded pool's
@@ -63,7 +54,7 @@ here touch locks and ownership: model first.
   call.** [read] Gap in SLOT-15 ("its path reopens at once" covers only a
   user close). A nexus-evaluated daemon request that leaves an OStream open
   has it closed by the call sweep after the reply is sent
-  (daemon_ffi.rs `sweep_call`), which does not wait for the writer
+  (stream.rs `sweep_call`), which does not wait for the writer
   (SLOT-19). A next request that opens the same path before the custodian
   has finished it fails: the custodian takes the file lock non-blocking
   (stream.rs `lock_stream_file`). Open: should an open of a path whose
@@ -81,41 +72,30 @@ here touch locks and ownership: model first.
   file, ~18 us more per `@next`, which reading ahead does not remove.
 - **`@next` errors carry their prefix twice.** [reproduced, 0.109.0]
   `./rs producer | ./rs checkSum` (rust-stdio golden) prints "@next:
-  @next: stdin ended after 23 byte(s) ...".
+  @next: stdin ended after 23 byte(s) ...". [read] rustmorloc lib.rs:3864
+  wraps in `format!("@next: {}", ...)` an error that stream.rs:2820-2821
+  already formats as "@next: {}". The C++, Python and R wrappers are
+  unchecked.
 - **The daemon's remote path sets no call id and runs no sweep.** [read]
-  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2434-2435 and
-  2527-2528 set and sweep a call id on the pure path only; the remote
-  branch (2529 on) does neither, and stream.rs:2530-2534 claims "the nexus
+  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2545-2546 and
+  2638-2639 set and sweep a call id on the pure path only; the remote
+  branch (2640 on) does neither, and stream.rs:2500-2502 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.
-- **A reader cannot tell a finished stream file from an unfinished one.**
-  [reproduced 0.109.0, and read] Spec: SLOT-28 to SLOT-31 (streams.md,
-  "Reading a stream file's end"); SLOT-31 is open. An IStream reads every
-  complete batch and then reports the end of the stream in every end state
-  (SLOT-29), so a program cannot tell a clean close from a file its writer
-  never finished, and any count, statistic or copy over such a file is
-  silently partial. lib/biolib rnaseq R23 hit it, and keeps the check in a
-  separate `knownIssues` export.
-  - No footer: `saveSource 0 p` of batches [1,2,3], [4,5], [6] writes 689
-    bytes; with 300 bytes cut off, `@next` returns `Ok [[1,2,3]]`, `Ok
-    [[4,5]]`, `Ok []`; with 500 cut, `Ok []` at once. Only a cut inside a
-    sub-packet header errors. Cause: stream_format.rs:112 forward-scans
-    when no footer parses.
-  - Final footer, FAILED: the status is parsed (stream_format.rs ~563) and
-    never consulted, so a file whose writer died inside the slot lock reads
-    as a clean one. IFile opens it too (SLOT-30).
-  - Temporary footer: written both while a stream is being written, when a
-    reader may legitimately read it as it grows, and by a stream that will
-    never change again (discarded without `@close` with its unflushed
-    elements dropped, or a custodian that failed or was killed). The file
-    does not say which. The writing tree's registry knows while the tree
-    runs (the sweeps find open writers there); a reader on another machine
-    (a SLURM job on a shared filesystem) or after the tree has ended
-    cannot know.
-  - Standard input carries no footer at all: an empty sub-packet or EOF
-    ends the stream, so a writer that died mid-stream is not seen either.
+- **An IStream cannot tell a stream still being written from an abandoned
+  one.** [read] Spec: SLOT-29, SLOT-31 (open). FAILED files are refused and
+  a pipe that ends without a final footer fails (SLOT-29, fixed
+  2026-11-20), but an IStream of a file with no footer or a temporary
+  footer still reads its complete batches and ends cleanly, because both
+  states also occur while a writer is live: a file just opened has no
+  footer until its first batch, and the custodian overwrites its last
+  footer with each new batch. So a stream file cut short, or one whose
+  writer was killed or discarded it, still reads as complete through an
+  IStream and `@load` (IFile and `file --validate` refuse it).
+  lib/biolib rnaseq R23 hit it, and keeps the check in a separate
+  `knownIssues` export.
   Needs a TLA+ model before any fix (tla/, beside StreamQueue.tla): a
   writer (writing, flushed, closed, paused, discarded, failed, killed at
-  any step), the custodian's file states (SLOT-28's five, plus a
+  any step), the custodian's file states (SLOT-28's six, plus a
   sub-packet half-written), the registry's view of the writer (live, gone,
   unknown for another machine), and readers that open at any step and read
   to the end. Properties: a reader that reports a clean end has read every
@@ -148,8 +128,12 @@ here touch locks and ownership: model first.
   the depth caps of SLOT-32 and calls `wake_all(&done)` without moving
   `done`, so a producer that compared under the old cap and is about to
   sleep misses the wake and waits up to `WAIT_SLICE` (100 ms). Speed only.
-  A fix moves a word the producer sleeps on: a per-queue room word bumped
-  by both `finish` and `set_cap`, which changes the QueueWake model.
+  [read 2026-11-22] `CustodyQueue::stop` and `fail` wake `done` the same
+  way, so a producer in `wait_room_for` or `push_with` that checked before
+  the stop or failure sleeps out its slice too. A fix moves a word the
+  producer sleeps on: a per-queue room word bumped by `finish`, `set_cap`,
+  `stop` and `fail`, as the custodian's bell is (SLOT-22), which changes
+  the QueueWake model.
 - **The stream queue bound has no setting.** [read] Open ruling, SLOT-32.
   `write_behind::queue_bytes` is a fixed 1 GiB. A setting would be one more
   environment read, and source_rules.rs caps those (`MAX_ENV_READS`, 65)
@@ -177,9 +161,8 @@ here touch locks and ownership: model first.
   `drop_ended_slots` walks every attached handle per doorbell ring and per
   fork-pool retire check; `unlock_and_close` filters every locked
   descriptor per close; `custody::shares` revisits every hosted writer per
-  open, idle and end (quadratic in streams opened); `cell.rs` scans every
-  cell ever made per new cell and per dispatch end, and every thread per
-  fold step; `intrinsics.rs` scans every temp file per `@close` and per
+  open, idle and end (quadratic in streams opened); `fold.rs` scans every
+  thread's slot per fold put; `intrinsics.rs` scans every temp file per `@close` and per
   dispatch end; `arrow_shm.rs` `try_borrow` walks every live view per Arrow
   table returned and `borrow_forget` per view released (quadratic to
   release them all); `daemon_ffi.rs` counts remote jobs in the whole queue
@@ -187,19 +170,104 @@ here touch locks and ownership: model first.
   stack) would make each O(1).
 - **SLOT-28's table misstates where a PAUSED footer comes from.** [read,
   2026-10-21] The code writes a PAUSED footer (unflushed elements first)
-  from the daemon call sweep (stream.rs:5604-5630), a reopen after the
-  opener died (:3130), a stdio claim whose owner died (:2418),
-  `pool_reclaim_stdio_after_dispatch` (:5647), and stdout/stderr at the end
-  of a successful run (morloc-nexus main.rs:73-82). The table's one source,
+  from the daemon call sweep (stream.rs:6481, `sweep_matching`), a reopen
+  after the opener died (:3098, `finish_dead_openers_of`), a stdio claim
+  whose owner died (:2386, `try_reclaim_stale_stdio_claim`),
+  `pool_reclaim_stdio_after_dispatch` (:6517), and stdout/stderr at the end
+  of a successful run (morloc-nexus main.rs:76-83, `custody_finish`). The
+  table's one source,
   "a remote child returns the stream without @close", has no code path. So
   a stream left open by a daemon call ends PAUSED with its elements
   written, while at the end of a CLI run it is discarded (SLOT-13); SLOT-13
   and SLOT-19 give two endings without saying so.
 - **Idle slots per handle are capped at 16.** [read, 2026-10-21] Violates
-  SLOT-23 (one per processor): stream.rs:1098 `idle_slots_kept` clamps to
+  SLOT-23 (one per processor): stream.rs:1091 `idle_slots_kept` clamps to
   16. Speed only.
 - **SLOT-29 is silent on a present but corrupt footer.** [read,
-  2026-10-21] stream_format.rs:112 treats `Ok(None) | Err(_)` alike, so a
-  damaged footer silently falls back to a forward scan. Belongs with the
-  SLOT-31 ruling. `MORLOC_WRITE_BEHIND_DEPTH=0` is clamped to 1 silently
-  (custody.rs:191).
+  2026-10-21] stream_format.rs `parse_stream_file` records a damaged
+  footer, or a final footer whose sub-packet index fails
+  `check_subpacket_index`, as `footer_damaged` and falls back to a forward
+  scan (:116-130); `@open` as an IFile then refuses it as "not cleanly
+  closed (no final footer)" (stream.rs:2170-2175), without the reason.
+  Belongs with the SLOT-31 ruling. `MORLOC_WRITE_BEHIND_DEPTH=0` is
+  clamped to 1 silently (custody.rs:193).
+- **The index walk reads every sub-packet.** [read, 2026-11-01] `@concat`,
+  `@append`, and `@open` as an IFile in a debug build or with
+  `MORLOC_VERIFY_INDEX=1` (SLOT-30), check a final footer's index against
+  the sub-packets (stream_format.rs `verified_index`), at O(sub-packets):
+  one header page each, and for a zstd sub-packet a fresh decoder
+  (compression.rs `subpacket_elem_count`) that decodes up to a 128 KiB
+  block for 8 bytes (estimated 50-100 us each, not measured). Candidates:
+  reuse one decoder; a writer that ends the first block after the array
+  header; a cache of verified (dev, ino, size, ctime). Unmeasured.
+- **A footerless compressed stream's scanned element count is short.**
+  [read, 2026-11-01] `parse_stream_file`'s fallback takes `element_count`
+  from `forward_scan_subpackets`, which counts compressed sub-packets only
+  in `compressed_uncounted`. Readers of that count are not traced.
+- **A stdin batch block may be held until teardown.** [read, not
+  reproduced, 2026-11-13] If the nexus fails to write its response
+  (morloc-nexus stdio_server.rs ~311, ~455-460) or the pool fails reading
+  the body (stream.rs ~2803), the batch block it was handed is not
+  released until the shared memory is torn down.
+- **R stream decoders leak their block when decoding raises.** [read
+  2026-11-13] rmorloc.c morloc_mlc_next (3090), mlc_ifile_walk (3019),
+  mlc_next_frame (3117) and mlc_stream_layout (3142) call from_voidstar
+  without the shm_tracker that morloc_mlc_load uses (2809): an R
+  error while decoding (an R allocation failure, R_TRY_READ outside
+  runtime reads) leaks the SHM block and the parsed Schema;
+  mlc_next_frame also leaks the block when parse_schema fails after the
+  read. Violates SHM-4 (a reference is released once, by its holder): here
+  it is never released.
+  morloc_mlc_side_next (rmorloc.c ~3595, the fold side replay) has the
+  same shape: an R error in from_voidstar longjmps past its shfree.
+- **R `@next` and `@streamLayout` leak their parsed schema when the runtime
+  call fails.** [read, 2026-11-14] rmorloc.c morloc_mlc_next (3099-3100)
+  and morloc_mlc_stream_layout (3151-3152) parse the schema, then call
+  `R_TRY(mlc_next, ...)` / `R_TRY(mlc_stream_layout, ...)`; `R_TRY`
+  (rmorloc.c:113-117) raises the R error without freeing, so every failed
+  `@next` (end of a bad stdin, a closed handle) leaks one malloc'd Schema.
+  Parsing after the call, or `R_TRY_WITH(free_schema(schema), ...)`, frees
+  it.
+
+- **A second `@stderr` stream in one run loses the first.** [reproduced,
+  2026-11-18] Gap: no item says what several stdio opens in one run make
+  (SLOT-16 covers the queue only). In one-shot mode the stderr branch of
+  morloc-nexus/src/stdio_server.rs (~716-724) never resets `header_done`;
+  only stdout does, in `finish_logical_packet` (~1025). A command that
+  opens `@stderr :: OStream Int`, writes `[1, 2]`, closes, then opens it
+  again and writes `[3]` (`./nexus -f packet @ twoErr 2> err.pkt`) leaves a
+  file that `morloc-nexus file --validate` reads as final, closed, one
+  sub-packet, one element: the first stream's two elements are silently
+  dropped. Readers disagree: `@load` of the same file gives `[1,2]`, so the
+  second stream is what is lost there. The same shape on `@stdout` reads
+  back as two sub-packets, three elements (`[1,2,3]`). Repro (root-py, no sources):
+  `twoErr :: <IO> ()`, `twoErr = do { e <- @stderr :: <IO> OStream Int;
+  @write 0 e [1, 2]; @close e; e2 <- @stderr :: <IO> OStream Int;
+  @write 0 e2 [3]; @close e2 }`.
+- **Pool text shares fd 2 (and fd 1) with typed stdio streams.** [read,
+  2026-11-19] Gap: no item says who owns the process's stdio fds. Pools
+  inherit fd 1 and fd 2 and write raw text there (prints, tracebacks,
+  crash messages), while a typed `@stderr` (or `@stdout`) stream writes
+  packet frames to the same fd, so the text can land inside the packet
+  stream. Options weighed: (i) the nexus owns fd 1 and fd 2 and pool text
+  goes through a pipe it keeps separate (one extra copy; crash text must
+  still get out when the nexus is stuck); (ii) forbid typed `@stderr`;
+  (iii) allow typed `@stderr` only with a guarantee no text reaches fd 2.
+  The user leans to (i) but deferred it 2026-11-19: it needs a model
+  first. The second-`@stderr` entry above belongs with it.
+- **A closer that dies after its custodian saw a stop leaves the slot
+  until unmap.** [read 2026-11-23] Gap in SLOT-19. A custodian waiting for
+  a living closer leaves on a stop; if that closer then dies, nothing
+  frees the slot until the segment is unmapped. SlotRelease's
+  `AQueuedCloseFreesTheSlot` therefore excuses a run that was stopped
+  while the closer lived. Every Rust stop path found (`stop_before_unmap`,
+  test `host_stop`) unmaps or releases afterwards; the C callers of
+  `morloc_custody_stop_all` are not traced.
+- **A `-f json` stdout stream left open at the end of a run exits 0.**
+  [read 2026-11-20, code review] SLOT-40 covers only packet output:
+  `end_stdout` (morloc-nexus stdio_server.rs) checks for an unfinished
+  stream only for the packet and voidstar formats and returns `Ok` for
+  every other, so a JSON stream whose footer never arrived (`json_open`
+  still set) leaves `[1,2` on stdout and the run exits 0, where the packet
+  run fails. Test `a_stdout_stream_still_open_at_the_end_is_failed` uses
+  packet output only.

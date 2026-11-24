@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.DimContract
   ( dimConstraints
   ) where
 
+import Morloc.Data.Zip (indexed, zipExact)
 import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -65,7 +66,7 @@ dimConstraints i = do
   -- An export without a signature is held to the type inferred for it.
   let ets = case GMap.lookup i sgmap of
         GMapJust (Monomorphic (TermTypes (Just et) _ _)) -> [(etype et, enatLabels et)]
-        GMapJust (Polymorphic _ _ et _) -> [(etype et, enatLabels et)]
+        GMapJust (Polymorphic _ _ et) -> [(etype et, enatLabels et)]
         _ -> [(t, Map.empty) | Just t <- [inferred]]
   return $ concatMap (contract scope headers (maybe "" unEVar name)) ets
 
@@ -87,16 +88,14 @@ contract scope headers name (et, labels)
       ]
   where
     t = snd (unqualify et)
-    args = case t of
-      FunU as _ -> as
-      _ -> []
+    args = fst (uncurryU t)
     labelArgs = Map.fromList [(k, v) | (v, k) <- Map.toList labels]
     binds =
       concat
         [ case Map.lookup k labelArgs of
             Just v | intLabel a -> [Binding v k [] True Nothing Nothing]
             _ -> lengths scope headers k [] a
-        | (k, a) <- zip [0 ..] args
+        | (k, a) <- indexed args
         ]
     vars = List.nub (map bindVar binds)
     -- A length or header that is an expression with a variable no slot
@@ -324,9 +323,8 @@ representation scope headers t = case t of
         | NamU{} <- body -> Nothing
         | params <- [p | Left (p, _) <- ps]
         , length params == length ps
-        , length params == length ts ->
-            let args = zip params ts
-                hs =
+        , Just args <- zipExact params ts ->
+            let hs =
                   [ (display l <> " in the " <> unTVar v <> " header", fields, n)
                   | (l, fields) <- Map.findWithDefault [] v headers
                   , Just n <- [lookup l args]
@@ -366,10 +364,10 @@ lengths scope headers = go (8 :: Int)
       AppU (VarU v) [a]
         | v == MBT.list -> go fuel k (path <> [Each]) a
       AppU (VarU v) ts
-        | v == MBT.tuple (length ts) -> concat [go fuel k (path <> [Field j]) x | (j, x) <- zip [0 ..] ts]
+        | v == MBT.tuple (length ts) -> concat [go fuel k (path <> [Field j]) x | (j, x) <- indexed ts]
       AppU (VarU v) [n, _]
         | MBT.isTableVar v -> rowsOf k path n
-      NamU _ _ _ rs -> concat [go fuel k (path <> [Field j]) x | (j, (_, x)) <- zip [0 ..] rs]
+      NamU _ _ _ rs -> concat [go fuel k (path <> [Field j]) x | (j, (_, x)) <- indexed rs]
       OptionalU a -> go fuel k (path <> [Some]) a
       _ -> case representation scope headers t of
         Just (hs, body) -> concatMap (header k path) hs <> go (fuel - 1) k path body

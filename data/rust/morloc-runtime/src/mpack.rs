@@ -132,8 +132,7 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                 } else {
                     let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
-                    let data = shm::rel2abs(relptr)?;
-                    let bytes = std::slice::from_raw_parts(data, size * 8);
+                    let bytes = crate::voidstar::int_limb_bytes(size, relptr)?;
                     rmp::encode::write_bin_len(buf, msgpack_len(bytes.len())?)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                     buf.extend_from_slice(bytes);
@@ -356,7 +355,6 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
             SerialType::Nil => {
                 decode::read_nil(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
-                *ptr = 0;
             }
             SerialType::Bool => {
                 let v = decode::read_bool(&mut self.reader)
@@ -375,14 +373,7 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                 let tag: i64 = decode::read_int(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack enum tag: {}", e))
                 })?;
-                *ptr = arm_tag(tag, s.size).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "enum tag {} is out of range; the type has {} constructors ({})",
-                        tag,
-                        s.size,
-                        s.keys.join(", ")
-                    ))
-                })?;
+                *ptr = arm_tag(tag, s.size).ok_or_else(|| width::enum_tag_error(tag, &s.keys))?;
             }
             SerialType::Float32 => {
                 let f = read_float(&mut self.reader)?;
@@ -435,6 +426,11 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                 if len > 0 {
                     if self.reader.len() < len {
                         return Err(MorlocError::Serialization("msgpack str truncated".into()));
+                    }
+                    if let Some(i) = morloc_runtime_types::utf8::first_invalid(&self.reader[..len]) {
+                        return Err(MorlocError::Serialization(format!(
+                            "msgpack str is not valid UTF-8 (byte {i} of {len})"
+                        )));
                     }
                     std::ptr::copy_nonoverlapping(self.reader.as_ptr(), self.cursor, len);
                     self.reader = &self.reader[len..];
@@ -730,7 +726,7 @@ impl<'r, 'd> Walker<bool> for SizeWalk<'r, 'd> {
         match s.serial_type {
         SerialType::Nil => {
             rmp::decode::read_nil(&mut self.reader).ok();
-            self.add(1, f.x) }
+            self.add(0, f.x) }
         SerialType::Bool => {
             rmp::decode::read_bool(&mut self.reader).ok();
             self.add(1, f.x) }
@@ -923,6 +919,17 @@ mod tests {
     use crate::json;
 
     #[test]
+    fn a_unit_field_writes_nothing_past_its_record() {
+        let _shm = crate::init_test_shm();
+        let s = crate::schema::parse_schema("am31uz1ss1vz").unwrap();
+        let txt = r#"[{"u":null,"s":"abc","v":null},{"u":null,"s":"defg","v":null}]"#;
+        let p = crate::json::read_json_with_schema(txt, &s).unwrap();
+        let wire = pack_with_schema(p, &s).unwrap();
+        let q = unpack_with_schema(&wire, &s).unwrap();
+        assert_eq!(crate::json::voidstar_to_json_string(q, &s).unwrap(), txt);
+    }
+
+    #[test]
     fn test_roundtrip_nested_empty_string_via_msgpack() {
         let _shm = setup_shm();
         // An empty string inside a container has no data block; the packer
@@ -932,6 +939,17 @@ mod tests {
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
         let ptr2 = unpack_with_schema(&mpk, &schema).unwrap();
         assert_eq!(json::voidstar_to_json_string(ptr2, &schema).unwrap(), "[\"a\",\"\",\"ccc\"]");
+    }
+
+    // FMT-10
+    #[test]
+    fn a_msgpack_str_that_is_not_text_is_refused() {
+        let _shm = setup_shm();
+        let schema = parse_schema("as").unwrap();
+        // fixarray of 2, then fixstr "ok", then fixstr of 3 bytes "a\xffb".
+        let wire = [0x92, 0xa2, b'o', b'k', 0xa3, b'a', 0xff, b'b'];
+        let err = unpack_with_schema(&wire, &schema).unwrap_err().to_string();
+        assert!(err.contains("not valid UTF-8 (byte 1 of 3)"), "{err}");
     }
 
     #[test]

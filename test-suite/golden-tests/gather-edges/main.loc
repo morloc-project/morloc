@@ -1,0 +1,219 @@
+-- Whole-list gather (STRM-4) at its edges, in each language with the
+-- producer and handler in one pool:
+--
+-- * empty: the producer never calls its sink; every handler sees [].
+-- * fail: the producer writes two batches, then fails. The command exits
+--   non-zero with the producer's message, and the handler (which writes
+--   the file handler-ran) never runs.
+-- * late: the producer (C++ or Python) keeps its sink, and the action's
+--   handler calls it after the gathered stream was closed. The command
+--   fails rather than lose or misplace the late batch.
+-- * ten: an `IFile [I64]` handler (STRM-3) counts and slices the gathered
+--   file, beside a list handler; `--other` hands a slice of the IFile to a
+--   handler in another language.
+-- * tenArg: an `IFile [I64]` handler that also takes the command's argument
+--   (`$1`) before the implicit payload.
+
+module main
+  ( emptyCpp, emptyPy, emptyR, emptyRust
+  , failCpp, failPy, failR, failRust
+  , tenCpp, tenPy, tenR, tenRust
+  , lateCpp, latePy
+  , tenArgCpp
+  )
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+source Cpp from "impl.hpp"
+  ( "produce_none" as produceNoneCpp, "produce_fail" as produceFailCpp, "produce_ten" as produceTenCpp
+  , "show_ints" as showIntsCpp, "mark_ran" as markRanCpp
+  , "produce_stash" as produceStashCpp, "show_late" as showLateCpp )
+
+source Py from "impl.py"
+  ( "produce_none" as produceNonePy, "produce_fail" as produceFailPy, "produce_ten" as produceTenPy
+  , "show_ints" as showIntsPy, "mark_ran" as markRanPy
+  , "produce_stash" as produceStashPy, "show_late" as showLatePy )
+
+source R from "impl.R"
+  ( "produce_none" as produceNoneR, "produce_fail" as produceFailR, "produce_ten" as produceTenR
+  , "show_ints" as showIntsR, "mark_ran" as markRanR )
+
+source Rust from "impl.rs"
+  ( "produce_none" as produceNoneRust, "produce_fail" as produceFailRust, "produce_ten" as produceTenRust
+  , "show_ints" as showIntsRust, "mark_ran" as markRanRust )
+
+produceNoneCpp :: ([I64] -> <IO> ()) -> <IO> ()
+produceFailCpp :: ([I64] -> <IO> ()) -> <IO> ()
+produceTenCpp :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' The elements, shown by C++
+showIntsCpp :: [I64] -> Str
+
+--' Mark that the handler ran, in C++
+markRanCpp :: [I64] -> Str
+
+produceNonePy :: ([I64] -> <IO> ()) -> <IO> ()
+produceFailPy :: ([I64] -> <IO> ()) -> <IO> ()
+produceTenPy :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' The elements, shown by Python
+showIntsPy :: [I64] -> Str
+
+--' Mark that the handler ran, in Python
+markRanPy :: [I64] -> Str
+
+produceNoneR :: ([I64] -> <IO> ()) -> <IO> ()
+produceFailR :: ([I64] -> <IO> ()) -> <IO> ()
+produceTenR :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' The elements, shown by R
+showIntsR :: [I64] -> Str
+
+--' Mark that the handler ran, in R
+markRanR :: [I64] -> Str
+
+produceNoneRust :: ([I64] -> <IO> ()) -> <IO> ()
+produceFailRust :: ([I64] -> <IO> ()) -> <IO> ()
+produceTenRust :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' The elements, shown by Rust
+showIntsRust :: [I64] -> Str
+
+--' Mark that the handler ran, in Rust
+markRanRust :: [I64] -> Str
+
+--' The number of elements, read from the file
+countFile :: IFile [I64] -> <IO> Int
+countFile f = do
+  Ok n <- @flen f
+  n
+
+--' Elements 1 to 3, read from the file
+sliceFile :: IFile [I64] -> <IO> [I64]
+sliceFile f = do
+  .[1:4] f
+
+--' Elements 1 to 3 of the file, shown by Python
+otherPy :: IFile [I64] -> <IO> Str
+otherPy f = do
+  showIntsPy (.[1:4] f)
+
+--' Elements 1 to 3 of the file, shown by C++
+otherCpp :: IFile [I64] -> <IO> Str
+otherCpp f = do
+  showIntsCpp (.[1:4] f)
+
+--' Stream nothing from C++
+--' @render --show=showIntsCpp
+--' @with --count=countFile
+--' @with --slice=sliceFile
+emptyCpp :: <IO> (Collect I64)
+emptyCpp = @collect produceNoneCpp
+
+--' Stream two batches from C++, then fail
+--' @render --mark=markRanCpp
+--' @with --count=countFile
+failCpp :: <IO> (Collect I64)
+failCpp = @collect produceFailCpp
+
+--' Stream ten elements from C++
+--' @render --show=showIntsCpp
+--' @with --count=countFile
+--' @with --slice=sliceFile
+--' @render --other=otherPy
+tenCpp :: <IO> (Collect I64)
+tenCpp = @collect produceTenCpp
+
+--' Stream nothing from Python
+--' @render --show=showIntsPy
+--' @with --count=countFile
+--' @with --slice=sliceFile
+emptyPy :: <IO> (Collect I64)
+emptyPy = @collect produceNonePy
+
+--' Stream two batches from Python, then fail
+--' @render --mark=markRanPy
+--' @with --count=countFile
+failPy :: <IO> (Collect I64)
+failPy = @collect produceFailPy
+
+--' Stream ten elements from Python
+--' @render --show=showIntsPy
+--' @with --count=countFile
+--' @with --slice=sliceFile
+--' @render --other=otherCpp
+tenPy :: <IO> (Collect I64)
+tenPy = @collect produceTenPy
+
+--' Stream nothing from R
+--' @render --show=showIntsR
+--' @with --count=countFile
+--' @with --slice=sliceFile
+emptyR :: <IO> (Collect I64)
+emptyR = @collect produceNoneR
+
+--' Stream two batches from R, then fail
+--' @render --mark=markRanR
+--' @with --count=countFile
+failR :: <IO> (Collect I64)
+failR = @collect produceFailR
+
+--' Stream ten elements from R
+--' @render --show=showIntsR
+--' @with --count=countFile
+--' @with --slice=sliceFile
+--' @render --other=otherPy
+tenR :: <IO> (Collect I64)
+tenR = @collect produceTenR
+
+--' Stream nothing from Rust
+--' @render --show=showIntsRust
+--' @with --count=countFile
+--' @with --slice=sliceFile
+emptyRust :: <IO> (Collect I64)
+emptyRust = @collect produceNoneRust
+
+--' Stream two batches from Rust, then fail
+--' @render --mark=markRanRust
+--' @with --count=countFile
+failRust :: <IO> (Collect I64)
+failRust = @collect produceFailRust
+
+--' Stream ten elements from Rust
+--' @render --show=showIntsRust
+--' @with --count=countFile
+--' @with --slice=sliceFile
+--' @render --other=otherPy
+tenRust :: <IO> (Collect I64)
+tenRust = @collect produceTenRust
+
+produceStashCpp :: ([I64] -> <IO> ()) -> <IO> ()
+--' Call the kept sink, then show the elements
+showLateCpp :: [I64] -> Str
+produceStashPy :: ([I64] -> <IO> ()) -> <IO> ()
+--' Call the kept sink, then show the elements
+showLatePy :: [I64] -> Str
+
+--' Stream from C++; the action calls the kept sink after the stream closed
+--' @render --show=showLateCpp
+lateCpp :: <IO> (Collect I64)
+lateCpp = @collect produceStashCpp
+
+--' Stream from Python; the action calls the kept sink after the stream closed
+--' @render --show=showLatePy
+latePy :: <IO> (Collect I64)
+latePy = @collect produceStashPy
+
+--' The argument and the number of elements, read from the file
+countPlus :: Int -> IFile [I64] -> <IO> (Int, Int)
+countPlus k f = do
+  Ok n <- @flen f
+  (k, n)
+
+--' Stream ten elements from C++, with an argument for the handler
+--' @with --plus=countPlus($1)
+tenArgCpp :: Int -> <IO> (Collect I64)
+tenArgCpp k = @collect produceTenCpp

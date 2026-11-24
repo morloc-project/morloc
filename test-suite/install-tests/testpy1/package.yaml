@@ -9,6 +9,5 @@ author: null
 maintainer: null
 github: null
 bug-reports: null
-dependencies: []
 include:
   - "helpers.py"

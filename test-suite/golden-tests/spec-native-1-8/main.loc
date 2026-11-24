@@ -1,0 +1,33 @@
+-- Spec NATIVE-1, NATIVE-2, NEWT-7: a form declared for a specialized head holds
+-- only there. At other arguments the newtype has no form of its own in R, so
+-- its value arrives as its representation, a list of pairs. An argument
+-- written as an alias of `Str` matches the form as `Str` does.
+module main (shapeInt, shapeStr, shapeName, roundInt)
+
+import root-py
+import root-r
+
+type Name = Str
+
+newtype MyMap a b = [(a, b)]
+
+type R => (MyMap Str b) = "list" Str b
+
+instance Packable [(Str, b)] (MyMap Str b) where
+  source R from "m.R" ("packS" as pack, "unpackS" as unpack)
+
+source R from "m.R" ("shape", "idR")
+shape :: MyMap a b -> Str
+idR :: MyMap a b -> MyMap a b
+
+shapeInt :: MyMap Int Int -> Str
+shapeInt m = shape m
+
+shapeStr :: MyMap Str Int -> Str
+shapeStr m = shape m
+
+shapeName :: MyMap Name Int -> Str
+shapeName m = shape m
+
+roundInt :: MyMap Int Int -> MyMap Int Int
+roundInt m = idR m

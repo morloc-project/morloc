@@ -1,0 +1,11 @@
+-- GEN-1: a record whose parameter no field uses is built in Python with no
+-- Python line.
+module main (foo)
+
+import root-py
+
+record Tagged a where
+  n :: Int
+
+foo :: Int -> Tagged Int
+foo x = {n = x}

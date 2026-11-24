@@ -19,8 +19,6 @@ import root-py
 import root-r
 
 record P = P { a :: Int, b :: Str }
-record R => P = "list"
-record Py => P = "dict"
 
 source Py from "mk.py" ("bare", "in_list", "in_record", "clean", "no_str")
 bare :: Str -> Str

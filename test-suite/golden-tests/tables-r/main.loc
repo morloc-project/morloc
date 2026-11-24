@@ -25,7 +25,7 @@ makeT_r :: n@U64 -> Table n {x=Int, y=Str}
 makeXR :: n@U64 -> Table n {x=Int}
 makeYR :: n@U64 -> Table n {y=Str}
 
-mvp :: n@U64 -> Table n r
+mvp :: n@U64 -> Table n {x=Int, y=Str}
 mvp n = makeT_r n
 
 rbound :: n@U64 -> Table {x=Int, y=Str}

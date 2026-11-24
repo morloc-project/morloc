@@ -1,0 +1,31 @@
+-- A Rust type without Clone, read through a let of a conditional (OWN-10,
+-- RUST-5).
+module main (deadSrc, liveSrc, deadTake)
+
+import root-rust
+
+record NC where
+  v :: Int
+record Rust => NC = "NC"
+
+record H where
+  p :: NC
+  k :: Int
+record Rust => H = "H"
+
+source Rust from "nc.rs" ("mk_nc" as mkNC, "mk_h" as mkH, "val", "take_nc" as takeNC)
+
+mkNC :: Int -> NC
+mkH :: Int -> H
+val :: NC -> Int
+takeNC :: NC -> Int
+
+deadSrc :: Int -> Int -> Int
+deadSrc n j = (let h = mkH n in let y = (? j > 0 = .p h : mkNC 0) in val y)
+
+liveSrc :: Int -> Int -> Int
+liveSrc n j = (let h = mkH n in let y = (? j > 0 = .p h : mkNC 0) in val y + .k h)
+
+deadTake :: Int -> Int -> Int
+deadTake n j = (let h = mkH n in let y = (? j > 0 = .p h : mkNC 0) in takeNC y)
+

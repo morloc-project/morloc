@@ -1,0 +1,49 @@
+-- A unit-step IFile slice read from a C++ or Rust pool is decoded one piece
+-- per sub-packet, in a call back from the runtime (SLOT-25). A piece the
+-- pool cannot decode -- an `Int` too large for the pool's native integer,
+-- in the second of the two sub-packets `.[1:5]` spans -- makes that slice
+-- `Err`, as when the slice was copied out first, without unwinding through
+-- the runtime, and leaves the handle usable: the slices after it read
+-- right. Each reader prints 30 for that `Err` (else the slice's length),
+-- plus the lengths of `.[0:4]` and `.[5:]`.
+module main (writeBig, readCpp, readRust)
+
+import root-py
+import root-cpp
+import root-rust
+
+effect IO
+
+bigs :: Int -> [Int]
+source Py from "h.py" ("bigs")
+
+applyCpp :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Cpp from "h.hpp" ("applyOnce" as applyCpp)
+
+applyRust :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Rust from "h.rs" ("apply_once" as applyRust)
+
+writeBig :: Str -> <IO> Int
+writeBig p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  @write 0 o (bigs 0)
+  @flush o
+  @write 0 o (bigs 1)
+  @flush o
+  @write 0 o (bigs 2)
+  @close o
+  0
+
+readCpp :: Str -> <IO> Int
+readCpp p = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [Int]))
+  applyCpp (\x -> do
+    let r = @try (.[1:5] f)
+    (match r | (Ok xs) = length xs | (Err _) = 30) + length (.[0:4] f) + length (.[5:] f)) 0
+
+readRust :: Str -> <IO> Int
+readRust p = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [Int]))
+  applyRust (\x -> do
+    let r = @try (.[1:5] f)
+    (match r | (Ok xs) = length xs | (Err _) = 30) + length (.[0:4] f) + length (.[5:] f)) 0

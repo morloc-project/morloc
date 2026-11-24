@@ -1,0 +1,28 @@
+--- Cpp ---
+cpp 1 2 3
+cpp batch 2
+cpp batch 0
+cpp batch 1
+cpp 1 2 3
+"cpp 1 2 3\n"
+--- Py ---
+py 1 2 3
+py batch 2
+py batch 0
+py batch 1
+py 1 2 3
+"py 1 2 3\n"
+--- R ---
+r 1 2 3
+r batch 2
+r batch 0
+r batch 1
+r 1 2 3
+"r 1 2 3\n"
+--- Rust ---
+rust 1 2 3
+rust batch 2
+rust batch 0
+rust batch 1
+rust 1 2 3
+"rust 1 2 3\n"

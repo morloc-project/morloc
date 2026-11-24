@@ -1,0 +1,19 @@
+-- Spec APP-1: an instance whose type is a function, of a class method whose
+-- result is the class variable, gives the method a function type no
+-- different from its flat form. The source of `mk` at `Int -> Int` takes
+-- both arguments at once, and `mk 2` is a function of the rest.
+module main (go, adds)
+
+import root-cpp
+
+class Mk a where
+  mk :: Int -> a
+
+instance Mk (Int -> Int) where
+  source Cpp from "lib.hpp" ("make_adder" as mk)
+
+go :: Int -> Int
+go x = (mk 1) x
+
+adds :: [Int] -> [Int]
+adds xs = map (mk 2) xs

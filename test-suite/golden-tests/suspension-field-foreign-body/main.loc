@@ -19,7 +19,6 @@ import root-rust
 record Ops where
   inc :: Int -> Int
   total :: <IO> Int
-record Py => Ops = "dict"
 record Rust => Ops = "Ops"
 
 type Rust => Int = "i64"

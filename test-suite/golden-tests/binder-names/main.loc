@@ -29,7 +29,6 @@ record Pt where
   --' Second coordinate
   b :: Real
 record Rust => Pt = "Pt"
-record Py => Pt = "dict"
 
 --' A direction
 data Dir = North | South

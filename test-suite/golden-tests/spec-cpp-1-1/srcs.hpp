@@ -12,6 +12,8 @@ inline int bumpConst(const std::vector<int>& v) { return (int)v.size() + 1; }
 inline int sizeV(std::vector<int> v) { return (int)v.size(); }
 
 template <class T> int fwdSize(T&& v) { return (int)v.size(); }
+template <class T> int tmplSize(T& v) { return (int)v.size(); }
+inline int takeV(std::vector<int> v) { return (int)v.size(); }
 
 inline int ovl(const std::vector<int>& v) { return (int)v.size(); }
 inline int ovl(std::vector<int>&) { return -1; }

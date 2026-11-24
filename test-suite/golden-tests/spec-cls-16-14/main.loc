@@ -1,0 +1,25 @@
+-- Spec CLS-20: a pool converts a value with the instance it can run. C++
+-- gives only the specific instance; Python, the general one. Both agree on
+-- the wire form, so the value crosses in either direction.
+module main (viaBoth)
+import root-py
+import root-cpp
+
+newtype Box k a = [(k, a)]
+type Py => (Box k a) = "dict" k a
+type Cpp => (Box k a) = "std::map<$1,$2>" k a
+
+instance Packable [(k, a)] (Box k a) where
+  source Py from "h.py" ("h_pack" as pack, "h_unpack" as unpack)
+instance Packable [(Str, a)] (Box Str a) where
+  source Cpp from "h.hpp" ("h_pack" as pack, "h_unpack" as unpack)
+
+source Py from "h.py" ("h_size" as sizePy)
+sizePy :: Box Str a -> Int
+source Cpp from "h.hpp" ("h_size" as sizeCpp)
+sizeCpp :: Box Str a -> Int
+source Cpp from "h.hpp" ("h_make" as makeCpp)
+makeCpp :: Int -> Box Str Int
+
+viaBoth :: Int -> (Int, Int)
+viaBoth n = let b = makeCpp n in (sizePy b, sizeCpp b)

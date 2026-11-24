@@ -16,15 +16,13 @@ import root-py
 sumList :: [Int] -> Int
 sumList xs = fold (+) 0 xs
 
-produce :: <IO> ()
-produce = do
-  o <- @stdout :: <IO> OStream Int
+produce :: <IO> (Collect Int)
+produce = @stdout (\o -> do
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
   @flush o
-  @write 0 o [6, 7, 8, 9, 10]
-  @close o
+  @write 0 o [6, 7, 8, 9, 10])
 
 consume :: <IO> Int
 consume = do

@@ -58,6 +58,7 @@ walk _ (PolyRemoteInterface l t is rf e) = PolyRemoteInterface l t is rf <$> wal
 walk lang (PolyLet i e1 e2) = PolyLet i <$> walk lang e1 <*> walk lang e2
 walk lang (PolyReturn e) = PolyReturn <$> walk lang e
 walk lang (PolyApp f xs) = PolyApp <$> walk lang f <*> mapM (walk lang) xs
+walk lang (PolyPat g app) = PolyPat g <$> mapM (walk lang) app
 walk lang (PolyCacheBody l m as e) = PolyCacheBody l m as <$> walk lang e
 walk lang (PolyDebugWrap m as e) = PolyDebugWrap m as <$> walk lang e
 walk lang (PolyList v ts xs) = PolyList v ts <$> mapM (walk lang) xs

@@ -1,0 +1,10 @@
+--- foldCpp ---
+cpp n=6
+--- foldRust ---
+rust n=6
+--- forkCpp ---
+OK
+1
+--- forkRust ---
+OK
+1

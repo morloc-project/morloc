@@ -1,0 +1,8 @@
+module bad (useInt)
+
+import .apply
+
+useInt :: Int -> <IO> Int
+useInt n = do
+  h <- pyMakeAdder n
+  apply h n

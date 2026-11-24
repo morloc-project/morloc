@@ -1,0 +1,36 @@
+-- GEN-11: a dataclass record (Person) holding a pydantic record (Inner):
+-- literals, getters, a rebuilt record, crossing to C++ and back, and a
+-- sourced function that imports the generated classes.
+module main (viaPy, viaCpp, older, kind, mk)
+
+import root-py (idpy)
+import root-cpp (idcpp, Int, Str, List)
+
+record Inner where
+  label :: Str
+  tags :: [Str]
+
+record Person where
+  name :: Str
+  age :: Int
+  inner :: Inner
+
+record Py => Person = dataclass
+record Py => Inner = pydantic
+
+source Py from "f.py" ("kindOf" as kind, "bump" as bumpPy)
+
+kind :: Person -> Str
+bumpPy :: Int -> Int
+
+viaPy :: Person -> Person
+viaPy p = idpy p
+
+viaCpp :: Person -> Person
+viaCpp p = idcpp (idpy p)
+
+older :: Person -> Person
+older p = {name = .name p, age = bumpPy (.age p), inner = .inner p}
+
+mk :: Str -> Person
+mk n = {name = n, age = bumpPy 1, inner = {label = "x", tags = [n]}}

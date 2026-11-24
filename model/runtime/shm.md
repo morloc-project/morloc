@@ -13,7 +13,8 @@ Status: implemented
 Checked by: processes_allocating_together_never_share_a_block, threads_allocating_together_never_share_a_block, a_child_forked_mid_allocation_can_allocate
 
 A block is claimed under its volume's lock, by moving its count from zero
-to one; the scan that finds it and the claim are one critical section.
+to one; the scan that finds it and the claim are one critical section. A
+large volume's only block is claimed by the exchange alone (SHM-18).
 
 ### SHM-3 A sender hands the recipient its own reference
 Status: implemented
@@ -64,7 +65,7 @@ A result that aliases an argument has two holders and two references. On
 a thread with an eval arena, the arena holds the reference of each block
 allocated there and of each block a holder that held it alone gives it
 (SHM-14). A reference anything else takes on a block -- a stream's cache,
-a cache hit the eval reads, a cell, an Arrow view, the daemon's copy of a
+a cache hit the eval reads, an Arrow view, the daemon's copy of a
 pool's reply -- belongs to its holder, which releases it without touching
 the arena.
 
@@ -139,15 +140,19 @@ took opens that volume instead and never removes its name.
 
 ### SHM-12 A process grows the program's memory only when no volume has room
 Status: implemented
-Checked by: a_process_out_of_room_uses_a_volume_another_made, a_volume_mapped_twice_keeps_its_first_mapping, tla:NamespaceGrow, tla:NamespaceGrow_no_lock.bug, tla:NamespaceGrow_no_remap.bug, tla:NamespaceGrow_map_uninit.bug, tla:NamespaceGrow_bump_after_init.bug
+Checked by: a_process_out_of_room_uses_a_volume_another_made, a_new_volume_is_sized_to_the_request_beyond_the_growth_step, volumes_grow_in_number_slower_than_the_memory_they_hold, a_volume_mapped_twice_keeps_its_first_mapping, tla:NamespaceGrow, tla:NamespaceGrow_no_lock.bug, tla:NamespaceGrow_no_remap.bug, tla:NamespaceGrow_map_uninit.bug, tla:NamespaceGrow_bump_after_init.bug
 
 Volumes are numbered in order; the primary volume's header holds the next
 number and a growth lock that reports a holder's death rather than
 disabling itself. A process out of room maps every initialised volume
 numbered below the next number and looks again; then it takes the growth
 lock, maps and looks once more, and only then creates the next volume,
-exclusively, at twice the size of the largest, counting it once the
-create succeeds. A name that already exists was made by a creator that
+exclusively, counting it once the create succeeds. The new volume holds
+the request; beyond that it is twice the largest volume, but no more than
+the largest of the request, 64 MiB and a quarter of all volumes' size. So
+a new volume beyond the request costs at most a quarter of the memory the
+program already holds, rather than twice its largest volume, and the
+number of volumes still grows with the logarithm of that memory. A name that already exists was made by a creator that
 died before counting it: it is used if initialised and skipped otherwise,
 and never removed. The growth lock is taken after the process's own growth
 lock (SHM-11) and before any volume's lock. Mapping a volume this process
@@ -156,21 +161,36 @@ already maps keeps the first mapping.
 
 ### SHM-13 A reference names the allocation it was made for
 Status: implemented
-Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
+Checked by: a_packet_naming_a_reused_block_is_refused_every_time, a_packet_naming_a_released_block_is_refused_every_time, bindings_resolve_received_references_only_through_the_check, only_the_check_and_the_builder_touch_a_packets_generation, a_stale_reply_is_refused_when_inherited, a_tracked_release_finds_only_a_live_block, no_reference_packet_is_built_for_an_interior_address, an_unstamped_reference_packet_is_refused, a_block_reads_as_held_only_while_a_holder_holds_it, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation, a_claim_that_finds_its_block_in_use_changes_nothing, tla:ShmClaim, tla:ShmClaim_bump_then_cas.bug, tla:ShmClaim_cas_then_bump.bug
 
 Every block carries a 16-bit generation beside its size. Claiming a block
 for an allocation advances it (skipping 0), a block split off another
 starts at the parent's, and a merge keeps the larger of the two, so a
 header made again at an address starts past every allocation it held
-before. A reference packet records the generation of the block it names
-when it is built; 0 means unrecorded. The runtime reads a received
-reference only through the check that the block still has that
-generation; on a mismatch the read fails and the packet's relptr is
-cleared, so that no later release through the packet reaches the block's
-new owner. The check detects a reference used after its allocation ended
-(a protocol slip); it does not prevent one, and a generation repeats
-after 65535 claims of one address. Interior relptrs and releases by
-address are not checked.
+before. A claim moves the count from 0 to the mark a release uses before
+it splits the block, then advances the generation and stores 1, so a
+claim that finds its block in use changes nothing, and a check that reads
+a count of 1 reads the new generation (tla:ShmClaim checks this order of a claim against a check). A new header's
+other fields are stored before its magic word, with release and acquire
+ordering on the magic. A reference packet records the generation of the block it names
+when it is built, and none is built for an address no held block begins at; a
+packet recording 0 is refused. The runtime reads a received
+reference only through the check that a block still begins there, is
+held, and has that generation (a released block may keep its generation
+until it is claimed again); the check reads the count before the
+generation, so a claim it observes has already advanced the generation.
+Otherwise the read fails. The packet is not written to: every later read
+or adoption through it is refused the same way, and a release through it
+releases nothing, so none reaches the block's new owner; a pool's late
+release of a packet whose block its tracker already gave back is not
+reported. Every runtime reader, the daemon and each
+binding's release and adoption resolve a received reference only through
+this check; a reply that fails it is an error of the call that received
+it. The check detects a reference used after its allocation ended (a
+protocol slip); it does not prevent one: once a slip has happened, each
+later check of the stale packet can match a generation that came round
+again (one in 65535 per check at a busy address). Relptrs nested inside
+values are not checked.
 
 ### SHM-14 An arena releases only references it alone holds
 Status: implemented
@@ -240,3 +260,51 @@ Only lack of space counts as running out: the file system behind the
 volumes refusing a volume (after a volume of the exact size was tried) or
 the volume table being full. A request larger than that file system, and
 every other allocator failure, is an ordinary error everywhere.
+
+### SHM-18 A large request gets a volume of its own, emptied when freed
+Status: implemented
+Checked by: a_large_request_takes_a_volume_of_its_own, a_large_block_is_found_only_at_its_start_and_read_only_within_it, a_released_large_block_reads_as_zero_kept_or_removed, large_requests_past_a_small_tmpfs_fall_back_cleanly, tla:LargeVolume, tla:LargeVolume_no_cas.bug, tla:LargeVolume_publish_before_commit.bug, tla:LargeVolume_failed_commit_keeps_pages.bug, tla:LargeVolume_punch_header_page.bug, tla:LargeVolume_interior_header_read.bug
+
+On Linux tmpfs, where populating a mapping fails with an error rather
+than a signal, a request of at least the large bound gets a one-block
+volume: its data starts page-aligned after a header that ends the first
+page, the volume is created sparse at the request rounded up to a power
+of two, and its memory is committed only for the request, outside every
+lock, after the block is reserved by moving its count from 0 to the mark
+a release uses (SHM-13). A commit that fails gives back every page it
+took, frees the block and falls to the general path, which owns the
+fallback directory and running out (SHM-17). General volumes neither
+serve nor size themselves by large ones. In a large volume the SHM-13
+check accepts only the block's own offset, without reading memory at any
+other, and a read through a relptr nested in the value is bounded by the
+block's committed bytes (the volume is published with no size, so every
+resolve into it, from any language, takes the runtime's resolve, which
+reads that bound). A large block is
+claimed by the exchange alone: it is the volume's only block, so no lock
+guards a list. Releasing a large block scrubs it and keeps it committed while
+the committed bytes of free large volumes stay within a budget, and
+otherwise removes its pages, which then read as zero (SHM-6); the budget
+is counted over the large volumes a process maps. A refused removal is
+followed by the fill. Under poison a release fills its block with the
+poison byte and keeps it; pages kept so are given back only when room
+runs short, and then read as zero. A process that
+dies while its large block is reserved leaves the volume reserved, with
+its pages, until the namespace is discarded (SHM-8, DAEMON-1). Elsewhere
+(macOS, older kernels, the fallback directory) every request takes the
+general path. The test of falling back past a small tmpfs needs a
+private tmpfs and runs by hand.
+
+### SHM-19 A free of a block its caller does not hold ends every pool
+Status: implemented
+Checked by: a_free_of_a_block_already_free_ends_the_process
+
+A release that finds no block at its address, or a block that is already
+free or being released, means a holder released a reference it did not
+hold, which only a defect in the runtime or a binding can do. The process
+writes the address and the reason to stderr and exits with status 71
+without unwinding, as when shared memory runs out (SHM-17): in a pool
+every pool ends and every volume goes, a daemon recovers as from any pool
+death, and in the nexus the run fails and its volumes are swept by the
+next run (DAEMON-13). A second release that lands after the block was
+claimed again cannot be seen this way: it releases its new holder's
+reference.

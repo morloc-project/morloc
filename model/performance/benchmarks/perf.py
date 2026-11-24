@@ -34,10 +34,19 @@ def fmt_time(seconds):
 
 
 class Timing:
-    def __init__(self, walls, maxrss_kib, stdout):
+    def __init__(self, walls, maxrss_kib, stdout, cpus=None, extra=None):
         self.walls = sorted(walls)
         self.maxrss_kib = maxrss_kib
         self.stdout = stdout
+        # Per-run maxima from LAST (tree_pss_kib, dirty_kib), when sampled.
+        self.extra = extra or {}
+        # CPU seconds (user + system) of the process and its waited-for
+        # descendants, per run; wall minus CPU is the time spent off-CPU.
+        self.cpus = sorted(cpus or [])
+
+    @property
+    def cpu(self):
+        return self.cpus[len(self.cpus) // 2] if self.cpus else None
 
     @property
     def best(self):
@@ -51,6 +60,85 @@ class Timing:
 def timed(cmd, cwd, env=None, stdin=None):
     """Run cmd once; return (wall seconds, max RSS KiB of the largest
     descendant, stdout bytes). Fails loudly on a nonzero exit."""
+    return timed_cpu(cmd, cwd, env=env, stdin=stdin)[:3]
+
+
+def meminfo_kib(*keys):
+    """Sum of the named /proc/meminfo fields, in KiB."""
+    total = 0
+    try:
+        for line in open("/proc/meminfo"):
+            k, v = line.split(":", 1)
+            if k in keys:
+                total += int(v.split()[0])
+    except OSError:
+        pass
+    return total
+
+
+def session_pss_kib(sid):
+    """PSS summed over every process in session `sid`, in KiB. Pools are
+    not waited-for children of the nexus, but they stay in its session."""
+    total = 0
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                st = f.read()
+            if int(st[st.rindex(")") + 2:].split()[3]) != sid:
+                continue
+            with open(f"/proc/{d}/smaps_rollup") as f:
+                for line in f:
+                    if line.startswith("Pss:"):
+                        total += int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            continue
+    return total
+
+
+class TreeSampler:
+    """Samples the PSS of a session every `period` seconds; `peak` is the
+    largest sample. Short peaks between samples are missed."""
+
+    def __init__(self, sid, period=0.05):
+        self.sid, self.period, self.peak = sid, period, 0
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.thread.start()
+
+    def loop(self):
+        while not self.done.is_set():
+            self.peak = max(self.peak, session_pss_kib(self.sid))
+            self.done.wait(self.period)
+
+    def stop(self):
+        self.done.set()
+        self.thread.join()
+        return self.peak
+
+
+# Set by a benchmark: measure the process tree's peak PSS in one extra,
+# untimed run per point (sampling scans /proc and walks page tables, which
+# would perturb the timed runs), and sync before every run.
+OPTIONS = {"tree_mem": False, "sync": False}
+LAST = {}
+
+
+def take_last(acc):
+    """Fold the last run's LAST samples into acc (maxima), then clear LAST."""
+    for k, v in LAST.items():
+        acc[k] = max(acc.get(k, 0), v)
+    LAST.clear()
+    return acc
+
+
+def timed_cpu(cmd, cwd, env=None, stdin=None, sample=False):
+    """timed, plus the CPU seconds of cmd and its waited-for descendants.
+    With `sample`, LAST["tree_pss_kib"] is the run's sampled peak PSS over
+    its whole session; with OPTIONS sync, the page cache is synced first
+    and LAST["dirty_kib"] is Dirty+Writeback when the run starts."""
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
@@ -60,15 +148,22 @@ def timed(cmd, cwd, env=None, stdin=None):
     def drain(key, stream):
         bufs[key] = stream.read()
 
+    if OPTIONS["sync"]:
+        os.sync()
+        LAST["dirty_kib"] = meminfo_kib("Dirty", "Writeback")
     t0 = time.perf_counter()
     p = subprocess.Popen(cmd, cwd=cwd, env=full_env, stdin=stdin_f,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         start_new_session=sample)
+    sampler = TreeSampler(p.pid) if sample else None
     readers = [threading.Thread(target=drain, args=("out", p.stdout)),
                threading.Thread(target=drain, args=("err", p.stderr))]
     for r in readers:
         r.start()
     _, status, usage = os.wait4(p.pid, 0)
     t1 = time.perf_counter()
+    if sampler:
+        LAST["tree_pss_kib"] = sampler.stop()
     for r in readers:
         r.join()
     p.returncode = os.waitstatus_to_exitcode(status)
@@ -77,7 +172,7 @@ def timed(cmd, cwd, env=None, stdin=None):
     if p.returncode != 0:
         sys.stderr.write(bufs["err"].decode(errors="replace"))
         raise RuntimeError(f"{cmd} exited {p.returncode}")
-    return t1 - t0, usage.ru_maxrss, bufs["out"]
+    return t1 - t0, usage.ru_maxrss, bufs["out"], usage.ru_utime + usage.ru_stime
 
 
 def fit_linear(xs, ys):
@@ -119,6 +214,20 @@ def fit_power(xs, ys):
     """Least squares on logs: y = a * x^k. Returns (a, k, r2 of the log fit)."""
     lc, k, r2 = fit_linear([math.log(x) for x in xs], [math.log(y) for y in ys])
     return math.exp(lc), k, r2
+
+
+def growth_exponent(xs, ys):
+    """k in t(x) = c + a*x^k, for xs that double at each step. The
+    differences between successive times grow as x^k whatever c is, so k is
+    the power fitted to them. None with fewer than three points or a
+    difference that is not positive. Returns (k, r2)."""
+    if len(xs) < 3:
+        return None
+    ds = [b - a for a, b in zip(ys, ys[1:])]
+    if any(d <= 0 for d in ds):
+        return None
+    _, k, r2 = fit_power(xs[:-1], ds)
+    return k, r2
 
 
 def fit_quadratic(xs, ys):
@@ -182,6 +291,7 @@ class Bench:
         self.fits = []
         self.started = time.strftime("%Y-%m-%d %H:%M")
         self.load = os.getloadavg()[0]
+        self.load_max = self.load
 
     def path(self, *parts):
         return os.path.join(self.dir, *parts)
@@ -194,18 +304,30 @@ class Bench:
 
     def time(self, cmd, reps=None, env=None, stdin=None, cwd=None):
         """Time cmd `reps` times (default: the bench's). Returns a Timing."""
-        walls = []
+        walls, cpus = [], []
         rss = 0
         out = b""
+        ext = {}
         for _ in range(reps or self.reps):
-            w, r, out = timed(cmd, cwd or self.dir, env=env, stdin=stdin)
+            w, r, out, c = timed_cpu(cmd, cwd or self.dir, env=env, stdin=stdin)
             walls.append(w)
+            cpus.append(c)
             rss = max(rss, r)
-        return Timing(walls, rss, out)
+            take_last(ext)
+        if OPTIONS["tree_mem"]:
+            timed_cpu(cmd, cwd or self.dir, env=env, stdin=stdin, sample=True)
+            take_last(ext)
+        return Timing(walls, rss, out, cpus, ext)
 
     def point(self, series, x, timing, **extra):
+        load = os.getloadavg()[0]
+        self.load_max = max(self.load_max, load)
         row = {"series": series, "x": x, "best_s": timing.best,
-               "median_s": timing.median, "maxrss_kib": timing.maxrss_kib}
+               "median_s": timing.median, "maxrss_kib": timing.maxrss_kib,
+               "load": f"{load:.2f}"}
+        if timing.cpu is not None:
+            row["cpu_s"] = f"{timing.cpu:.4f}"
+        row.update(timing.extra)
         row.update(extra)
         self.points.append(row)
         print(f"  {series:<24} x={x:<12} best {fmt_time(timing.best):>10}"
@@ -223,13 +345,47 @@ class Bench:
         every x once, so a change in machine load during the sweep reaches
         all points rather than tilting the fit. Returns the best time per x."""
         walls = {x: [] for x in xs}
+        cpus = {x: [] for x in xs}
         rss = {x: 0 for x in xs}
+        ext = {x: {} for x in xs}
         for _ in range(reps or self.reps):
             for x in xs:
-                w, r, _ = timed(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
+                w, r, _, c = timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
                 walls[x].append(w)
+                cpus[x].append(c)
                 rss[x] = max(rss[x], r)
-        return [self.point(series, x, Timing(walls[x], rss[x], b"")) for x in xs]
+                take_last(ext[x])
+        if OPTIONS["tree_mem"]:
+            for x in xs:
+                timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env, sample=True)
+                take_last(ext[x])
+        return [self.point(series, x, Timing(walls[x], rss[x], b"", cpus[x], ext[x])) for x in xs]
+
+    def sweep_variants(self, series, variants, xs, cmd_of, reps=None, cwd_of=None):
+        """An in-run A/B: time cmd_of(x) under each variant's environment
+        (`variants` maps a name to an env dict), visiting every variant and
+        every x once per repetition, so load reaches all of them alike.
+        Records series `<series>.<variant>`; returns {variant: [best per x]}."""
+        walls = {(v, x): [] for v in variants for x in xs}
+        cpus = {k: [] for k in walls}
+        rss = {k: 0 for k in walls}
+        ext = {k: {} for k in walls}
+        for _ in range(reps or self.reps):
+            for x in xs:
+                for v, env in variants.items():
+                    w, r, _, c = timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
+                    walls[v, x].append(w)
+                    cpus[v, x].append(c)
+                    rss[v, x] = max(rss[v, x], r)
+                    take_last(ext[v, x])
+        if OPTIONS["tree_mem"]:
+            for x in xs:
+                for v, env in variants.items():
+                    timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env, sample=True)
+                    take_last(ext[v, x])
+        return {v: [self.point(f"{series}.{v}", x,
+                               Timing(walls[v, x], rss[v, x], b"", cpus[v, x], ext[v, x]))
+                    for x in xs] for v in variants}
 
     def sweep_linear(self, item, series, xs, cmd_of, x_unit, b_unit="us",
                      c_unit="ms", reps=None, env=None, cwd_of=None):
@@ -244,6 +400,7 @@ class Bench:
     def save(self, run_dir):
         os.makedirs(run_dir, exist_ok=True)
         head = (f"# {self.name} {self.started} load={self.load:.2f} "
+                f"load_max={self.load_max:.2f} "
                 f"morloc={morloc_version()} commit={compiler_commit()} "
                 f"cpu={cpu_name()} cores={os.cpu_count()}\n")
         keys = []
@@ -270,11 +427,14 @@ def default_run_name(label=None):
 
 def main():
     sys.path.insert(0, HERE)
+    # A bench imports `perf`; make that this module, so the OPTIONS it sets
+    # are the ones timed_cpu reads.
+    sys.modules.setdefault("perf", sys.modules[__name__])
     import argparse
     import importlib.util
     ap = argparse.ArgumentParser()
     ap.add_argument("name")
-    ap.add_argument("--reps", type=int, default=5)
+    ap.add_argument("--reps", type=int, default=7)
     ap.add_argument("--quick", action="store_true",
                     help="smaller sweeps; results are not saved")
     ap.add_argument("--run", help="results/<RUN> to write into (default: date-commit)")

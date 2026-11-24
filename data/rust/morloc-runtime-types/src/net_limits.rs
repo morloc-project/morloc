@@ -125,3 +125,65 @@ mod tests {
         assert_eq!(body_limit(64 * 1024 * 1024), BODY_BASE + Duration::from_secs(4096));
     }
 }
+
+/// The first step a declared length is read in. Past it a buffer grows by
+/// doubling, capped at the declared length, so a length past the input
+/// costs at most twice the bytes that arrived (NET-10).
+pub const DECLARED_CHUNK: usize = 64 << 20;
+
+/// Append `len` declared bytes to `buf`, each step read by `fill` (true:
+/// the step was filled; false: the input ended). Ok(false) when the input
+/// ended first, with `buf` back to what it held before.
+pub fn read_declared<E>(
+    buf: &mut Vec<u8>,
+    len: u64,
+    mut fill: impl FnMut(&mut [u8]) -> Result<bool, E>,
+) -> Result<bool, E> {
+    let start = buf.len();
+    let Some(target) = usize::try_from(len).ok().and_then(|n| start.checked_add(n)) else {
+        return Ok(false);
+    };
+    while buf.len() < target {
+        let at = buf.len();
+        if at == buf.capacity() {
+            buf.reserve_exact(buf.capacity().max(DECLARED_CHUNK).min(target - at));
+        }
+        let end = buf.capacity().min(target);
+        buf.resize(end, 0);
+        if !fill(&mut buf[at..end])? {
+            buf.truncate(start);
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod declared_tests {
+    use super::*;
+
+    #[test]
+    fn a_declared_length_past_the_input_costs_only_what_arrived() {
+        let mut src: &[u8] = &[7u8; 1000];
+        let mut buf = vec![1u8, 2];
+        let got = read_declared(&mut buf, 1 << 40, |b| {
+            Ok::<_, ()>(std::io::Read::read_exact(&mut src, b).is_ok())
+        });
+        assert_eq!(got, Ok(false));
+        assert_eq!(buf, vec![1u8, 2]);
+        assert!(buf.capacity() <= 2 + DECLARED_CHUNK);
+    }
+
+    #[test]
+    fn a_declared_length_the_input_holds_is_read_to_its_exact_size() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+        let mut src: &[u8] = &data;
+        let mut buf = Vec::new();
+        let got = read_declared(&mut buf, data.len() as u64, |b| {
+            Ok::<_, ()>(std::io::Read::read_exact(&mut src, b).is_ok())
+        });
+        assert_eq!(got, Ok(true));
+        assert_eq!(buf, data);
+        assert_eq!(buf.capacity(), data.len());
+    }
+}

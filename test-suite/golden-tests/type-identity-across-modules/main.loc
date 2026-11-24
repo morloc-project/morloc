@@ -12,8 +12,6 @@ import .lib (mk, withSink, mkP, getx, red, circle, leafy, rank, area, isLeaf)
 
 record P where
   z :: Str
-record Py => P = "dict"
-record Cpp => P = "struct"
 
 data Color = Cyan | Magenta | Yellow
 data Shape = Tri Int Int

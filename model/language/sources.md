@@ -61,7 +61,10 @@ R pool keeps its runtime in one environment, `.__morloc`, and its
 manifolds as global `.__mm_<id>`; an R source that defines, replaces or
 removes one of these fails to load, and so does a call that assigns one.
 The helpers user R files call, `.morloc.source`, `.morloc.pooldir` and
-`.morloc.libdir`, are bound globally.
+`.morloc.libdir`, are bound globally. A source with no file names the
+language's builtin of that name, never a name the pool defines (lang.yaml
+`ldBuiltinQualifier`; Python reaches it through its `builtins` module), so
+sourcing a pool function such as Python's `dispatch` fails at the call.
 
 ### SRC-7 A language may declare build steps for each file it sources
 Intent: proposed
@@ -82,7 +85,7 @@ the build.
 
 ### SRC-8 A program refuses to run a sourced file that changed after its build
 Intent: ruled 2026-11-01
-Code: conforms 2026-11-01
+Code: deviates (../runtime/issues/build-and-text.md)
 Tests: spec-src-8-1, spec-src-8-2, spec-src-8-3
 
 A pool of a language that loads its sources when it starts (Python, R)
@@ -101,3 +104,16 @@ not stop it. Its manifest also records how to repeat its build. After
 `morloc install --force`, every installed program whose recorded files no
 longer match is rebuilt that way; the install fails if one cannot be
 rebuilt. `--no-rebuild` names those programs instead.
+
+### SRC-9 A program's own source of a term shadows an imported one
+Intent: ruled 2026-11-20
+Tests: spec-src-9-1
+Code: conforms 2026-11-20
+
+When the program's own modules (those of the root module's package, or
+the modules of no package for a script) source a term in a language, a
+source of the same term in that language from an imported module is not
+an implementation of it, anywhere in the program: the imported modules'
+own uses of the term call the program's implementation too. So a root
+module that gains a function does not break a program that implemented it. Two imported modules sourcing one
+term in one language remain ambiguous.

@@ -78,12 +78,9 @@ runMM home action = do
           { configHome = home
           , configState = home
           , configLibrary = home
-          , configPlane = "default"
-          , configPlaneCore = "morloclib"
           , configTmpDir = home </> "tmp"
           , configBuildConfig = home </> ".build-config.yaml"
           , configLangOverrides = mempty
-          , configRegistry = Nothing
           }
   ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
   return r

@@ -23,6 +23,7 @@ use crate::shm::{self, AbsPtr, Array};
 use crate::cschema::CSchema;
 use crate::schema::SerialType;
 use crate::voidstar::{MorlocSpace, Space};
+use std::collections::HashMap;
 use std::os::raw::{c_char, c_void};
 
 /// C entry point for the cross-pool NUL guard.
@@ -119,6 +120,70 @@ unsafe fn index_recur(s: *const CSchema, decls: &mut Vec<*const CSchema>, out: &
     }
 }
 
+/// The schema nodes the walk steps into from `s`.
+unsafe fn walked_children(s: &CSchema) -> Vec<*const CSchema> {
+    if s.parameters.is_null() {
+        return Vec::new();
+    }
+    let n = match kind(s) {
+        Some(SerialType::Array) => s.size.min(1),
+        Some(SerialType::Optional) => 1,
+        Some(SerialType::Tuple | SerialType::Map | SerialType::Variant) => s.size,
+        _ => 0,
+    };
+    (0..n).map(|i| *s.parameters.add(i) as *const CSchema).filter(|p| !p.is_null()).collect()
+}
+
+/// Every node of a C schema tree, children before their parent.
+unsafe fn post_order(s: *const CSchema, out: &mut Vec<*const CSchema>) {
+    if s.is_null() {
+        return;
+    }
+    for c in walked_children(&*s) {
+        post_order(c, out);
+    }
+    out.push(s);
+}
+
+/// For every node of a C schema tree, whether a value of it can hold a
+/// String the walk would reach. A back-reference holds one when its
+/// declaration does; the least fixed point is taken, since a String must
+/// sit at a finite depth.
+unsafe fn index_strings(
+    schema: *const CSchema,
+    recur: &[(*const CSchema, *const CSchema)],
+) -> HashMap<*const CSchema, bool> {
+    let mut nodes = Vec::new();
+    post_order(schema, &mut nodes);
+    let mut has: HashMap<*const CSchema, bool> = nodes.iter().map(|n| (*n, false)).collect();
+    loop {
+        let mut changed = false;
+        for n in &nodes {
+            let s = &**n;
+            let v = match kind(s) {
+                Some(SerialType::String) => true,
+                Some(SerialType::Recur) => recur
+                    .iter()
+                    .find(|(r, _)| r == n)
+                    .is_some_and(|(_, d)| has.get(d).copied().unwrap_or(false)),
+                _ => walked_children(s).iter().any(|c| has.get(c).copied().unwrap_or(false)),
+            };
+            if v != has[n] {
+                has.insert(*n, v);
+                changed = true;
+            }
+        }
+        if !changed {
+            return has;
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Walk a C-ABI schema-typed value looking for the first String slot with an
 /// interior NUL. The pending nodes live on a heap stack, so a recursive
 /// value of any depth is scanned in bounded stack space; a container leaves
@@ -132,8 +197,18 @@ unsafe fn walk_c(
     let mut recur: Vec<(*const CSchema, *const CSchema)> = Vec::new();
     let mut decls = Vec::new();
     index_recur(schema, &mut decls, &mut recur);
+    let strings = index_strings(schema, &recur);
+    let holds_string = |s: *const CSchema| strings.get(&s).copied().unwrap_or(true);
+    if !holds_string(schema) {
+        return None;
+    }
     let mut stack: Vec<Todo> = vec![Todo { schema, data: ptr, idx: 0, path_len: 0, seg: Seg::Root }];
     while let Some(mut t) = stack.pop() {
+        #[cfg(test)]
+        VISITS.with(|v| v.set(v.get() + 1));
+        if !holds_string(t.schema) {
+            continue;
+        }
         path.truncate(t.path_len);
         match t.seg {
             Seg::Root => {}
@@ -180,7 +255,7 @@ unsafe fn walk_c(
                     continue;
                 }
                 let elem = *s.parameters;
-                if elem.is_null() {
+                if elem.is_null() || !holds_string(elem) {
                     continue;
                 }
                 let elem_width = (*elem).width;
@@ -430,6 +505,47 @@ mod tests {
         });
     }
 
+    unsafe fn visits_to_scan(json: &str, schema: &str) -> (Option<String>, usize) {
+        let s = crate::schema::parse_schema(schema).unwrap();
+        let ptr = crate::json::read_json_with_schema(json, &s).unwrap();
+        VISITS.with(|v| v.set(0));
+        let r = first_null(ptr, &s);
+        let n = VISITS.with(|v| v.get());
+        crate::shm::shfree(ptr).unwrap();
+        (r, n)
+    }
+
+    /// A value whose type holds no String is not walked; a String-free
+    /// field beside a String is skipped; a String inside nested types is
+    /// still found.
+    #[test]
+    fn string_free_subtrees_are_not_walked() {
+        let _shm = setup();
+        let reals = format!("[{}]", vec!["1.5"; 100_000].join(","));
+        let nul = "\\u0000";
+        unsafe {
+            assert_eq!(visits_to_scan(&reals, "af8"), (None, 0));
+            let rec = format!("{{\"n\":3,\"xs\":{reals}}}");
+            assert_eq!(visits_to_scan(&rec, "m21ni42xsaf8"), (None, 0));
+            let recs = format!("[{}]", vec!["{\"n\":1,\"b\":[true,false]}"; 1000].join(","));
+            assert_eq!(visits_to_scan(&recs, "am21ni41bab"), (None, 0));
+
+            let mixed = format!("{{\"xs\":{reals},\"s\":\"a{nul}\"}}");
+            let (r, n) = visits_to_scan(&mixed, "m22xsaf81ss");
+            assert!(r.unwrap().starts_with(".s"));
+            assert!(n < 10, "visits={n}");
+
+            let deep = format!("[{{\"xs\":[1.0],\"t\":[[2,null],[3,\"b{nul}\"]]}}]");
+            let (r, _) = visits_to_scan(&deep, "am22xsaf81tat2i4?s");
+            let path = r.expect("NUL in a nested Str");
+            assert!(path.starts_with("[0].t[1].1(some)"), "path={path}");
+
+            let clean = "{\"Cons\":[1,{\"Cons\":[2,{\"Nil\":null}]}]}";
+            let (r, n) = visits_to_scan(clean, "&2LLv23Nil04Cons2i4^2LL");
+            assert_eq!((r, n), (None, 0));
+        }
+    }
+
     #[test]
     fn env_skip_default_off() {
         assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
@@ -493,6 +609,17 @@ mod tests {
 
 mod c_abi {
     use super::*;
+
+    /// The offset of the first byte of `len` bytes at `bytes` that is not
+    /// valid UTF-8, or -1 when they are all valid or the check is off.
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_utf8_check(bytes: *const u8, len: usize) -> i64 {
+        if bytes.is_null() || len == 0 {
+            return -1;
+        }
+        let slice = std::slice::from_raw_parts(bytes, len);
+        morloc_runtime_types::utf8::checked_first_invalid(slice).map_or(-1, |i| i as i64)
+    }
 
     #[no_mangle]
     pub unsafe extern "C" fn morloc_first_null_in_value(voidstar: *const c_void, schema: *const CSchema, space: MorlocSpace) -> *mut c_char {

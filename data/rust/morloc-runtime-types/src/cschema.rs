@@ -4,7 +4,8 @@
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
-use crate::schema::{Schema, SerialType};
+use crate::publish_once::PublishOnce;
+use crate::schema::{schema_to_string, Schema, SerialType};
 
 /// C-compatible Schema struct matching the C `Schema` layout.
 ///
@@ -29,6 +30,21 @@ pub struct CSchema {
     pub alignment: usize,
     pub data_alignment: usize,
     pub fixed_width: bool,
+    /// The runtime's own forms of this schema, built on first use (INIT-3).
+    pub converted: PublishOnce<Converted>,
+}
+
+/// A schema as the runtime reads it, and as packet metadata writes it.
+pub struct Converted {
+    pub schema: Schema,
+    text: PublishOnce<String>,
+}
+
+impl Converted {
+    /// The schema's text, built on first use (INIT-3).
+    pub fn text(&self) -> &str {
+        self.text.get_or_init(|| schema_to_string(&self.schema))
+    }
 }
 
 impl CSchema {
@@ -80,8 +96,19 @@ impl CSchema {
             alignment: schema.alignment(),
             data_alignment: schema.array_data_alignment(),
             fixed_width: schema.is_fixed_width(),
+            converted: PublishOnce::new(),
         });
         Box::into_raw(cs)
+    }
+
+    /// The runtime's forms of a schema, converted once per schema node and
+    /// freed with it.
+    ///
+    /// # Safety
+    /// `cs` must be a valid, non-null pointer returned by `from_rust`, and
+    /// the result must not be used after `cs` is freed.
+    pub unsafe fn converted<'a>(cs: *const CSchema) -> &'a Converted {
+        (*cs).converted.get_or_init(|| Converted { schema: CSchema::to_rust(cs), text: PublishOnce::new() })
     }
 
     /// Convert a C-allocated CSchema to a Rust Schema by deep-copying all data.
@@ -225,6 +252,23 @@ pub unsafe fn is_top_null(schema: *const CSchema, ptr: *const u8) -> bool {
 mod layout_field_tests {
     use super::*;
     use crate::schema::parse_schema;
+
+    #[test]
+    fn a_schema_node_is_converted_once_and_freed_with_it() {
+        for s in ["s", "ai8", "aai8", "t2t2i8i8ai8"] {
+            let rs = parse_schema(s).unwrap();
+            let cs = CSchema::from_rust(&rs);
+            unsafe {
+                let a = CSchema::converted(cs) as *const Converted;
+                let b = CSchema::converted(cs) as *const Converted;
+                assert_eq!(a, b, "{s}: converted twice");
+                assert_eq!((*a).text(), schema_to_string(&rs), "{s}: text");
+                assert_eq!((*a).text().as_ptr(), (*b).text().as_ptr(), "{s}: text built twice");
+                assert_eq!(schema_to_string(&(*a).schema), schema_to_string(&rs), "{s}: schema");
+                CSchema::free(cs);
+            }
+        }
+    }
 
     /// The layout facts a C schema carries are the runtime's own, at every
     /// node, so no language needs rules of its own to lay values out.

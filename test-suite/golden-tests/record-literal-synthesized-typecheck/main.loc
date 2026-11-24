@@ -12,12 +12,10 @@ effect IO, Err
 
 data Box a = Empty | Full a
 
-record Py => R = "dict"
 record R where
   tag :: Int
   b :: Box Int
 
-record Py => R3 = "dict"
 record R3 where
   tag :: Int
   run :: <IO, Err> Int

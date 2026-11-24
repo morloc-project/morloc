@@ -548,119 +548,47 @@ pub fn parallel_decompress_frames(
     compressed: &[u8],
     dest: &mut [u8],
 ) -> Result<(), MorlocError> {
-    if frames.is_empty() {
-        return Ok(());
-    }
+    parallel_decompress_frame_sets(&mut [FrameSet { frames, compressed, dest }], frame_workers())
+}
 
-    // The totals are checked first, so no prefix sum below can overflow.
-    let (unc_cur, comp_cur) = crate::packet::frame_totals(frames)?;
-    if comp_cur != compressed.len() {
-        return Err(MorlocError::Packet(format!(
-            "compressed buffer is {} bytes; frame index sums to {}",
-            compressed.len(),
-            comp_cur
-        )));
-    }
-    if unc_cur != dest.len() {
-        return Err(MorlocError::Packet(format!(
-            "dest buffer is {} bytes; frame index sums to {}",
-            dest.len(),
-            unc_cur
-        )));
-    }
+/// The most threads a decode-ahead pass decodes on, the calling thread among
+/// them (ZIP-10).
+pub const AHEAD_WIDTH: usize = 2;
 
-    let mut work: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(frames.len());
-    let (mut comp_off, mut unc_off) = (0usize, 0usize);
-    for f in frames {
-        let cs = crate::width::usize_from_u64(f.compressed_size);
-        let us = crate::width::usize_from_u64(f.uncompressed_size);
-        work.push((comp_off, cs, unc_off, us));
-        comp_off += cs;
-        unc_off += us;
-    }
+/// The threads a decode-ahead pass decodes on: [`AHEAD_WIDTH`], at most
+/// `frame_workers()`.
+pub fn ahead_workers() -> usize {
+    AHEAD_WIDTH.min(frame_workers())
+}
 
-    if frames.len() == 1 {
-        let (comp_off, cs, unc_off, us) = work[0];
-        let mut decoder = make_bulk_decompressor()?;
-        let written = decoder
-            .decompress_to_buffer(
-                &compressed[comp_off..comp_off + cs],
-                &mut dest[unc_off..unc_off + us],
-            )
-            .map_err(MorlocError::Io)?;
-        if written != us {
-            return Err(MorlocError::Packet(format!(
-                "frame 0 decompressed {} bytes, expected {}",
-                written, us
-            )));
-        }
-        return Ok(());
-    }
+/// Counters and policy of the frame-decoding test hook.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Default)]
+pub struct FrameSpawnHook {
+    /// Refuse every extra thread instead of starting it.
+    pub refuse: bool,
+    /// Decodes that asked for extra threads.
+    pub decodes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Extra threads asked for.
+    pub spawns: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
 
-    let n_workers = frame_workers().min(frames.len());
-    let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    let dest_ptr_addr = dest.as_mut_ptr() as usize;
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    static FRAME_SPAWN_HOOK: std::cell::RefCell<Option<FrameSpawnHook>> = const { std::cell::RefCell::new(None) };
+}
 
-    std::thread::scope(|s| -> Result<(), MorlocError> {
-        let mut handles = Vec::with_capacity(n_workers);
-        for _ in 0..n_workers {
-            let work_ref = &work;
-            let compressed_ref = compressed;
-            let next_idx_ref = &next_idx;
-            let h = s.spawn(move || -> Result<(), MorlocError> {
-                let mut decoder = make_bulk_decompressor()
-                    .map_err(MorlocError::Io)?;
-                loop {
-                    let i = next_idx_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if i >= work_ref.len() {
-                        return Ok(());
-                    }
-                    let (comp_off, cs, unc_off, us) = work_ref[i];
-                    let comp_slice = &compressed_ref[comp_off..comp_off + cs];
-                    // SAFETY: per-frame subranges are disjoint by
-                    // construction (prefix sums of `uncompressed_size`).
-                    let dest_slice = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            (dest_ptr_addr as *mut u8).add(unc_off),
-                            us,
-                        )
-                    };
-                    let written = decoder
-                        .decompress_to_buffer(comp_slice, dest_slice)
-                        .map_err(MorlocError::Io)?;
-                    if written != us {
-                        return Err(MorlocError::Packet(format!(
-                            "frame {} decompressed {} bytes, expected {}",
-                            i, written, us
-                        )));
-                    }
-                }
-            });
-            handles.push(h);
-        }
-        let mut first_err: Option<MorlocError> = None;
-        for h in handles {
-            match h.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-                Err(_) => {
-                    if first_err.is_none() {
-                        first_err = Some(MorlocError::Other(
-                            "frame decompression worker panicked".into(),
-                        ));
-                    }
-                }
-            }
-        }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
-    })
+/// Test hook: while Some, frame decodes started from the calling thread
+/// count each extra thread they ask for, and are refused it when `refuse`.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_frame_spawn_hook(hook: Option<FrameSpawnHook>) {
+    FRAME_SPAWN_HOOK.with(|r| *r.borrow_mut() = hook);
+}
+
+/// The hook [`set_frame_spawn_hook`] set on this thread, if any.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn frame_spawn_hook() -> Option<FrameSpawnHook> {
+    FRAME_SPAWN_HOOK.with(|r| r.borrow().clone())
 }
 
 /// One payload for [`parallel_decompress_frame_sets`]: its frame index, its
@@ -671,12 +599,14 @@ pub struct FrameSet<'a> {
     pub dest: &'a mut [u8],
 }
 
-/// Decompress the frames of several payloads on one set of `frame_workers()`
-/// threads, so payloads of a frame or two each still decode in parallel.
-/// Each set is checked as [`parallel_decompress_frames`] checks its one
-/// payload before anything is decoded; the result is the first error, or
-/// `Ok` when every frame of every set decoded to its indexed size.
-pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), MorlocError> {
+/// Decompress the frames of several payloads on at most `width` threads,
+/// the calling thread among them, so payloads of a frame or two
+/// each still decode in parallel and a thread the system refuses only
+/// narrows the decode (ZIP-10). Every set's frame index must total its two
+/// buffer lengths, checked before anything is decoded; the result is the
+/// error of the lowest-numbered frame that failed, or `Ok` when every frame
+/// of every set decoded to its indexed size.
+pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>], width: usize) -> Result<(), MorlocError> {
     // (set, comp_off, comp_len, unc_off, unc_len)
     let mut work: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
     for (k, set) in sets.iter().enumerate() {
@@ -724,7 +654,7 @@ pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), M
         }
         Ok(())
     };
-    let n_workers = frame_workers().min(work.len());
+    let n_workers = width.min(work.len());
     if n_workers <= 1 {
         let mut decoder = make_bulk_decompressor().map_err(MorlocError::Io)?;
         for i in 0..work.len() {
@@ -733,15 +663,18 @@ pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), M
         return Ok(());
     }
     let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    let first_err: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
+    let first_err: std::sync::Mutex<Option<(usize, MorlocError)>> = std::sync::Mutex::new(None);
+    let fail = |i: usize, e: MorlocError| {
+        let mut f = first_err.lock().unwrap_or_else(|p| p.into_inner());
+        if f.as_ref().is_none_or(|(j, _)| i < *j) {
+            *f = Some((i, e));
+        }
+        next_idx.store(usize::MAX / 2, std::sync::atomic::Ordering::Relaxed);
+    };
     let work = || {
-        let fail = |e: MorlocError| {
-            first_err.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
-            next_idx.store(usize::MAX / 2, std::sync::atomic::Ordering::Relaxed);
-        };
         let mut decoder = match make_bulk_decompressor() {
             Ok(d) => d,
-            Err(e) => return fail(MorlocError::Io(e)),
+            Err(e) => return fail(usize::MAX, MorlocError::Io(e)),
         };
         loop {
             let i = next_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -749,20 +682,40 @@ pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), M
                 return;
             }
             if let Err(e) = decode_one(&mut decoder, i) {
-                return fail(e);
+                return fail(i, e);
             }
         }
     };
+    #[cfg(any(test, feature = "test-hooks"))]
+    let hook = frame_spawn_hook();
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(h) = &hook {
+        h.decodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     std::thread::scope(|s| {
+        let mut helpers = Vec::with_capacity(n_workers - 1);
         // The calling thread works too, so a refused spawn only narrows it.
         for _ in 1..n_workers {
-            if std::thread::Builder::new().spawn_scoped(s, &work).is_err() {
-                break;
+            #[cfg(any(test, feature = "test-hooks"))]
+            if let Some(h) = &hook {
+                h.spawns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if h.refuse {
+                    break;
+                }
+            }
+            match std::thread::Builder::new().spawn_scoped(s, &work) {
+                Ok(h) => helpers.push(h),
+                Err(_) => break,
             }
         }
         work();
+        for h in helpers {
+            if h.join().is_err() {
+                fail(usize::MAX, MorlocError::Other("frame decompression worker panicked".into()));
+            }
+        }
     });
-    first_err.into_inner().unwrap_or_else(|p| p.into_inner()).map_or(Ok(()), Err)
+    first_err.into_inner().unwrap_or_else(|p| p.into_inner()).map_or(Ok(()), |(_, e)| Err(e))
 }
 
 // ── Streaming encoders (no intermediate Vec for the compressed bytes) ────
@@ -888,7 +841,7 @@ pub fn compress_packet(
 
     let mut new_header = header;
     new_header.command.data.compression = PACKET_COMPRESSION_ZSTD;
-    new_header.offset = new_meta.len() as u32;
+    new_header.offset = crate::packet::meta_len_u32(new_meta.len());
     let mut new_hdr_bytes = new_header.to_bytes();
     new_hdr_bytes[24..32].copy_from_slice(&(compressed.len() as u64).to_le_bytes());
 
@@ -1100,6 +1053,58 @@ mod tests {
         let mut decoded = vec![0u8; raw.len()];
         parallel_decompress_frames(&par_frames, &par_out, &mut decoded).unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    /// ZIP-10: a frame decode refused every thread it asks for decodes
+    /// every frame on the calling thread, for one payload and for several.
+    #[test]
+    fn a_frame_decode_refused_every_thread_decodes_on_the_caller() {
+        let raw: Vec<u8> = (0..(FRAME_CHUNK_SIZE * 3 + 77)).map(|i| (i * 7 % 251) as u8).collect();
+        let lvl = CompressionLevel::from_u8(3).unwrap();
+        let (comp, frames) = compress_payload_zstd(&raw, lvl).unwrap();
+        assert!(frames.len() >= 2);
+        let hook = FrameSpawnHook { refuse: true, ..Default::default() };
+        set_frame_spawn_hook(Some(hook.clone()));
+        let mut one = vec![0u8; raw.len()];
+        let r1 = parallel_decompress_frames(&frames, &comp, &mut one);
+        let (mut a, mut b) = (vec![0u8; raw.len()], vec![0u8; raw.len()]);
+        let r2 = parallel_decompress_frame_sets(&mut [
+            FrameSet { frames: &frames, compressed: &comp, dest: &mut a },
+            FrameSet { frames: &frames, compressed: &comp, dest: &mut b },
+        ], frame_workers());
+        set_frame_spawn_hook(None);
+        r1.unwrap();
+        r2.unwrap();
+        assert!(one == raw && a == raw && b == raw);
+        if frame_workers() >= 2 {
+            assert_eq!(hook.spawns.load(std::sync::atomic::Ordering::Relaxed), 2);
+        }
+    }
+
+    /// A frame decode asks for one thread fewer than `frame_workers()` or its
+    /// frames, whichever is less.
+    #[test]
+    fn a_frame_decode_asks_for_a_thread_per_frame_up_to_the_workers() {
+        let raw: Vec<u8> = (0..(FRAME_CHUNK_SIZE * 5 + 3)).map(|i| (i * 13 % 241) as u8).collect();
+        let (comp, frames) = compress_payload_zstd(&raw, CompressionLevel::from_u8(3).unwrap()).unwrap();
+        let hook = FrameSpawnHook::default();
+        set_frame_spawn_hook(Some(hook.clone()));
+        let mut out = vec![0u8; raw.len()];
+        let r = parallel_decompress_frames(&frames, &comp, &mut out);
+        set_frame_spawn_hook(None);
+        r.unwrap();
+        assert!(out == raw);
+        let want = frame_workers().min(frames.len()) - 1;
+        assert_eq!(hook.spawns.load(std::sync::atomic::Ordering::Relaxed), want);
+    }
+
+    /// An empty frame index does not describe non-empty buffers.
+    #[test]
+    fn an_empty_frame_index_with_bytes_to_decode_is_refused() {
+        let mut dest = vec![0u8; 8];
+        assert!(parallel_decompress_frames(&[], &[], &mut dest).is_err());
+        assert!(parallel_decompress_frames(&[], &[1, 2, 3], &mut []).is_err());
+        assert!(parallel_decompress_frames(&[], &[], &mut []).is_ok());
     }
 
     #[test]
@@ -1379,20 +1384,20 @@ mod tests {
 /// the array length its payload begins with. A compressed payload is
 /// decoded only as far as those first bytes.
 pub fn subpacket_elem_count(file: &[u8], off: u64) -> Result<u64, MorlocError> {
+    let header = usize::try_from(off).ok()
+        .and_then(|off| file.get(off..))
+        .ok_or_else(|| MorlocError::Packet("sub-packet header past the end of the file".into()))
+        .and_then(crate::packet::PacketHeader::from_prefix)?;
     let off = off as usize;
-    let header_bytes: &[u8; 32] = file
-        .get(off..off + 32)
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| MorlocError::Packet("sub-packet header past the end of the file".into()))?;
-    let header = crate::packet::PacketHeader::from_bytes(header_bytes)?;
     if !header.is_data() {
         return Err(MorlocError::Packet("expected a data sub-packet".into()));
     }
     // SAFETY: is_data() implies the data variant of the command union.
     let compression = unsafe { header.command.data.compression };
     let start = off + 32 + header.offset as usize;
-    let payload = file
-        .get(start..start + header.length as usize)
+    let payload = usize::try_from(header.length).ok()
+        .and_then(|len| start.checked_add(len))
+        .and_then(|end| file.get(start..end))
         .ok_or_else(|| MorlocError::Packet("sub-packet payload past the end of the file".into()))?;
     let mut first = [0u8; 8];
     match compression {
@@ -1413,4 +1418,19 @@ pub fn subpacket_elem_count(file: &[u8], off: u64) -> Result<u64, MorlocError> {
         }
     }
     Ok(u64::from_le_bytes(first))
+}
+
+#[cfg(test)]
+mod elem_count_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn a_sub_packet_claiming_more_bytes_than_memory_is_refused() {
+        let h = crate::packet::PacketHeader::data_mesg(crate::packet::PACKET_FORMAT_VOIDSTAR, u64::MAX);
+        let mut file = vec![0u8; 8];
+        file.extend_from_slice(&h.to_bytes());
+        file.extend_from_slice(&[0u8; 16]);
+        assert!(subpacket_elem_count(&file, 8).is_err());
+        assert!(subpacket_elem_count(&file, u64::MAX).is_err());
+    }
 }

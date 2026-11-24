@@ -1,0 +1,89 @@
+--' Python IFile slices: strided, reversed and field-tail against unit
+module main
+  ( writeReals
+  , writeStrs
+  , writeTups
+  , sliceReals
+  , sliceStrs
+  , strideReals
+  , revReals
+  , strideStrs
+  , strideTups
+  , fieldTups
+  )
+
+import root
+import root-py
+
+source Py from "gen.py" ("gen_reals" as genReals, "gen_strs" as genStrs, "gen_tups" as genTups, "cnt")
+
+genReals :: I64 -> [Real]
+genStrs :: I64 -> [Str]
+genTups :: I64 -> [(I64, Real, Real)]
+cnt :: [a] -> Int
+
+--' Write n Reals to a stream file at a compression level
+writeReals :: Int -> I64 -> Str -> <IO> I64
+writeReals z n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  @write z o (genReals n)
+  @close o
+  n
+
+--' Write n Strs to a stream file at a compression level
+writeStrs :: Int -> I64 -> Str -> <IO> I64
+writeStrs z n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  @write z o (genStrs n)
+  @close o
+  n
+
+--' Read the first n Reals of a file with one slice
+sliceReals :: Int -> Str -> <IO> Int
+sliceReals n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  cnt (.[0:n] f)
+
+--' Read the first n Strs of a file with one slice
+sliceStrs :: Int -> Str -> <IO> Int
+sliceStrs n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  cnt (.[0:n] f)
+
+--' Write n tuples to a stream file at a compression level
+writeTups :: Int -> I64 -> Str -> <IO> I64
+writeTups z n path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream (I64, Real, Real)))
+  @write z o (genTups n)
+  @close o
+  n
+
+--' Read every k-th of the first n Reals of a file
+strideReals :: Int -> Int -> Str -> <IO> Int
+strideReals n k path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  cnt (.[0:n:k] f)
+
+--' Read every Real of a file in reverse
+revReals :: Str -> <IO> Int
+revReals path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  cnt (.[::-1] f)
+
+--' Read every k-th of the first n Strs of a file
+strideStrs :: Int -> Int -> Str -> <IO> Int
+strideStrs n k path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  cnt (.[0:n:k] f)
+
+--' Read every k-th of the first n tuples of a file
+strideTups :: Int -> Int -> Str -> <IO> Int
+strideTups n k path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [(I64, Real, Real)]))
+  cnt (.[0:n:k] f)
+
+--' Read the second field of the first n tuples of a file
+fieldTups :: Int -> Str -> <IO> Int
+fieldTups n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [(I64, Real, Real)]))
+  cnt (.[0:n].1 f)

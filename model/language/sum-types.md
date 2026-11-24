@@ -44,7 +44,10 @@ Code: deviates (issues/values.md)
 
 `==` compares constructors, then fields. `<` orders constructors by their
 position in the declaration, then the fields of equal constructors in order.
-The result does not depend on the language the comparison runs in.
+The result does not depend on the language the comparison runs in. Open
+(user, 2026-11-18): drop the derived `<` from sum types altogether; an
+enum's relation to integers is a language's affair, not part of what a sum
+type is.
 
 ### SUM-6 A constructor pattern and the scrutinee's type
 Intent: open

@@ -1,0 +1,46 @@
+-- CPP-7: a C++ function value takes a non-scalar parameter as `const A&`
+-- and a scalar by value, so applying one to a payload copies nothing: a
+-- let holding a partial application (twice), a parameter of function type
+-- applied in the body (viaParam) or handed to a header (viaHeader), and a
+-- lambda (viaLambda); a header still takes `std::function<int(int)>`
+-- (scalar). Each export but the last returns its value and the payload
+-- copies made in the call.
+module main (twice, viaParam, viaHeader, viaLambda, scalar)
+
+import root
+import root-cpp
+
+newtype Pay = Int
+type Cpp => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Cpp from "pay.hpp" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Cpp from "pay.hpp" ("mkp", "keyp", "census", "applyTwice", "applyScalar")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+census :: Int -> (Int, Int)
+applyTwice :: (Pay -> Int) -> Pay -> Int
+applyScalar :: (Int -> Int) -> Int -> Int
+
+addK :: Int -> Pay -> Int
+addK k p = keyp p + k
+
+twice :: Int -> (Int, Int)
+twice n = census (let g = addK 1 in let a = mkp n in g a + g a)
+
+both :: (Pay -> Int) -> Pay -> Int
+both g p = g p + g p
+
+viaParam :: Int -> (Int, Int)
+viaParam n = census (both (addK 2) (mkp n))
+
+viaHeader :: Int -> (Int, Int)
+viaHeader n = census (let g = addK 3 in applyTwice g (mkp n))
+
+viaLambda :: Int -> (Int, Int)
+viaLambda n = census (let g = \p -> keyp p + 4 in both g (mkp n))
+
+scalar :: Int -> Int
+scalar n = applyScalar (\x -> x + 5) n

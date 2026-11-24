@@ -57,12 +57,9 @@ loadDefaultMorlocConfig = do
       (MT.unpack . fromJust $ defaults K.!? "home")
       (MT.unpack . fromJust $ defaults K.!? "state")
       (MT.unpack . fromJust $ defaults K.!? "source")
-      (MT.unpack . fromJust $ defaults K.!? "plane")
-      (MT.unpack . fromJust $ defaults K.!? "plane-core")
       (MT.unpack . fromJust $ defaults K.!? "tmpdir")
       (MT.unpack . fromJust $ defaults K.!? "build-config")
       Map.empty -- configLangOverrides
-      Nothing   -- configRegistry
 
 {- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
 default configuration will be used.
@@ -241,8 +238,6 @@ defaultFields = do
       [ ("home", home)
       , ("state", state)
       , ("source", lib)
-      , ("plane", "default")
-      , ("plane-core", "morloclib")
       , ("tmpdir", tmp)
       , ("build-config", buildConfig)
       ]

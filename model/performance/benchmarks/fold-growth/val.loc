@@ -1,0 +1,30 @@
+-- COPY-7: a Rust @fold whose step takes its accumulator by value (RUST-5).
+module main (foldValRs, foldMorRs)
+
+import root-rust
+
+source Rust from "fval.rs"
+  ( "produce" as produceR, "empty" as emptyR, "step_val" as stepValR
+  , "cat" as catR, "len_of" as lenR, "ident" as identR )
+
+produceR :: I64 -> I64 -> ([I64] -> <IO> ()) -> <IO> ()
+emptyR :: [I64]
+stepValR :: [I64] -> [I64] -> [I64]
+catR :: [I64] -> [I64] -> [I64]
+identR :: [I64] -> [I64]
+--' The accumulator's length
+lenR :: [I64] -> Str
+
+--' A Rust @fold whose step takes its accumulator by value
+--' @render --n=lenR @fold=stepValR @init=emptyR @combine=catR
+foldValRs :: I64 -> I64 -> <IO> (Collect I64)
+foldValRs s b = @collect (produceR s b)
+
+--' A step written in morloc over the by-value step
+stepMorR :: [I64] -> [I64] -> [I64]
+stepMorR acc xs = stepValR acc (identR xs)
+
+--' A Rust @fold whose step is written in morloc
+--' @render --n=lenR @fold=stepMorR @init=emptyR @combine=catR
+foldMorRs :: I64 -> I64 -> <IO> (Collect I64)
+foldMorRs s b = @collect (produceR s b)

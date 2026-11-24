@@ -86,8 +86,6 @@ record SysConfig where
   --' @default false
   removeCaches :: Bool
 
-record Py => SysConfig = "dict"
-
 --' Summarize a system configuration
 configure :: SysConfig -> Str
 configure c = configSummary c

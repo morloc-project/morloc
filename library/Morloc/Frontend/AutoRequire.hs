@@ -111,13 +111,23 @@ autoRequire = go
                   isErr = AnnoS (idx (VarT BT.bool)) sc
                     (IntrinsicS IntrTagTest [subject, nameOf BT.tryErrCtor])
                   throwMsg = AnnoS tg tc (IntrinsicS IntrThrow [errMsg])
-                  shown = AnnoS tg tc (IfS isErr throwMsg (elseBranch guardE))
+                  -- When the pattern is a bare `Ok x`, a Try that fails it is
+                  -- Err, so the subject is never rendered; rendering it would
+                  -- demand a wire form of the Ok payload. Any other pattern
+                  -- can fail on an Ok value, which is then rendered.
+                  unreachableMsg = AnnoS tg tc (IntrinsicS IntrThrow [AnnoS (idx (VarT BT.str)) sc (StrS "a Try matched neither Ok nor Err")])
+                  otherwise' = if isOkTagTest cond then unreachableMsg else elseBranch guardE
+                  shown = AnnoS tg tc (IfS isErr throwMsg otherwise')
               return (AnnoS g c (IfS cond yes shown))
             _ -> return guardE
     throwErrPayload _ guardE = return guardE
 
+    isOkTagTest (AnnoS _ _ (IntrinsicS IntrTagTest [_, AnnoS _ _ (StrS n)])) = n == BT.tryOkCtor
+    isOkTagTest _ = False
+
     elseBranch (AnnoS _ _ (IfS _ _ e)) = e
     elseBranch e = e
+
 
     typeSofAnnoS (AnnoS (Idx _ t) _ _) = t
 
@@ -136,7 +146,7 @@ autoRequire = go
     -- The error and payload types of a Try, peeling any effect row.
     tryArms :: Type -> Maybe (Type, Type)
     tryArms (EffectT _ t) = tryArms t
-    tryArms (AppT (VarT v) [errT, okT]) | v == BT.tryVar = Just (errT, okT)
+    tryArms (AppT (VarT v) [TyA errT, TyA okT]) | v == BT.tryVar = Just (errT, okT)
     tryArms _ = Nothing
 
     freshGuardVar = do

@@ -1,4 +1,5 @@
-module main (pyPy, pyCpp, pyR, pyRs, cppPy, cppCpp, cppR, cppRs, rPy, rCpp, rR, rRs, rsPy, rsCpp, rsR, rsRs, nativePy, nativeCpp, nativeR, nativeRs)
+module main (pyPy, pyCpp, pyR, pyRs, cppPy, cppCpp, cppR, cppRs, rPy, rCpp, rR, rRs, rsPy, rsCpp, rsR, rsRs, nativePy, nativeCpp, nativeR, nativeRs,
+             pyCppRec, cppPyRec, pyCppVec, cppPyVec)
 
 import root-py
 import root-cpp
@@ -42,3 +43,34 @@ rsPy n = mapRs incPy n
 rsCpp n = mapRs incCpp n
 rsR n = mapRs incR n
 rsRs n = mapRs incRs n
+
+-- Shaped payloads: an 8-field record, and a [F64] of m elements.
+record Rec where
+  ra :: I64
+  rb :: F64
+  rc :: I64
+  rd :: F64
+  re :: I64
+  rf :: F64
+  rg :: I64
+  rh :: F64
+record Cpp => Rec = "Rec"
+
+source Py from "f.py" ("touch" as touchPy, "maprec" as mapRecPy, "vsum" as vsumPy, "mapvec" as mapVecPy)
+source Cpp from "f.hpp" ("touch" as touchCpp, "maprec" as mapRecCpp, "vsum" as vsumCpp, "mapvec" as mapVecCpp)
+
+touchPy :: Rec -> I64
+mapRecPy :: (Rec -> I64) -> I64 -> I64
+vsumPy :: [F64] -> F64
+mapVecPy :: ([F64] -> F64) -> I64 -> I64 -> F64
+touchCpp :: Rec -> I64
+mapRecCpp :: (Rec -> I64) -> I64 -> I64
+vsumCpp :: [F64] -> F64
+mapVecCpp :: ([F64] -> F64) -> I64 -> I64 -> F64
+
+-- <outer><Inner>Rec n: n calls, each crossing one record.
+-- <outer><Inner>Vec m n: n calls, each crossing m F64s.
+pyCppRec n = mapRecPy touchCpp n
+cppPyRec n = mapRecCpp touchPy n
+pyCppVec m n = mapVecPy vsumCpp m n
+cppPyVec m n = mapVecCpp vsumPy m n

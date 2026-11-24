@@ -3,15 +3,12 @@
 Status: analysed 2026-10-13, reviewed by the devil's advocate. W1, R1
 (SLOT-25) and W2 are done; the evidence and path sections below describe
 the code before them. The size walk remains, and compressed batches still
-land in shared memory (R2). Still copied on the write side: a stdout stream joins header and payload
-into one buffer before writing (`send_stdio`, custody.rs), and a
-multi-frame compressed batch joins its frames into one buffer before the
-write (`Ticket::wait`, write_behind.rs); both could hand an iovec to
-`pwritev`/`writev` instead. Both run on the stream's writer thread, off
-the producer's path: the frame join copies only compressed bytes, and the
-stdout join would need the one-buffer sink of SLOT-16 to take parts or
-let other output fall between them; left until a measurement shows the
-writer thread is the bottleneck. Index growth (`grow_index_capacity`)
+land in shared memory (R2). A stdout stream hands the nexus header, payload and padding as parts,
+written with one `writev` (SLOT-16, ENC-8). Still copied on the write
+side: a multi-frame compressed batch joins its frames into one buffer
+before the write (`Ticket::wait`, write_behind.rs); it runs on the
+stream's writer thread, off the producer's path, and copies only
+compressed bytes. Index growth (`grow_index_capacity`)
 moves the data region under the slot lock only in a stream's first
 sub-packet, since the capacity carries over to the next. Others open.
 Parent: runtime/issues/encode-throughput.md sections 1b and 2. Source:
@@ -74,7 +71,8 @@ walks per pair fit the ~0.5 us per pair. [inferred]
 
 ## Write path, `@write` [read]
 
-In the pool:
+The copy path (Python, R, and stdout, channels and tables from every
+language). In the pool:
 1. `_mlc_write`: size walk, `shmalloc` a 10 MiB block, `to_voidstar`
    (bulk memcpy for the vector, C:1323-1330): **copy 1**. After
    `mlc_write`, `shfree` scrubs it: **memset 2**.
@@ -110,8 +108,7 @@ comparable with `dd` until both sync or neither does. [inferred]
 
 For pairs the write path walks each value about six times: C++ size and
 write walks, Rust size walk, flatten, shift (`append_one_element`), and the
-custodian's compaction shift. (A stdout stream adds one more copy in
-`send_stdio`, custody.rs:796-799.)
+custodian's compaction shift.
 
 ## Solutions
 
@@ -120,15 +117,10 @@ No type or API change, each measurable alone:
 - **S0. Measure first.** Run once with `WORKDIR` on tmpfs and once with
   `dd conv=fdatasync` (or time `@close` separately); print `ru_minflt`
   (measure.py already calls `getrusage`); report the median of 5 runs.
-- **W3. Encode in place (model first).** The pool reserves space in the
-  slot's buffer and C++ encodes into it. C++ must then write
-  buffer-relative pointers (it writes shared-memory relptrs via
-  `abs2rel_cpp` today) and path-form stream handles (`PortablePayload`
-  checks this only in debug builds, `R/stream.rs:3365`); handle encoding
-  (a registry acquire) moves under the slot lock (lock order to model);
-  reserve must not advance counters before commit, and a C++ exception
-  must not unwind through Rust; oversize, staged and channel paths keep
-  staging. Changes SLOT-12's text.
+- **Writes left on the copy path.** Output-stream writes are encoded in
+  place (SLOT-36, SLOT-37) except numpy, bytes, R atomic vectors, and
+  every staged, channel and table write, which take the copy path above
+  (numpy in place was measured slower).
 - **R2.** Decompress into a reused, bounded private buffer and decode in
   payload space (with R1's callback), skipping the shared-memory block
   and its scrub. A thread-local buffer needs a STATE-1 registry row.
@@ -183,18 +175,35 @@ Not acceptable: a non-owning `std::span` justified by "the parameter is
 `const&` and never escapes". The compiler cannot see what sourced C++ does
 with a reference; it would be an unchecked lifetime claim.
 
-Order: S0, W3 (model first), R2; then A for C++ records and B for Rust.
+Order: S0, R2; then A for C++ records and B for Rust.
 Whether writes approach `dd` depends on the sync share, unmeasured.
+
+## An in-place batch smaller than the buffer holds a sealed buffer [measured]
+
+A seal inside an in-place batch (SLOT-36) keeps the sealed buffer private
+until commit, where the copy path would queue it at once and hold the
+batch's own voidstar copy instead. A buffer that fills before the batch
+places anything is now handed on at once, and a seal waits for queue room
+so the custodian's spare is reused (C++ pairs at level 0: 101 -> 82 MiB,
+the copy path's 79). What remains is the sealed buffer (16 MiB by
+default) against the copy path's batch copy, for batches smaller than the
+buffer: at level 3 in-place pairs stay about 20 MiB above the copy path
+(runtime-bench, 2026-11-11; level 3 peaks vary by +-20 MiB run to run).
+Level 3 bytes also measured 2-3% slower in place (no compression overlap
+inside a batch). Open: pass the batch's presized total to begin and seal
+first when it will not fit, which removes the pending buffer for any batch
+smaller than the buffer and restores the overlap, but changes sub-packet
+cuts (the copy path would cut the same way; goldens that print layouts
+change).
 
 ## Tests
 
 - Count passes rather than time them where possible: minor-fault counts
   and a copy counter like the existing `cpp-copy-count` golden; each fix
   measured alone with a runtime-bench `BENCH_LABEL`.
-- Goldens for R1: a decode exception leaves the claim released; a file
-  truncated during a read fails no worse than today (today's landing
-  memcpy has the same SIGBUS exposure); several readers of one stream
-  still see every sub-packet once.
+- Goldens for R1: a file truncated during a read fails no worse than
+  the landing memcpy (same SIGBUS exposure); several readers of one
+  stream still see every sub-packet once.
 
 ## Open
 
@@ -216,3 +225,10 @@ scoped decode instead of an escaping lease (the lease was mis-specified:
 mappings belong to per-process slots and are unmapped on overflow, sweep
 and close); W3's risks; W4 rejected; B's safety claim narrowed; mapping
 faults and allocator faults added; a measurement step first.
+- **A C++ IFile slice misses its 1.5x goal against @next.** [measured,
+  2026-11-12] ENC-9: the in-place slice (SLOT-25) runs at 1.6-2.1x the
+  @next loop in C++ (Rust 1.15-1.7x). The unit-step miss is first touch
+  of the result vector (165k faults per 600 MiB), not a copy
+  (call-and-stream-copies.md); other candidates: the scratch-vector decode
+  and move-append for non-bulk elements in `mlc_append_from_voidstar`,
+  and the compressed pieces' SHM landing.

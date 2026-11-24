@@ -20,7 +20,6 @@ record Opts where
   --' @many
   --' @default []
   size :: [Int]
-record Py => Opts = "dict"
 
 --' Return the settings unchanged
 same :: Opts -> Opts

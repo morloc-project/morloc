@@ -26,7 +26,6 @@ record P where
   --' Second coordinate
   b :: Real
 record Rust => P = "P"
-record Py => P = "dict"
 
 --' A point tagged with a row type, or nothing
 data Box (r :: Rec) = Box P | Empty

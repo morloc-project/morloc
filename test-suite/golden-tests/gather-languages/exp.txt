@@ -1,0 +1,82 @@
+--- rowsCpp --cpp ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsCpp --py ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsCpp --r ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsCpp --rust ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsPy --cpp ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsPy --py ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsPy --r ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsPy --rust ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsR --cpp ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsR --py ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsR --r ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsR --rust ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsRust --cpp ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsRust --py ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsRust --r ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- rowsRust --rust ---
+rows 6: 10,0 20,0 21,1 30,0 31,1 32,2
+--- strsCpp --cpp ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsCpp --py ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsCpp --r ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsCpp --rust ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsPy --cpp ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsPy --py ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsPy --r ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsPy --rust ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsR --cpp ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsR --py ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsR --r ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsR --rust ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsRust --cpp ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsRust --py ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsRust --r ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- strsRust --rust ---
+strs 7: [s1 0] [] [s2 0] [s2 1] [s3 0] [s3 1] [s3 2]
+--- hitsCpp --cpp ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsCpp --py ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsCpp --rust ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsPy --cpp ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsPy --py ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsPy --rust ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsRust --cpp ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsRust --py ---
+hits 3: h10=10 h20=20 h21=21
+--- hitsRust --rust ---
+hits 3: h10=10 h20=20 h21=21

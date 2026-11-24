@@ -32,8 +32,8 @@ Code: conforms 2026-10-21
 A `where` or `let` binding, a pure `let` in a `do` block, or a top-level
 constant is computed at most once each time its scope is evaluated, at the
 nearest point every use passes through. A top-level value is computed at
-most once per command. A value read by several languages is computed once
-and passed to each.
+most once per command at each type it is used at (POLY-8). A value read by
+several languages is computed once and passed to each.
 
 ### EVAL-4 Placement respects `@try` regions and effect barriers
 Intent: proposed
@@ -88,7 +88,11 @@ as a value:
 - it can be built from, assigned from and passed moved values: in C++ a
   mapped record's constructor takes no field by non-const lvalue
   reference, and no field type deletes its move constructor (ruled
-  2026-10-18).
+  2026-10-18);
+- it is not observed once the call that was given it, or returned it, has
+  returned: sourced code keeps no reference, pointer or `std::weak_ptr`
+  to a value or any part of it past that call, so a value morloc holds
+  alone is the only holder of its parts (ruled 2026-11-21).
 
 Sourced code never changes a value it is given: no C++ parameter of type
 `T&`, no in-place change of a Python or R argument. A sourced function

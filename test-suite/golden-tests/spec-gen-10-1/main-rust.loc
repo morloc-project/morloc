@@ -1,0 +1,42 @@
+-- GEN-10: a generated record whose field names a type from a sourced file
+-- (`Wrap` holds the user's `Point`) is defined only inside the pool, after
+-- the sourced files, as is one with no module to be generated in (`Rec`,
+-- named like a type the compiler defines). Both are built and cross to
+-- Python and back; `morloc types` leaves them out and says so, while a
+-- record with no such field (`Plain`) is written. The C++ twin is
+-- main-cpp.loc.
+module main (roundWrap, roundRec, roundPlain)
+
+import root-rust
+import root-py
+
+record Point where
+  x :: Int
+  y :: Int
+record Rust => Point = "Point"
+
+record Wrap where
+  p :: Point
+  tag :: Str
+
+record Rec where
+  v :: Int
+
+record Plain where
+  w :: Int
+
+source Rust from "gen10.rs" ("mkPoint", "idn")
+mkPoint :: Int -> Point
+idn :: a -> a
+
+source Py from "gen10.py" ("pyid")
+pyid :: a -> a
+
+roundWrap :: Int -> Wrap
+roundWrap n = pyid {p = mkPoint n, tag = "t"}
+
+roundRec :: Int -> Rec
+roundRec n = pyid (idn {v = n})
+
+roundPlain :: Int -> Plain
+roundPlain n = pyid (idn {w = n})

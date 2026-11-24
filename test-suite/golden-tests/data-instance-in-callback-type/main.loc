@@ -27,7 +27,6 @@ data Box a = Empty | Full a
 -- An alias whose expansion has a different arity from the alias itself.
 type Pair a = (a, Box a)
 
-record Cpp => Rec = "struct"
 record Rec where
   tag :: Int
   box :: Box Int

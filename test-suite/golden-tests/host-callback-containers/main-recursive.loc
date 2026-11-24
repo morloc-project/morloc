@@ -9,8 +9,6 @@ record Chain where
   n :: Int
   next :: ?Chain
 
-record Py => Chain = "dict"
-
 source Py from "host.py" ("h_chain" as hChain)
 
 hChain :: Chain -> <IO> Str

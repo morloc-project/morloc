@@ -1,0 +1,7 @@
+module main (f, g)
+
+import m (systemValue)
+import .helpers (g)
+
+f :: Int
+f = systemValue

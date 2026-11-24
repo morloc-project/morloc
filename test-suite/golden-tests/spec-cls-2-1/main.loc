@@ -8,8 +8,6 @@ import root-py
 record P where
   n :: Int
 
-record Py => P = "dict"
-
 instance Semigroup P where
   (<>) a b = {n = .n a + .n b}
 
@@ -19,8 +17,6 @@ instance Monoid P where
 record Box a where
   v :: a
 
-record Py => Box a = "dict"
-
 instance Semigroup (Box a) where
   (<>) a b = b
 
@@ -28,12 +24,8 @@ record Scan where
   q :: P
   r :: Box Int
 
-record Py => Scan = "dict"
-
 record Outer where
   inner :: Scan
-
-record Py => Outer = "dict"
 
 cat :: Semigroup a => a -> a -> a
 cat x y = x <> y

@@ -2,6 +2,9 @@
 #define __CPPMORLOC_HPP__
 
 #include <vector>
+#include <map>
+#include <unordered_map>
+#include <typeinfo>
 #include <memory>
 #include <stack>
 #include <list>
@@ -83,6 +86,36 @@ inline void frame_restore(size_t saved) noexcept { frames_.depth = saved; }
 
 // STATE-6: restores `saved` and returns the lines above it, innermost first.
 std::string frame_take(size_t saved);
+// FORK-17
+extern std::atomic<uint64_t> fork_count;
+struct fork_guard {
+    uint64_t at = fork_count.load(std::memory_order_relaxed);
+    ~fork_guard() {
+        if (fork_count.load(std::memory_order_relaxed) != at) mlc_exit_forked();
+    }
+};
+// STATE-6: a closure's catch: restores `saved` and keeps the labels above it
+// beside the failure being handled.
+void closure_trace_add(size_t saved) noexcept;
+// STATE-6: the labels kept beside the failure being handled, once.
+std::string closure_labels() noexcept;
+// STATE-6: a report's trace: those labels, then the calls above `saved`,
+// which it restores.
+std::string failure_trace(size_t saved) noexcept;
+// STATE-6: at the end of a thread's outermost dispatch.
+void closure_traces_drop_thread() noexcept;
+// STATE-8: no release is in progress and none is deferred.
+bool arm_idle() noexcept;
+// WPOOL-3: the pool translation unit's tracker and flags, for the job-end
+// hook of a parallel helper; registered once, at cpp_register.
+struct par_tracker_ops {
+    size_t (*size)();
+    void (*move_to)(std::vector<absptr_t>& out);
+    void (*add)(const std::vector<absptr_t>& in);
+    bool (*reading_runtime_value)();
+    bool (*pipe_closed)();
+};
+void par_register(const par_tracker_ops* ops);
 }
 
 // ============================================================
@@ -145,6 +178,52 @@ inline constexpr bool is_non_vector_container_v =
 
 namespace mlc {
 
+// A list literal of type C, written `mlc::list_of<C>{a, b}.value`. Each
+// element is copy-initialized (no explicit constructors), then appended.
+template <typename T, typename A>
+T list_elem(A&& a) {
+    return std::forward<A>(a);
+}
+
+template <typename T, typename C, typename A>
+void push_one(C& c, A&& a) {
+    if constexpr (std::is_same_v<std::remove_cvref_t<A>, T>) {
+        c.push_back(std::forward<A>(a));
+    } else {
+        c.push_back(list_elem<T>(std::forward<A>(a)));
+    }
+}
+
+template <typename C>
+struct list_of {
+    C value;
+    template <typename... A>
+    list_of(A&&... a) : value(build(std::forward<A>(a)...)) {}
+
+    template <typename... A>
+    static C build(A&&... a) {
+        if constexpr (requires { typename C::value_type; }) {
+            using T = typename C::value_type;
+            if constexpr (requires(C& c, T&& t) { c.push_back(std::move(t)); }) {
+                C c;
+                if constexpr (requires { c.reserve(sizeof...(A)); }) {
+                    c.reserve(sizeof...(A));
+                }
+                (push_one<T>(c, std::forward<A>(a)), ...);
+                return c;
+            } else if constexpr (requires(C& c, T&& t) { c.insert(std::move(t)); }) {
+                C c;
+                (c.insert(list_elem<T>(std::forward<A>(a))), ...);
+                return c;
+            } else {
+                return C{std::forward<A>(a)...};
+            }
+        } else {
+            return C{std::forward<A>(a)...};
+        }
+    }
+};
+
 template<typename T> using is_pointer_shape = is_std_shared_ptr<T>;
 
 // Pointer-shape traits. Primary intentionally undefined; only
@@ -205,7 +284,9 @@ FieldT wrap_field(Inner&& v) {
         "?T everywhere else expects std::optional<T>; "
         "non-optional fields expect T directly."
     );
-    if constexpr (is_std_optional<InnerBare>::value) {
+    if constexpr (std::is_same_v<InnerBare, FieldT>) {
+        return std::forward<Inner>(v);
+    } else if constexpr (is_std_optional<InnerBare>::value) {
         if (!v.has_value()) return wrap_field_absent<FieldT>();
         if constexpr (is_pointer_shape<FieldT>::value) {
             return pointer_traits<FieldT>::wrap(std::move(*v));
@@ -255,6 +336,23 @@ bool field_has_value(const FieldT& f) {
         return f.has_value();
     } else {
         return true;
+    }
+}
+
+// The value form of a field read (CPP-6): a `?T` stored as a pointer-shape
+// at a recursive-cycle position reads as the std::optional<T> every other
+// `?T` value is. Any other field is passed on as it was given, an lvalue
+// as the same lvalue and an rvalue moved.
+template<typename F>
+decltype(auto) read_field(F&& f) {
+    using FieldT = std::remove_cvref_t<F>;
+    if constexpr (is_pointer_shape<FieldT>::value) {
+        using T = typename pointer_traits<FieldT>::inner;
+        return field_has_value(f) ? std::optional<T>(deref_field(f)) : std::optional<T>();
+    } else if constexpr (std::is_lvalue_reference_v<F>) {
+        return (f);
+    } else {
+        return FieldT(std::move(f));
     }
 }
 
@@ -544,10 +642,11 @@ size_t mlc_leaf_size(const Schema* schema, const T& data) {
     if (schema->type == MORLOC_NIL) {
         return schema->width;
     }
-    if constexpr (std::is_same_v<T, std::string>) {
-        return schema->width + data.size();
-    } else if constexpr (std::is_same_v<T, const char*>) {
-        return schema->width + strlen(data);
+    if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, const char*>) {
+        size_t n;
+        if constexpr (std::is_same_v<T, std::string>) n = data.size(); else n = strlen(data);
+        size_t slack = (schema->type == MORLOC_ARRAY && n > 0) ? schema->parameters[0]->data_alignment - 1 : 0;
+        return schema->width + slack + n;
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
         return schema->width;
     } else {
@@ -580,33 +679,52 @@ size_t mlc_leaf_size(const Schema* schema, const T& data) {
     }
 }
 
-// Write raw bytes as an array: the header at dest, the bytes at the cursor.
-inline void* bytes_to_voidstar(void* dest, void** cursor, const Schema* schema, const uint8_t* data, size_t size) {
+// A Str leaves C++ only as valid UTF-8 (BASE-5). `[U8]` bytes are not checked.
+inline void mlc_check_str(const Schema* schema, const uint8_t* data, size_t size) {
+    if (schema->type != MORLOC_STRING) {
+        return;
+    }
+    int64_t bad = mlc_utf8_check(data, size);
+    if (bad >= 0) {
+        std::ostringstream oss;
+        oss << "C++ produced a Str that is not valid UTF-8 (byte " << bad << " of " << size << ")";
+        throw std::runtime_error(oss.str());
+    }
+}
+
+// Write raw bytes as an array: the header at dest, the bytes at the walk's
+// cursor, aligned as an array's data when the schema is an array.
+template<typename W>
+inline void bytes_to_voidstar(void* dest, W& w, const Schema* schema, const uint8_t* data, size_t size) {
     Array* result = static_cast<Array*>(dest);
     result->size = size;
     if(size == 0){
-        result->data = RELNULL;
-        return dest;
+        result->data = w.empty_rel();
+        return;
     }
-    absptr_t data_ptr = static_cast<absptr_t>(*cursor);
-    result->data = abs2rel_cpp(data_ptr);
-    *cursor = static_cast<char*>(*cursor) + size * schema->parameters[0]->width;
+    const Schema* elem = schema->parameters[0];
+    if (schema->type == MORLOC_ARRAY) w.align(elem->data_alignment);
+    char* data_ptr = static_cast<char*>(*w.cursor);
+    result->data = w.rel(data_ptr);
+    *w.cursor = data_ptr + size * elem->width;
     memcpy(data_ptr, data, size);
-    return dest;
 }
 
 // Write a leaf at schema width, so the wire form matches the morloc type
 // regardless of the C++ concrete type's width.
-template<typename T>
-void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& data) {
+template<typename T, typename W>
+void mlc_leaf_write(void* dest, W& w, const Schema* schema, const T& data) {
     // A nil slot has no width; the wire carries nothing for it.
     if (schema->type == MORLOC_NIL) {
         return;
     }
     if constexpr (std::is_same_v<T, std::string>) {
-        bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data.c_str(), data.size());
+        mlc_check_str(schema, (const uint8_t*)data.c_str(), data.size());
+        bytes_to_voidstar(dest, w, schema, (const uint8_t*)data.c_str(), data.size());
     } else if constexpr (std::is_same_v<T, const char*>) {
-        bytes_to_voidstar(dest, cursor, schema, (const uint8_t*)data, strlen(data));
+        size_t n = strlen(data);
+        mlc_check_str(schema, (const uint8_t*)data, n);
+        bytes_to_voidstar(dest, w, schema, (const uint8_t*)data, n);
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
         // Nothing else has a nil schema.
     } else if constexpr (std::is_enum_v<T>) {
@@ -619,7 +737,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             }
             *((uint8_t*)dest) = static_cast<uint8_t>(tag);
         } else {
-            mlc_leaf_write(dest, cursor, schema, static_cast<std::underlying_type_t<T>>(data));
+            mlc_leaf_write(dest, w, schema, static_cast<std::underlying_type_t<T>>(data));
         }
     } else {
         guard_scalar_schema(schema, "to_voidstar");
@@ -629,7 +747,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_ISTREAM: {
                 char* err = NULL;
                 if (mlc_write_handle_voidstar(
-                        static_cast<int64_t>(data), dest, cursor, &err) != 0) {
+                        static_cast<int64_t>(data), dest, w.cursor, &err) != 0) {
                     if (err == NULL) mlc_runtime_defect("mlc_write_handle_voidstar failed without a reason");
                     std::string msg(err);
                     free(err);
@@ -903,29 +1021,31 @@ bool mlc_read_leaf_run(const Schema* elem, const char* start, size_t n, std::vec
     }
 }
 
-// Write `n` leaves of `data` as `elem` at stride `elem->width` from `start`,
-// with one type dispatch for the whole run; false when the element type has
-// no such loop. Range checks are those of mlc_leaf_write.
+// Write `n` leaves of `data`, from element `from` on, as `elem` at stride
+// `elem->width` from `start`, with one type dispatch for the whole run; false
+// when the element type has no such loop. Range checks are those of
+// mlc_leaf_write.
 template<typename ElemT>
-bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT>& data) {
+bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT>& all, size_t from, size_t n) {
     const size_t width = elem->width;
-    const size_t n = data.size();
     if constexpr (std::is_same_v<ElemT, bool>) {
         if (elem->type != MORLOC_BOOL) return false;
-        const uint64_t* words = mlc_bool_words(data);
+        const uint64_t* words = mlc_bool_words(all);
         size_t i = 0;
         if (words != nullptr && width == 1) {
+            for (; i < n && (from + i) % 64 != 0; i++) *(uint8_t*)(start + i) = all[from + i] ? 1 : 0;
             for (; i + 64 <= n; i += 64) {
-                uint64_t word = words[i / 64];
+                uint64_t word = words[(from + i) / 64];
                 for (int k = 0; k < 8; k++) {
                     uint64_t x = mlc_bits_to_bytes(word >> (8 * k));
                     std::memcpy(start + i + 8 * k, &x, 8);
                 }
             }
         }
-        for (; i < n; i++) *(uint8_t*)(start + i * width) = data[i] ? 1 : 0;
+        for (; i < n; i++) *(uint8_t*)(start + i * width) = all[from + i] ? 1 : 0;
         return true;
     } else if constexpr (std::is_arithmetic_v<ElemT>) {
+        const ElemT* data = all.data() + from;
         auto run = [&](auto wire, const char* name) {
             using W = decltype(wire);
             for (size_t i = 0; i < n; i++) {
@@ -960,6 +1080,29 @@ bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT
         }
     } else {
         return false;
+    }
+}
+
+// Write the leaves `xs[from, from + n)` as `elem` at stride `elem->width`
+// from `start`.
+template<typename ElemT, typename W>
+void mlc_write_leaves(W& w, const Schema* elem, char* start, const std::vector<ElemT>& xs, size_t from, size_t n) {
+    const size_t width = elem->width;
+    if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
+        // A fixed-width primitive packs identically to the wire layout.
+        if (vector_is_bulk_copyable<ElemT>(elem)) {
+            std::memcpy(start, xs.data() + from, n * width);
+            return;
+        }
+    }
+    if (mlc_write_leaf_run<ElemT>(elem, start, xs, from, n)) return;
+    for (size_t i = 0; i < n; ++i) {
+        if constexpr (std::is_same_v<ElemT, bool>) {
+            // std::vector<bool>::operator[] is a bit proxy.
+            mlc_leaf_write(start + width * i, w, elem, static_cast<bool>(xs[from + i]));
+        } else {
+            mlc_leaf_write(start + width * i, w, elem, xs[from + i]);
+        }
     }
 }
 
@@ -1047,6 +1190,69 @@ private:
         throw;                                                                \
     }
 
+// GEN-14: the converted value of a packed field, made by the size walk and
+// written by the write walk.
+struct MlcConverted {
+    struct Key {
+        const void* field;
+        const void* which;
+        bool operator==(const Key& o) const { return field == o.field && which == o.which; }
+    };
+    struct KeyHash {
+        size_t operator()(const Key& k) const {
+            return std::hash<const void*>()(k.field) * 31 + std::hash<const void*>()(k.which);
+        }
+    };
+    struct Made {
+        std::shared_ptr<void> value;
+        const std::type_info* type;
+    };
+    std::unordered_map<Key, Made, KeyHash> made;
+    // A size walk has filled the table.
+    bool sized = false;
+};
+
+// How the field `I` of an instance `R` of a generated template converts to
+// the form it is written in. Every instance has its own specialisation, so
+// one that has none does not compile.
+template<typename R, size_t I>
+struct MlcFieldConv;
+
+// The identity of field `I` of `R` (or, with `I` unused, of a copy of an
+// `R`) in a walk's table of converted values.
+template<typename R, size_t I>
+inline constexpr char mlc_field_tag = 0;
+
+// GEN-14: the converted value of the field at `field`, identified with the
+// record type and field by `which`: the one already made when there is one,
+// else a new one.
+// GEN-14: a write walk that misses a value of variable width a size walk
+// filled the table without is a defect.
+template<typename Raw, typename W, typename F>
+const Raw& mlc_converted(W& w, const Schema* schema, const void* field, const void* which, F&& convert) {
+    MlcConverted* converted = w.converted;
+    std::vector<std::shared_ptr<void>>& keep = w.keep;
+    if (converted != nullptr) {
+        auto it = converted->made.find({field, which});
+        if (it != converted->made.end()) {
+            if (*it->second.type != typeid(Raw)) mlc_runtime_defect("a converted value was found under another type's key");
+            return *static_cast<const Raw*>(it->second.value.get());
+        }
+    }
+    if constexpr (W::writes) {
+        if (converted != nullptr && converted->sized && !resolve_recur(schema)->fixed_width) {
+            mlc_runtime_defect("a write walk met a converted value its size walk did not make");
+        }
+    }
+    auto v = std::make_shared<Raw>(convert());
+    if (converted != nullptr) {
+        converted->made.emplace(MlcConverted::Key{field, which}, MlcConverted::Made{v, &typeid(Raw)});
+    } else {
+        keep.push_back(v);
+    }
+    return *v;
+}
+
 struct MlcSizeWalk {
     using Step = void (*)(MlcSizeWalk&, const Schema*, const void*, size_t);
     struct Frame {
@@ -1062,8 +1268,13 @@ struct MlcSizeWalk {
     std::vector<std::shared_ptr<void>> keep;   // values a step made, alive until the walk ends
     int64_t total = 0;
     MlcFlatSet flats;   // which nodes a step may visit by direct call
+    MlcConverted* converted = nullptr;
 
-    explicit MlcSizeWalk(const Schema* root) : flats(root) {}
+    static constexpr bool writes = false;
+
+    explicit MlcSizeWalk(const Schema* root, MlcConverted* converted_) : flats(root), converted(converted_) {
+        if (converted != nullptr) converted->sized = true;
+    }
 
     // A child of a schema that cannot describe unbounded depth is stepped
     // by call.
@@ -1136,17 +1347,70 @@ struct MlcWriteWalk {
     std::vector<std::shared_ptr<void>> keep;
     void** cursor;
     MlcFlatSet flats;
+    // Pointers are written relative to `base` and parts aligned relative to
+    // `origin`, as the runtime lays out a value in a stream's buffer
+    // (SLOT-36); null for shared-memory relptrs at absolute alignment.
+    char* base = nullptr;
+    char* origin = nullptr;
+    // SLOT-36: deferred child frames, for the layout in a stream's buffer.
+    std::vector<Frame> later;
+    bool in_step = false;
+    bool deferring = false;
 
-    MlcWriteWalk(const Schema* root, void** cursor_)
-        : cursor(cursor_), flats(root) {}
+    MlcConverted* converted = nullptr;
+
+    static constexpr bool writes = true;
+
+    MlcWriteWalk(const Schema* root, void** cursor_, MlcConverted* converted_)
+        : cursor(cursor_), flats(root), converted(converted_) {}
+
+    // Write the next value into a stream buffer's room.
+    void place(void** cursor_, char* base_, char* origin_) {
+        cursor = cursor_;
+        base = base_;
+        origin = origin_;
+        keep.clear();
+        later.clear();
+        in_step = false;
+        deferring = false;
+    }
 
     bool flat(const Schema* schema) const {
         return flats.flat(schema);
     }
 
+    relptr_t rel(const void* p) const {
+        if (base != nullptr) return static_cast<relptr_t>(static_cast<const char*>(p) - base);
+        return abs2rel_cpp(const_cast<absptr_t>(p));
+    }
+
+    char* at(relptr_t r) const {
+        if (base != nullptr) return base + r;
+        return static_cast<char*>(rel2abs_cpp(r));
+    }
+
+    // The data pointer of an empty array or string.
+    relptr_t empty_rel() const {
+        return base != nullptr ? 0 : RELNULL;
+    }
+
+    void align(size_t a) {
+        uintptr_t c = reinterpret_cast<uintptr_t>(*cursor);
+        if (origin != nullptr) {
+            uintptr_t o = reinterpret_cast<uintptr_t>(origin);
+            *cursor = reinterpret_cast<void*>(o + ALIGN_UP(c - o, a));
+        } else {
+            *cursor = reinterpret_cast<void*>(ALIGN_UP(c, a));
+        }
+    }
+
     template<typename T>
     static void thunk(MlcWriteWalk& w, const Schema* s, void* dest, const void* obj, size_t idx) {
-        MlcNode<T>::write_step(w, s, dest, *static_cast<const T*>(obj), idx);
+        if constexpr (mlc_is_leaf_v<T>) {
+            mlc_leaf_write(dest, w, s, *static_cast<const T*>(obj));
+        } else {
+            MlcNode<T>::write_step(w, s, dest, *static_cast<const T*>(obj), idx);
+        }
     }
 
     // Write a child into its slot: a leaf now, a compound node by call or
@@ -1154,9 +1418,20 @@ struct MlcWriteWalk {
     template<typename T>
     void child(const Schema* schema, void* dest, const T& v) {
         if constexpr (mlc_is_leaf_v<T>) {
-            mlc_leaf_write(dest, cursor, resolve_recur(schema), v);
+            // A C++ Int is always inline, so it has no tail.
+            const Schema* s = resolve_recur(schema);
+            if (deferring && !s->fixed_width && s->type != MORLOC_INT) {
+                later.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
+            } else {
+                mlc_leaf_write(dest, *this, s, v);
+            }
+        } else if (deferring && !resolve_recur(schema)->fixed_width) {
+            later.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
         } else if (flat(schema)) {
             MlcNode<T>::write_step(*this, schema, dest, v, 0);
+        } else if (in_step && base != nullptr) {
+            later.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
+            deferring = true;
         } else {
             stack.push_back(Frame{&thunk<T>, schema, dest, &v, 0, false});
         }
@@ -1171,8 +1446,7 @@ struct MlcWriteWalk {
 
     // Take an aligned slot of `inner`'s width from the cursor.
     void* alloc(const Schema* inner) {
-        size_t align = inner->alignment;
-        *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), align));
+        align(inner->alignment);
         void* slot = *cursor;
         *cursor = static_cast<char*>(slot) + inner->width;
         return slot;
@@ -1186,14 +1460,22 @@ struct MlcWriteWalk {
         memset((char*)dest + 1, 0, MORLOC_VARIANT_PAYLOAD - 1);
         const Schema* a = resolve_recur(arm);
         void* slot = alloc(a);
-        *((relptr_t*)((char*)dest + MORLOC_VARIANT_PAYLOAD)) =
-            abs2rel_cpp(static_cast<absptr_t>(slot));
+        *((relptr_t*)((char*)dest + MORLOC_VARIANT_PAYLOAD)) = rel(slot);
         child(a, slot, payload);
     }
 
     void run() {
+        later.clear();
         MLC_WALK_RUN({
+            in_step = true;
+            deferring = false;
             f.step(*this, s, f.dest, f.obj, f.idx);
+            in_step = false;
+            deferring = false;
+            if (!later.empty()) {
+                stack.insert(stack.end(), later.rbegin(), later.rend());
+                later.clear();
+            }
         })
     }
 };
@@ -1289,8 +1571,8 @@ inline uint8_t read_variant_tag(const void* data) {
 // ------------------------------------------------------------
 
 template<typename T>
-size_t get_shm_size(const Schema* schema, const T& data) {
-    MlcSizeWalk w(schema);
+size_t get_shm_size(const Schema* schema, const T& data, MlcConverted* converted) {
+    MlcSizeWalk w(schema, converted);
     w.child(schema, data, false);
     return static_cast<size_t>(w.run());
 }
@@ -1298,8 +1580,8 @@ size_t get_shm_size(const Schema* schema, const T& data) {
 // Write `data` into the slot at `dest`, appending variable-length parts at
 // the cursor.
 template<typename T>
-void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data) {
-    MlcWriteWalk w(schema, cursor);
+void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data, MlcConverted* converted) {
+    MlcWriteWalk w(schema, cursor, converted);
     w.child(schema, dest, data);
     w.run();
     return dest;
@@ -1308,11 +1590,12 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const T& data
 // Allocate a block for `data` in shared memory and write it there.
 template<typename T>
 void* to_voidstar(const Schema* schema, const T& data){
-    size_t total_size = get_shm_size(schema, data);
+    MlcConverted converted;
+    size_t total_size = get_shm_size(schema, data, &converted);
     void* dest = shmalloc_cpp(total_size);
     void* cursor = (void*)((char*)dest + schema->width);
     try {
-        return to_voidstar(dest, &cursor, schema, data);
+        return to_voidstar(dest, &cursor, schema, data, &converted);
     } catch (...) {
         shfree_cpp(dest);
         throw;
@@ -1329,6 +1612,36 @@ T from_voidstar(const Schema* schema, const void* data, T* = nullptr, morloc_spa
     w.child(schema, data, &out);
     w.run();
     return out;
+}
+
+// Read the list piece `data` of `schema` onto the end of `acc`: elements
+// whose wire layout is T's are copied straight from the piece; any others
+// are read into `scratch` and moved over.
+template<typename T>
+void mlc_append_from_voidstar(const Schema* schema, const void* data, morloc_space_t space, T& acc, T& scratch) {
+    using ElemT = typename T::value_type;
+    const Array* array = (const Array*)data;
+    if (array->size == 0) return;
+    if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
+        const Schema* elem = resolve_recur(schema->parameters[0]);
+        if (vector_is_bulk_copyable<ElemT>(elem)) {
+            const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, space);
+            if (reinterpret_cast<uintptr_t>(start) % alignof(ElemT) == 0) {
+                const ElemT* first = (const ElemT*)start;
+                acc.insert(acc.end(), first, first + array->size);
+            } else {
+                size_t at = acc.size();
+                acc.resize(at + array->size);
+                std::memcpy(acc.data() + at, start, array->size * sizeof(ElemT));
+            }
+            return;
+        }
+    }
+    scratch.clear();
+    MlcReadWalk w(schema, space);
+    w.child(schema, data, &scratch);
+    w.run();
+    acc.insert(acc.end(), std::make_move_iterator(scratch.begin()), std::make_move_iterator(scratch.end()));
 }
 
 // Read the value an uncompressed inline (MESG+VOIDSTAR) packet carries,
@@ -1419,8 +1732,11 @@ struct MlcNode {
             const Schema* elem = resolve_recur(schema->parameters[0]);
             if (idx == 0) {
                 // The header, worst-case cursor alignment for the data
-                // region, and the fixed part of every element.
-                w.total += static_cast<int64_t>(schema->width + elem->data_alignment - 1);
+                // region, and the fixed part of every element. An empty
+                // array has no data region.
+                w.total += static_cast<int64_t>(schema->width);
+                if (data.size() == 0) return;
+                w.total += static_cast<int64_t>(elem->data_alignment - 1);
                 if (elem->fixed_width) {
                     w.total += static_cast<int64_t>(data.size() * elem->width);
                     return;
@@ -1459,11 +1775,10 @@ struct MlcNode {
                 }
             }
         } else if constexpr (is_non_vector_container_v<T>) {
-            // The container is walked as the vector of its elements, which
-            // the walk keeps alive for as long as its frames refer to it.
-            auto v = mlc::make_arm<decltype(to_vector(data))>(to_vector(data));
-            w.keep.push_back(v);
-            w.child(schema, *v, false);
+            // GEN-14: the container is walked as the vector of its elements,
+            // the one copy the write walk also writes from.
+            const auto& v = mlc_converted<decltype(to_vector(data))>(w, schema, &data, &mlc_field_tag<T, 0>, [&] { return to_vector(data); });
+            w.child(schema, v, false);
         } else if constexpr (is_std_tuple<T>::value) {
             mlc_tuple_size(w, schema, data, std::make_index_sequence<std::tuple_size_v<T>>{});
         } else if constexpr (is_std_pair<T>::value) {
@@ -1493,15 +1808,15 @@ struct MlcNode {
             if (idx == 0) {
                 result->size = data.size();
                 if (data.size() == 0) {
-                    result->data = RELNULL;
+                    result->data = w.empty_rel();
                     return;
                 }
                 // The data region: aligned (64 for primitive numerics), one
                 // fixed slot per element; tails follow at the cursor.
-                *w.cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*w.cursor), elem->data_alignment));
-                result->data = abs2rel_cpp(static_cast<absptr_t>(*w.cursor));
-                *w.cursor = static_cast<char*>(*w.cursor) + data.size() * width;
-                char* start = (char*)rel2abs_cpp(result->data);
+                w.align(elem->data_alignment);
+                char* start = static_cast<char*>(*w.cursor);
+                result->data = w.rel(start);
+                *w.cursor = start + data.size() * width;
                 if (mlc_elem_is_handle(elem)) {
                     // Batched stream-handle write: one registry lock for all N handles.
                     if constexpr (std::is_same_v<ElemT, int64_t>) {
@@ -1516,29 +1831,15 @@ struct MlcNode {
                         return;
                     }
                 }
-                if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
-                    // A vector of a fixed-width primitive packs identically to
-                    // the wire layout: one memcpy instead of a call per element.
-                    if (vector_is_bulk_copyable<ElemT>(elem)) {
-                        std::memcpy(start, data.data(), data.size() * width);
-                        return;
-                    }
-                }
                 if constexpr (mlc_is_leaf_v<ElemT>) {
-                    if (mlc_write_leaf_run<ElemT>(elem, start, data)) return;
-                    for (size_t i = 0; i < data.size(); ++i) {
-                        if constexpr (std::is_same_v<ElemT, bool>) {
-                            // std::vector<bool>::operator[] is a bit proxy.
-                            mlc_leaf_write(start + width * i, w.cursor, elem, static_cast<bool>(data[i]));
-                        } else {
-                            mlc_leaf_write(start + width * i, w.cursor, elem, data[i]);
-                        }
-                    }
+                    mlc_write_leaves(w, elem, start, data, 0, data.size());
+                    // A container standing for a Str (a newtype's native form) is checked as text too.
+                    mlc_check_str(schema, reinterpret_cast<const uint8_t*>(start), data.size());
                     return;
                 }
             }
             if constexpr (!mlc_is_leaf_v<ElemT>) {
-                char* start = (char*)rel2abs_cpp(result->data);
+                char* start = w.at(result->data);
                 if (w.flat(elem)) {
                     for (size_t i = 0; i < data.size(); ++i) w.child(elem, start + width * i, data[i]);
                 } else {
@@ -1547,9 +1848,8 @@ struct MlcNode {
                 }
             }
         } else if constexpr (is_non_vector_container_v<T>) {
-            auto v = mlc::make_arm<decltype(to_vector(data))>(to_vector(data));
-            w.keep.push_back(v);
-            w.child(schema, dest, *v);
+            const auto& v = mlc_converted<decltype(to_vector(data))>(w, schema, &data, &mlc_field_tag<T, 0>, [&] { return to_vector(data); });
+            w.child(schema, dest, v);
         } else if constexpr (is_std_tuple<T>::value) {
             mlc_tuple_write(w, schema, dest, data, std::make_index_sequence<std::tuple_size_v<T>>{});
         } else if constexpr (is_std_pair<T>::value) {
@@ -1562,7 +1862,7 @@ struct MlcNode {
             } else {
                 const Schema* inner = resolve_recur(schema->parameters[0]);
                 void* slot = w.alloc(inner);
-                *(relptr_t*)dest = abs2rel_cpp(static_cast<absptr_t>(slot));
+                *(relptr_t*)dest = w.rel(slot);
                 w.child(inner, slot, *data);
             }
         } else {

@@ -1,0 +1,13 @@
+--' A program's own source of a term shadows an imported one (SRC-9)
+--'
+--' root implements require in this language too; the program's own
+--' implementation, which gives a default for null, is the one called.
+module main (f)
+
+import root-py
+import maybe (require)
+
+source Py from "m.py" ("my_require" as require)
+
+f :: ?Int -> Int
+f x = require x

@@ -73,9 +73,6 @@ pureThrow c = ? c = 42 : @throw "nope"
 record Pair where
   a :: Int
   b :: Int
-record Py => Pair = "dict"
-record Cpp => Pair = "struct"
-record R => Pair = "list"
 
 -- Container VALUE arms of an effect-typed conditional (`@throw` in the other
 -- arm). The arm is pure data whose type carries the effect wrapper, which

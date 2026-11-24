@@ -3,4 +3,4 @@ foo = "hellosh"
 
 
 module main (*)
-import second
+import .second

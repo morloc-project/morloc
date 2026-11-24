@@ -1,0 +1,11 @@
+module local (h)
+
+h :: Int
+h = 3
+
+module main (f)
+
+import .local (h)
+
+f :: Int
+f = h

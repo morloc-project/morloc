@@ -1,0 +1,21 @@
+# PAT-5 conformance: pattern, morloc type, the schema morloc writes for that
+# type, and whether the step applies. The compiler and the runtime check
+# (check_pattern_against_schema) must both give the last column.
+.0	(Int, Str)	t2js	yes
+.1	(Int, Str)	t2js	yes
+.2	(Int, Str)	t2js	no
+.x	R	m21xj1ys	yes
+.z	R	m21xj1ys	no
+.0	R	m21xj1ys	no
+.x	(Int, Str)	t2js	no
+.[0]	[Int]	aj	yes
+.[0:2]	[Int]	aj	yes
+.[0]	Str	s	no
+.[0:2]	Str	s	no
+.[0]	Int	j	no
+.0	[Int]	aj	no
+.[0].0	[(Int, Str)]	at2js	yes
+.[0:2].1	[(Int, Str)]	at2js	yes
+.(.0, .1)	(Int, Str, Bool)	t3jsb	yes
+.(.x, .y)	R	m21xj1ys	yes
+.0	?(Int, Str)	?t2js	no

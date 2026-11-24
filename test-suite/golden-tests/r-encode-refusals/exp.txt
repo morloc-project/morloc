@@ -1,0 +1,9 @@
+[true,false,true]
+[true,false,true]
+[true,false,false,true]
+[{"name":"p","ok":true},{"name":"p","ok":false}]
+[true,false,true]
+{"name":"n7","ok":true,"note":null}
+[{"name":"n1","ok":true,"note":null},{"name":"n2","ok":true,"note":null}]
+[{"name":"p","ok":false}]
+missing-refused

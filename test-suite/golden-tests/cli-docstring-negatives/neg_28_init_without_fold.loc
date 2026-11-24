@@ -13,5 +13,5 @@ produce sink = sink [1,2,3]
 
 -- `@init` describes how a fold is seeded; without `@fold` there is none.
 --' @render -t/--total=showAcc @init=zero
-run :: <IO> ()
+run :: <IO> (Collect Int)
 run = @collect produce

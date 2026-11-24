@@ -27,7 +27,6 @@ module Morloc.Typecheck.Internal
   , unqualify
   , headTVar
   , instanceArgHead
-  , instanceReceiverHeads
   , BracketReceiver (..)
   , bracketRule
   , classifyBracketReceiver
@@ -67,7 +66,14 @@ module Morloc.Typecheck.Internal
   , gammaTrimAfter
 
     -- * Packable wire-form lookup
-  , findPackableWireForm
+  , instantiateAll
+  , indexMethods
+  , patternAccessibleMethod
+  , structuralMethods
+  , sliceMethods
+  , getterMethods
+  , boundMethods
+  , functorMapMethod
 
     -- * selectors
   , selectorType
@@ -89,6 +95,11 @@ module Morloc.Typecheck.Internal
   , isSubtypeOf2
   , isSubtypeOfOpen
   , recheckDeferred
+  , settleDeferred
+  , openRigidGamma
+  , openVars
+  , natDeferred
+  , fixedSlot
   , typeUToNatExpr
   , natExprToTypeU
   , natPositions
@@ -125,6 +136,8 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import Morloc.Data.Zip (indexed, zipExact, zipPrefix, zipSame)
+import qualified Data.List
 import Data.Functor.Const (Const (..))
 import Data.Functor.Identity (Identity (..))
 import qualified Data.IntMap.Strict as IntMap
@@ -153,11 +166,11 @@ qualify vs t = foldr (\v -> ForallU v) t vs
 emptyGamma :: Gamma
 emptyGamma =
   Gamma
-    { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty
+    { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaAnn = Map.empty
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
-    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
+    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaWanteds = [], gammaNestedUses = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidRows = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidSlots = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaDefinitionLambda = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -172,30 +185,39 @@ headTVar _ = Nothing
 -- container an instance of a class over a type constructor is for.
 instanceArgHead :: Int -> EType -> Maybe TVar
 instanceArgHead pos et = case snd (unqualify (etype et)) of
-  FunU args _ | length args > pos -> headTVar (args !! pos)
-  _                               -> Nothing
+  FunU args _ -> listToMaybe (drop pos args) >>= headTVar
+  _           -> Nothing
 
--- | The containers the instances of @method@ are for, read at argument
--- @pos@ of each instance's type.
-instanceReceiverHeads :: EVar -> Int -> MorlocMonad [TVar]
-instanceReceiverHeads method pos = do
-  sigmap <- MM.gets stateTypeclasses
-  return
-    [ h
-    | Just inst <- [Map.lookup method sigmap]
-    , TermTypes (Just et) _ _ <- instanceTerms inst
-    , Just h <- [instanceArgHead pos et]
-    ]
+-- | What may serve a bracket step's receiver, in the order tried: a
+-- user-declared walker over the structural classes.
+indexMethods, sliceMethods, getterMethods, boundMethods, structuralMethods :: [ArgMethod]
+indexMethods = [patternAccessibleMethod, indexableMethod]
+sliceMethods = patternAccessibleMethod : sliceableMethods
+structuralMethods = indexableMethod : sliceableMethods
+getterMethods = [patternAccessibleMethod]
+boundMethods = [ArgMethod (ClassName "IndexLike") (EV "__to_index__") 0]
+
+indexableMethod :: ArgMethod
+indexableMethod = ArgMethod (ClassName "Indexable") (EV "__access_index__") 1
+
+sliceableMethods :: [ArgMethod]
+sliceableMethods =
+  [ ArgMethod (ClassName "Sliceable") (EV "__get_slice__") 3
+  , ArgMethod (ClassName "SliceableDim") (EV "__get_slice_dim__") 3
+  ]
+
+functorMapMethod :: ArgMethod
+functorMapMethod = ArgMethod (ClassName "Functor") (EV "map") 1
+
+patternAccessibleMethod :: ArgMethod
+patternAccessibleMethod = ArgMethod (ClassName "PatternAccessible") (EV BT.extractPatternMethod) 2
 
 -- | PAT-5: for a bracket step, what its receiver needs (for diagnostics),
 -- the receiver's position in the step's function type, and the instance
 -- methods, with their receiver positions, that can supply it.
-bracketRule :: Pattern -> Maybe (MDoc, Int, [(EVar, Int)])
-bracketRule PatternBracketIndex =
-  Just ("an Indexable", 1, [(EV "__access_index__", 1), (EV BT.extractPatternMethod, 2)])
-bracketRule PatternBracketSlice =
-  Just ( "a Sliceable or SliceableDim", 3
-       , [(EV "__get_slice__", 3), (EV "__get_slice_dim__", 3), (EV BT.extractPatternMethod, 2)] )
+bracketRule :: Pattern -> Maybe (MDoc, Int, [ArgMethod])
+bracketRule PatternBracketIndex = Just ("an Indexable", 1, indexMethods)
+bracketRule PatternBracketSlice = Just ("a Sliceable or SliceableDim", 3, sliceMethods)
 bracketRule _ = Nothing
 
 data BracketReceiver
@@ -601,13 +623,13 @@ instance Applicable TypeU where
   apply g (NatDivU a b) = NatDivU (apply g a) (apply g b)
   apply _ t@NatVoidU = t
   apply g (StrVarU v) = case Map.lookup (v, KindStr) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindStr) (gammaKindSubs g)}) t
     Nothing -> StrVarU v
   apply _ t@(StrLitU _) = t
   apply g (StrConcatU a b) = StrConcatU (apply g a) (apply g b)
   apply _ t@StrVoidU = t
   apply g (RecVarU v) = case Map.lookup (v, KindRec) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindRec) (gammaKindSubs g)}) t
     Nothing -> RecVarU v
   apply _ t@RecEmptyU = t
   apply g (RecExtendU k a b) = RecExtendU k (apply g a) (apply g b)
@@ -625,13 +647,13 @@ instance Applicable TypeU where
   -- (KindSet KindStr) respectively, matching how their solutions are
   -- inserted by the list/set solvers.
   apply g (ListVarU v) = case Map.lookup (v, KindList KindStr) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindList KindStr) (gammaKindSubs g)}) t
     Nothing -> ListVarU v
   apply g (ListLitU es) = ListLitU (map (apply g) es)
   apply g (ListAppU a b) = ListAppU (apply g a) (apply g b)
   apply _ t@ListVoidU = t
   apply g (SetVarU v) = case Map.lookup (v, KindSet KindStr) (gammaKindSubs g) of
-    Just t -> t
+    Just t -> apply (g {gammaKindSubs = Map.delete (v, KindSet KindStr) (gammaKindSubs g)}) t
     Nothing -> SetVarU v
   apply _ t@SetEmptyU = t
   apply g (SetLitU es) = SetLitU (map (apply g) es)
@@ -676,6 +698,7 @@ instance Applicable Gamma where
       , gammaKindSubs = Map.map (apply g1) (gammaKindSubs g2)
       , gammaEffSubs = Map.map (applyEff g1) (gammaEffSubs g2)
       , gammaConstraints = map (apply g1) (gammaConstraints g2)
+      , gammaWanteds = [w {wPred = apply g1 (wPred w)} | w <- gammaWanteds g2]
       }
     where
       f :: GammaIndex -> GammaIndex
@@ -713,6 +736,7 @@ slotSpacing = 2 ^ (32 :: Int)
        , gammaExist = case gi of
            ExistG v _ _ -> Map.insert v s (gammaExist g)
            _ -> gammaExist g
+       , gammaAnn = indexAnn s gi (gammaAnn g)
        }
 
 -- | Add multiple entries: last element of list becomes newest (highest slot).
@@ -963,11 +987,19 @@ strExprToTypeU (SS.StrConcat a b) = StrConcatU (strExprToTypeU a) (strExprToType
 -- gamma map. Mirrors applyNatSolutions but the StrSolver only ever
 -- produces ground assignments (per memo 04), so there is no
 -- existential-vs-StrVar dispatch.
+-- | Record a kind variable's solution, resolved through the solutions
+-- already recorded. One that resolves to the variable itself closes a cycle
+-- (a solver equating two variables both ways) and is dropped, so the
+-- variables stay equal.
+insertKindSub :: Kind -> (TVar -> TypeU) -> TVar -> TypeU -> Gamma -> Gamma
+insertKindSub k varU v t g = case apply g t of
+  t' | t' == varU v -> g
+     | otherwise -> g {gammaKindSubs = Map.insert (v, k) t' (gammaKindSubs g)}
+
 applyStrSolutions :: Map.Map TVar SS.StrExpr -> Gamma -> Gamma
 applyStrSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) =
-      g { gammaKindSubs = Map.insert (v, KindStr) (strExprToTypeU se) (gammaKindSubs g) }
+    insertSub g (v, se) = insertKindSub (KindStr) StrVarU v (strExprToTypeU se) g
 
 -- | True iff the TypeU is a Rec-kinded expression (variable, empty,
 -- extension, union, difference, intersection). Mirrors isNatExpr/isStrExpr.
@@ -1001,12 +1033,57 @@ recExprToTypeU (RS.RecUnion a b) = RecUnionU (recExprToTypeU a) (recExprToTypeU 
 recExprToTypeU (RS.RecDiff a ks) = RecDiffU (recExprToTypeU a) ks
 recExprToTypeU (RS.RecIntersect a b) = RecIntersectU (recExprToTypeU a) (recExprToTypeU b)
 
+-- | A kind solver's bindings, checked against the Str, Rec and List
+-- variables of the signatures whose bodies are being checked, which stand for
+-- every value of their kind (POLY-1). The bindings from such a variable are
+-- followed through other variables: when they end at a variable, every
+-- variable on the way is bound to it instead; when they end at anything
+-- else, or pass another such variable, the body fixes it, and it is
+-- returned.
+pinSlots :: Gamma -> (e -> Maybe TVar) -> (TVar -> e) -> Map.Map TVar e -> Either TVar (Map.Map TVar e)
+pinSlots g asVar var subs0 = foldM pin subs0 (filter (`Set.member` fixed) (Map.keys subs0))
+  where
+    fixed = gammaRigidSlots g
+    pin subs v = follow (Set.singleton v) [v] v
+      where
+        follow seen chain w = case Map.lookup w subs of
+          Nothing -> settle chain
+          Just e -> case asVar e of
+            Just u
+              | Set.member u seen -> settle chain
+              | otherwise -> follow (Set.insert u seen) (u : chain) u
+            Nothing -> Left v
+        settle chain
+          | any (\x -> x /= v && Set.member x fixed) chain = Left v
+          | otherwise = Right (foldr (\x acc -> if x == v then Map.delete x acc else Map.insert x (var v) acc) subs chain)
+
+-- | The message for a variable 'pinSlots' refuses, by the name the
+-- signature gave it.
+fixedSlot :: TVar -> MDoc
+fixedSlot (TV v) =
+  "the body fixes" <+> squotes (pretty (MT.takeWhile (/= '@') v)) <> ", a variable of the signature, which the body must accept at every value"
+
+strVar :: SS.StrExpr -> Maybe TVar
+strVar (SS.StrVar v) = Just v
+strVar _ = Nothing
+
+recVar :: RS.RecExpr -> Maybe TVar
+recVar (RS.RecVar v) = Just v
+recVar _ = Nothing
+
+listVar :: LS.ListExpr -> Maybe TVar
+listVar (LS.ListVar v) = Just v
+listVar _ = Nothing
+
+setVar :: SetS.SetExpr -> Maybe TVar
+setVar (SetS.SetVar v) = Just v
+setVar _ = Nothing
+
 -- | Insert solved Rec-tail variable assignments into the kind-tagged gamma map.
 applyRecSolutions :: Map.Map TVar RS.RecExpr -> Gamma -> Gamma
 applyRecSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, re) =
-      g { gammaKindSubs = Map.insert (v, KindRec) (recExprToTypeU re) (gammaKindSubs g) }
+    insertSub g (v, re) = insertKindSub (KindRec) RecVarU v (recExprToTypeU re) g
 
 -- | True iff the TypeU is a List-kinded expression. Mirrors isRecExpr.
 isListExpr :: TypeU -> Bool
@@ -1031,8 +1108,7 @@ listExprToTypeU (LS.ListApp a b) = ListAppU (listExprToTypeU a) (listExprToTypeU
 applyListSolutions :: Map.Map TVar LS.ListExpr -> Gamma -> Gamma
 applyListSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, le) =
-      g { gammaKindSubs = Map.insert (v, KindList KindStr) (listExprToTypeU le) (gammaKindSubs g) }
+    insertSub g (v, le) = insertKindSub (KindList KindStr) ListVarU v (listExprToTypeU le) g
 
 -- | True iff the TypeU is a Set-kinded expression. Mirrors isRecExpr.
 isSetExpr :: TypeU -> Bool
@@ -1067,8 +1143,7 @@ setExprToTypeU (SetS.SetDiff a b) = SetDiffU (setExprToTypeU a) (setExprToTypeU 
 applySetSolutions :: Map.Map TVar SetS.SetExpr -> Gamma -> Gamma
 applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
   where
-    insertSub g (v, se) =
-      g { gammaKindSubs = Map.insert (v, KindSet KindStr) (setExprToTypeU se) (gammaKindSubs g) }
+    insertSub g (v, se) = insertKindSub (KindSet KindStr) SetVarU v (setExprToTypeU se) g
 
 -- | Record solutions of Nat equations; @ints@ names the variables of the
 -- equations that are Int-kinded, and @restore@ turns the opaque naturals
@@ -1086,6 +1161,36 @@ applyNatSolutions ints restore subs g0 = foldM applySub g0 (Map.toList subs)
            Right Nothing ->
              Right g { gammaKindSubs = Map.insert (v, k) t (gammaKindSubs g) }
            Left err -> Left err
+
+-- | Compare the deferred equations other than Nat equations again under the
+-- solutions the others give, until a round settles none: each is decided
+-- with every other's solution in force, never alone. A contradiction comes
+-- back with its equation; what is still deferred is undecided. Each
+-- equation deferred again keeps the term it arose at.
+settleDeferred :: Scope -> Gamma -> Either (Maybe Int, MDoc) Gamma
+settleDeferred scope = go
+  where
+    go g = do
+      let (nats, others) = Data.List.partition natDeferred (gammaDeferred g)
+          forms h ps = Set.fromList [(apply h a, apply h b) | (a, b) <- ps]
+      g' <- foldM again g {gammaDeferred = nats} others
+      let left = filter (not . natDeferred) (gammaDeferred g')
+      if null left || forms g' left == forms g others then return g' else go g'
+    again acc p@(t1, t2) =
+      let site = Map.lookup p (gammaDeferredAt acc)
+       in case subtype scope t1 t2 acc {gammaDeferred = []} of
+            Left err -> Left (site, err)
+            Right acc' ->
+              let added = gammaDeferred acc'
+                  at = case site of
+                    Just i -> foldr (\q -> Map.insertWith (\_ old -> old) q i) (gammaDeferredAt acc') added
+                    Nothing -> gammaDeferredAt acc'
+               in Right acc' {gammaDeferred = added <> gammaDeferred acc, gammaDeferredAt = at}
+
+-- | Whether a deferred equation is between Nat positions, decided by the
+-- Nat procedure (DIM-7) rather than by the kind solvers.
+natDeferred :: (TypeU, TypeU) -> Bool
+natDeferred (a, b) = isJust (natPositionExpr a) && isJust (natPositionExpr b)
 
 -- | Re-check deferred kind constraints after all existentials are solved.
 -- Applies the final gamma to each deferred pair, classifies as a Nat, Str,
@@ -1191,18 +1296,22 @@ subtype scope t1 t2 g
   | Just (comps, t1') <- solvedStructure t1 = comps g >>= subtype scope t1' t2
   | Just (comps, t2') <- solvedStructure t2 = comps g >>= subtype scope t1 t2'
   where
-    solvedStructure (ExistU v (ps, _) (rs, _))
+    solvedStructure (ExistU v (ps, pc) (rs, _))
       | not (null ps && null rs), isJust (lookupU v g) =
           let sol = apply g (ExistU v ([], Open) ([], Open))
-           in Just (componentsAgainst ps rs sol, sol)
+           in Just (componentsAgainst ps pc rs sol, sol)
     solvedStructure _ = Nothing
-    componentsAgainst ps rs sol g0 = do
+    componentsAgainst ps pc rs sol g0 = do
       let (solPs, solRs) = case sol of
             ExistU _ (ps', _) (rs', _) -> (ps', rs')
             AppU _ ps' -> (ps', [])
             NamU _ _ _ rs' -> ([], rs')
             _ -> ([], [])
-      g1 <- foldM (\gx (p, q) -> subtype scope (apply gx p) (apply gx q) gx) g0 (zip ps solPs)
+      -- An open parameter list names the first of the solution's parameters;
+      -- a closed one names them all.
+      when (length ps > length solPs || (pc == Closed && length ps /= length solPs)) $
+        subtypeError t1 t2 "Parameter type mismatch"
+      g1 <- foldM (\gx (p, q) -> subtype scope (apply gx p) (apply gx q) gx) g0 (zipPrefix ps solPs)
       foldM
         (\gx (k, p) -> case (lookup k solRs, sol) of
             (Just q, _) -> subtype scope (apply gx p) (apply gx q) gx
@@ -1287,26 +1396,12 @@ subtype scope (OptionalU t1) (OptionalU t2) g = subtype scope t1 t2 g
 -- existentials propagate to later arguments. This is necessary when a
 -- forall-bound variable appears in multiple argument positions (e.g.,
 -- (==) :: c -> c -> Bool passed to fold).
-subtype scope t1@(FunU as1 ret1) t2@(FunU as2 ret2) g0
-  -- @A -> (B -> C)@ and @A -> B -> C@ are the same curried type. The parser
-  -- right-flattens arrows, but a function value inferred from a lambda in
-  -- return position (@f x = \y -> ...@) can reach here still nested, giving a
-  -- different argument count than a flattened annotation. Re-nest the longer
-  -- argument list's surplus into its return so the arities line up, then
-  -- recurse; a genuine arity error still surfaces because the re-nested return
-  -- fails to subtype (a function vs a non-function).
-  | length as1 > length as2 =
-      let (pre, rest) = splitAt (length as2) as1
-       in subtype scope (FunU pre (FunU rest ret1)) t2 g0
-  | length as1 < length as2 =
-      let (pre, rest) = splitAt (length as1) as2
-       in subtype scope t1 (FunU pre (FunU rest ret2)) g0
-  | null as1 = subtype scope ret1 ret2 g0
-  | otherwise = do
-      -- Process all arguments (contravariant: b <: a), applying context between each
-      g1 <- foldlM (\g (b, a) -> subtype scope (apply g b) (apply g a) g) g0 (zip as2 as1)
-      -- Apply context to return types, then subtype
-      subtype scope (apply g1 ret1) (apply g1 ret2) g1
+subtype scope (FunU as1 ret1) (FunU as2 ret2) g0
+  | Just (params, (r1, r2)) <- alignFun (as1, ret1) (as2, ret2) = do
+      -- Contravariant parameters (b <: a), applying context between each
+      g1 <- foldlM (\g (a, b) -> subtype scope (apply g b) (apply g a) g) g0 params
+      subtype scope (apply g1 r1) (apply g1 r2) g1
+  | otherwise = subtypeError (FunU as1 ret1) (FunU as2 ret2) "a suspension, which takes no arguments, is not a function"
 
 --  g1 |- A1 <: B1
 -- ----------------------------------------- <:App
@@ -1463,7 +1558,7 @@ subtype scope t1@(ExistU v1 (ps1, pc1) rs@([], _)) t2@(AppU _ ps2) g1
       subtypeError t1 t2 "InstantiateL - too many parameters in left existential"
   -- otherwise, do the thing
   | otherwise = do
-      g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zip ps1 ps2)
+      g2 <- foldM (\g (p1, p2) -> subtype scope p1 p2 g) g1 (zipSame ps1 ps2)
       solveExist v1 t2 g2 >>= maybe (return g2) return
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
@@ -1539,9 +1634,11 @@ subtype _ t1 t2 g
       in case (typeUToStrExpr t1', typeUToStrExpr t2') of
            (Just se1, Just se2) ->
              case SS.solveStr se1 se2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applyStrSolutions subs g)
+               Right subs0 -> case pinSlots g strVar SS.StrVar subs0 of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
+                 Right subs
+                   | Map.null subs -> return g
+                   | otherwise -> return (applyStrSolutions subs g)
                Left (SS.StrContradiction _ _) ->
                  subtypeError t1 t2 "Str constraint mismatch"
                Left SS.StrDeferred ->
@@ -1561,15 +1658,14 @@ subtype scope t1 t2 g
       in case (typeUToRecExpr t1', typeUToRecExpr t2') of
            (Just re1, Just re2) ->
              case RS.solveRec re1 re2 of
-               Right sol ->
+               Right sol -> case pinSlots g recVar RS.RecVar (RS.recSubs sol) of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
                  -- The solver aligns the rows; the field types it matched
                  -- may still need unifying (one side can be an existential),
                  -- and only subtype can do that.
-                 let g' = if Map.null (RS.recSubs sol)
-                            then g
-                            else applyRecSolutions (RS.recSubs sol) g
-                  in foldM (\gAcc (a, b) -> subtype scope a b gAcc)
-                           g' (RS.recFieldEqs sol)
+                 Right subs ->
+                   let g' = if Map.null subs then g else applyRecSolutions subs g
+                    in foldM (\gAcc (a, b) -> subtype scope a b gAcc) g' (RS.recFieldEqs sol)
                Left (RS.RecContradiction msg) ->
                  subtypeError t1 t2 ("Rec constraint mismatch: " <> pretty msg)
                Left (RS.RecMalformed msg) ->
@@ -1600,9 +1696,11 @@ subtype _ t1 t2 g
       in case (typeUToListExpr t1', typeUToListExpr t2') of
            (Just le1, Just le2) ->
              case LS.solveList le1 le2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applyListSolutions subs g)
+               Right subs0 -> case pinSlots g listVar LS.ListVar subs0 of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
+                 Right subs
+                   | Map.null subs -> return g
+                   | otherwise -> return (applyListSolutions subs g)
                Left (LS.ListContradiction msg) ->
                  subtypeError t1 t2 ("List constraint mismatch: " <> pretty msg)
                Left LS.ListDeferred ->
@@ -1620,9 +1718,11 @@ subtype _ t1 t2 g
       in case (typeUToSetExpr t1', typeUToSetExpr t2') of
            (Just se1, Just se2) ->
              case SetS.solveSet se1 se2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applySetSolutions subs g)
+               Right subs0 -> case pinSlots g setVar SetS.SetVar subs0 of
+                 Left v -> subtypeError t1 t2 (fixedSlot v)
+                 Right subs
+                   | Map.null subs -> return g
+                   | otherwise -> return (applySetSolutions subs g)
                Left (SetS.SetContradiction msg) ->
                  subtypeError t1 t2 ("Set constraint mismatch: " <> pretty msg)
                Left SetS.SetDeferred ->
@@ -1636,8 +1736,8 @@ subtype _ t1 t2 g
 -- falls through, and no function over "any table with a pop column" can be
 -- given a body in morloc.
 subtype scope t1@(OpU o1 as1) t2@(OpU o2 as2) g
-  | o1 == o2 && length as1 == length as2 =
-      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zip as1 as2)
+  | o1 == o2, Just ops <- zipExact as1 as2 =
+      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g ops
   | otherwise = subtypeError t1 t2 "Type operator mismatch"
 -- An applied alias meeting a type of another shape, such as the record it
 -- names, is compared through its expansion.
@@ -1759,8 +1859,9 @@ structuralAliasesIn scope t = case structuralAliasHead scope t of
   Just (v, _) -> [v]
   Nothing -> concatMap (structuralAliasesIn scope) (typeUChildren t)
 
--- | The alias heading a type, and the arrow, effect or optional type it
--- names.
+-- | The alias heading a type, and the arrow, effect or optional type, or the
+-- argument of another kind (ALIAS-11: @type D = 3@), it names. Expanded
+-- before code generation, so no later pass sees such an alias.
 structuralAliasHead :: Scope -> TypeU -> Maybe (TVar, TypeU)
 structuralAliasHead scope t = do
   v <- TE.headName t
@@ -1768,6 +1869,7 @@ structuralAliasHead scope t = do
     t'@(FunU _ _) -> Just (v, t')
     t'@(EffectU _ _) -> Just (v, t')
     t'@(OptionalU _) -> Just (v, t')
+    t' | isJust (kindOfU t') -> Just (v, t')
     _ -> Nothing
 
 -- | Apply an action to each immediate child type. An application's head is
@@ -1798,7 +1900,7 @@ headerLabels = go []
     go path t = case t of
       LabeledU l x -> [(l, path, x)]
       AppU (VarU h) ts
-        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- zip [0 ..] ts]
+        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- indexed ts]
       _ -> []
 
 -- | Every label in a type.
@@ -1828,7 +1930,7 @@ subtypeFields t1 t2 scope rs1 rs2 g0 =
   case RS.groundEq (named rs1) (named rs2) of
     Left (RS.RecContradiction msg) -> subtypeError t1 t2 (pretty msg)
     Left _ -> subtypeError t1 t2 "Record fields differ"
-    Right _ -> foldM step g0 (zip rs1 rs2)
+    Right _ -> foldM step g0 (zipSame rs1 rs2)
   where
     named rs = [(k, t) | (Key k, t) <- rs]
     step g ((_, x1), (_, x2)) = subtype scope (apply g x1) (apply g x2) g
@@ -1892,7 +1994,7 @@ instantiate scope (ExistU v ([], _) _) (FunU as b) g1 = do
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
       eb = ExistU veb ([], Open) ([], Open)
   g4 <- solveExistWith v (FunU eas eb) (index eb : map index eas) g3 >>= maybe (return g3) return
-  g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zip eas as)
+  g5 <- foldlM (\g (e, t) -> instantiate scope e t g) g4 (zipSame eas as)
   instantiate scope eb (apply g5 b) g5
 
 --  g1[Ea2,Ea1,Ea=Ea1->Ea2] |- Ea1 <=: A1 -| g2
@@ -1905,7 +2007,7 @@ instantiate scope (FunU as b) (ExistU v ([], _) _) g1 = do
       eas = [ExistU v' ([], Open) ([], Open) | v' <- veas]
       eb = ExistU veb ([], Open) ([], Open)
   g4 <- solveExistWith v (FunU eas eb) (index eb : map index eas) g3 >>= maybe (return g3) return
-  g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zip eas as)
+  g5 <- foldlM (\g (e, t) -> instantiate scope t e g) g4 (zipSame eas as)
   instantiate scope eb (apply g5 b) g5
 
 -- This is terrible kludge, I am not close to having considered all the edge
@@ -1992,7 +2094,7 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
     (_, k : _) | rc2 == Closed -> missingField ta tb k
     _ -> extendRec scope g1 rs1 rs2
 
-  g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zip ps1 ps2)
+  g3 <- foldM (\g (t1, t2) -> subtype scope t1 t2 g) g2 (zipPrefix ps1 ps2)
   g4 <-
     foldM
       (\g' (t1, t2) -> subtype scope t1 t2 g')
@@ -2036,15 +2138,15 @@ instantiate scope (ExistU v1 (ps1, pc1) (rs1_expr, rc1)) (ExistU v2 (ps2, pc2) (
                 (gC, dvs) = statefulMap (\gx _ -> tvarname gx "merge_key_") gB rsM
                 bare x = ExistU x ([], Open) ([], Open)
                 cs = map bare cvs
-                ds = [(k, bare d) | ((k, _), d) <- zip rsM dvs]
+                ds = [(k, bare d) | ((k, _), d) <- zipSame rsM dvs]
                 wT = ExistU w (cs, pcM) (ds, rcM)
                 fresh = ExistG w (cs, pcM) (ds, rcM) : map index cvs ++ map index dvs
             when (any (\x -> occursIn o x || occursIn n x) (map (apply g) (ps1' <> map snd rsM))) $
               subtypeError ta tb "Infinite type: a value would contain itself"
             gD <- solveExistWith o wT fresh gC
               >>= maybe (Left $ "Cannot articulate an existential missing from the context:" <+> pretty o) return
-            gE <- foldM (\gx (t, c) -> subtype scope (apply gx t) c gx) gD (zip ps1' cs)
-            gF <- foldM (\gx ((_, t), (_, d)) -> subtype scope (apply gx t) d gx) gE (zip rsM ds)
+            gE <- foldM (\gx (t, c) -> subtype scope (apply gx t) c gx) gD (zipSame ps1' cs)
+            gF <- foldM (\gx ((_, t), (_, d)) -> subtype scope (apply gx t) d gx) gE (zipSame rsM ds)
             solveExist n (apply gF wT) gF >>= maybe (return gF) return
 
   -- Check gammaSolved first: if either is already solved, skip access2
@@ -2272,7 +2374,7 @@ classifyTupleShape scope = go (0 :: Int)
       | fuel > 100 = UndecidedTuple
       | otherwise = case t of
           AppU (VarU (TV nm)) args
-            | MT.isPrefixOf "Tuple" nm -> IsTuple args
+            | isTupleName nm -> IsTuple args
             | Map.member (TV nm) scope -> reduced fuel t
             | otherwise -> NotTuple
           VarU (TV nm)
@@ -2307,7 +2409,7 @@ propagateExistGPositional scope v t g = case classifyTupleShape scope t of
            else foldM
                   (\g' (slot, elemT) -> subtype scope elemT slot g')
                   gAcc
-                  (zip ps tupleArgs))
+                  (zipPrefix ps tupleArgs))
       g
       (accumulatedPositionalSets v g)
   NotTuple -> case accumulatedPositionalSets v g of
@@ -2443,6 +2545,51 @@ occursCheck t1 t2 place =
 substitute :: TVar -> TypeU -> TypeU
 substitute v = substituteTVar v (ExistU v ([], Open) ([], Open))
 
+-- | Each Type variable of @vs@ an existential of its name ('substitute').
+openVars :: Set.Set TVar -> TypeU -> TypeU
+openVars vs t = foldr substitute t (Set.toList vs)
+
+-- | A gamma in which the signature variables @vs@, rigid while a body was
+-- checked, are unknowns: each one's VarG becomes an existential in its own
+-- slot (those of @constrained@, which only constraints name and have none,
+-- are added as one; an effect variable in @vs@ is not a Type variable),
+-- the types and constraints gamma stores read them as those existentials,
+-- and nothing is held rigid any more.
+openRigidGamma :: Set.Set TVar -> Set.Set TVar -> Gamma -> Gamma
+openRigidGamma vs constrained g =
+  g
+    { gammaContext = IntMap.map entry (gammaContext g)
+    , gammaExist = Map.union (Map.fromList [(v, slot) | (slot, VarG v) <- IntMap.toList (gammaContext g), Set.member v vs]) (gammaExist g)
+    , gammaSolved = Map.map open (gammaSolved g)
+    , gammaKindSubs = Map.map open (gammaKindSubs g)
+    , gammaConstraints = map (mapConstraintTypes open) (gammaConstraints g)
+    , gammaWanteds = [w {wPred = mapConstraintTypes open (wPred w)} | w <- gammaWanteds g]
+    , gammaDeferred = [(open a, open b) | (a, b) <- gammaDeferred g]
+    , gammaDeferredAt = Map.mapKeys (\(a, b) -> (open a, open b)) (gammaDeferredAt g)
+    , gammaAssumedConstraints = map (mapConstraintTypes open) <$> gammaAssumedConstraints g
+    , gammaRigid = Nothing
+    , gammaRigidNats = Set.empty
+    , gammaRigidSlots = Set.empty
+    , gammaRigidDomain = []
+    }
+    `addMissing` [v | v <- Set.toList constrained, not (any (isVarG v) (IntMap.elems (gammaContext g)))]
+  where
+    addMissing = foldl (+>)
+    isVarG v (VarG w) = v == w
+    isVarG _ _ = False
+    open = openVars vs
+    entry e = case e of
+      VarG v | Set.member v vs -> ExistG v ([], Open) ([], Open)
+      AnnG x t -> AnnG x (open t)
+      ExistG v (ps, po) (rs, ro) -> ExistG v (map open ps, po) ([(k, open t) | (k, t) <- rs], ro)
+      SolvedG v t -> SolvedG v (open t)
+      _ -> e
+    mapConstraintTypes f c = case c of
+      Constraint cls ts -> Constraint cls (map f ts)
+      CMember a b -> CMember (f a) (f b)
+      CSubset a b -> CSubset (f a) (f b)
+      CDisjoint a b -> CDisjoint (f a) (f b)
+
 -- | Find an unsolved ExistG by TVar. O(log N) via gammaExist index.
 -- Returns the slot and entry if found.
 access1 :: TVar -> Gamma -> Maybe (Int, GammaIndex)
@@ -2497,7 +2644,7 @@ solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
         step = (slot - older) `div` (length extras + 1)
         g1 = cacheSolved v t $ g {gammaExist = Map.delete v (gammaExist g)}
     if step >= 1
-      then return . Just $ placeEntries g1 ((slot, solved) : zip [slot - step, slot - 2 * step ..] extras)
+      then return . Just $ placeEntries g1 ((slot, solved) : zipPrefix [slot - step, slot - 2 * step ..] extras)
       else do
         let band = IntMap.toDescList . fst . IntMap.split top . snd $ IntMap.split bottom (gammaContext g)
             ordered
@@ -2506,30 +2653,53 @@ solveExistWith v t extras g = case Map.lookup v (gammaExist g) of
             bandStep = slotSpacing `div` (length ordered + 1)
         when (bandStep < 1) $
           Left $ "Too many type variables to infer at once while articulating" <+> pretty v
-        let cleared = g1
-              { gammaContext = foldl' (flip IntMap.delete) (gammaContext g1) (map fst band)
-              , gammaExist = foldl' (flip Map.delete) (gammaExist g1) [ev | (_, ExistG ev _ _) <- band]
-              }
+        let cleared = unindexEntries False band $
+              g1 {gammaContext = foldl' (flip IntMap.delete) (gammaContext g1) (map fst band)}
             g2 = if inBand slot then cleared else placeEntries cleared [(slot, solved)]
-        return . Just $ placeEntries g2 (zip [top - bandStep, top - 2 * bandStep ..] ordered)
+        return . Just $ placeEntries g2 (zipPrefix [top - bandStep, top - 2 * bandStep ..] ordered)
   where
     placeEntries = foldl' $ \g' (s, x) ->
       g' { gammaContext = IntMap.insert s x (gammaContext g')
          , gammaExist = case x of
              ExistG ev _ _ -> Map.insert ev s (gammaExist g')
              _ -> gammaExist g'
+         , gammaAnn = indexAnn s x (gammaAnn g')
          }
 
 -- | Look up a solved existential type variable. O(log N) via gammaSolved.
 lookupU :: TVar -> Gamma -> Maybe TypeU
 lookupU v g = Map.lookup v (gammaSolved g)
 
--- | Look up an annotation type variable. O(N) scan (AnnG entries are rare).
+-- | Look up an annotation type variable: its newest entry in the context.
 lookupE :: EVar -> Gamma -> Maybe TypeU
-lookupE v g = foldr step Nothing (IntMap.toDescList (gammaContext g))
+lookupE v g =
+  listToMaybe
+    [ t
+    | s <- Map.findWithDefault [] v (gammaAnn g)
+    , Just (AnnG v' t) <- [IntMap.lookup s (gammaContext g)]
+    , v' == v
+    ]
+
+-- | Record an annotation's slot in the index, newest (highest) first.
+indexAnn :: Int -> GammaIndex -> Map.Map EVar [Int] -> Map.Map EVar [Int]
+indexAnn s (AnnG v _) = Map.alter (Just . Data.List.insertBy (flip compare) s . fromMaybe []) v
+indexAnn _ _ = id
+
+-- | The side indexes without the given entries, removed from the context;
+-- with @dropSolved@, their cached solutions go too.
+unindexEntries :: Bool -> [(Int, GammaIndex)] -> Gamma -> Gamma
+unindexEntries dropSolved removed g =
+  g
+    { gammaExist = foldl' (flip Map.delete) (gammaExist g) [v | (_, ExistG v _ _) <- removed]
+    , gammaSolved =
+        if dropSolved
+          then foldl' (flip Map.delete) (gammaSolved g) [v | (_, SolvedG v _) <- removed]
+          else gammaSolved g
+    , gammaAnn = foldl' dropAnn (gammaAnn g) removed
+    }
   where
-    step (_, AnnG v' t) _ | v == v' = Just t
-    step _ acc = acc
+    dropAnn m (s, AnnG v _) = Map.update (\ss -> case filter (/= s) ss of [] -> Nothing; ss' -> Just ss') v m
+    dropAnn m _ = m
 
 -- | Remove context entries newer than (and including) a marker. O(N) in
 -- removed entries for cleanup; O(log N) for the IntMap split itself.
@@ -2540,18 +2710,8 @@ cut marker g = do
     (s : _) -> Right s
     [] -> Left $ "Empty cut" <+> pretty marker
   -- Everything with slot < markerSlot is kept (older entries)
-  let kept = fst (IntMap.split markerSlot (gammaContext g))
-      -- Collect removed entries for cleanup
-      removedSlots = IntMap.filterWithKey (\s _ -> s >= markerSlot) (gammaContext g)
-      removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
-      removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
-      solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys
-      existMap' = foldl' (flip Map.delete) (gammaExist g) removedExistKeys
-  return $ g
-    { gammaContext = kept
-    , gammaExist = existMap'
-    , gammaSolved = solvedMap'
-    }
+  let (kept, removed) = IntMap.spanAntitone (< markerSlot) (gammaContext g)
+  return . unindexEntries True (IntMap.toList removed) $ g {gammaContext = kept}
 
 -- | Convert context to a list (newest first) for iteration/debugging.
 gammaContextList :: Gamma -> [GammaIndex]
@@ -2563,17 +2723,8 @@ gammaContextList g = map snd (IntMap.toDescList (gammaContext g))
 -- threshold (see 'solveExistWith').
 gammaTrimAfter :: Int -> Gamma -> Gamma
 gammaTrimAfter slotThreshold g =
-  let (kept, removedSlots) = IntMap.partitionWithKey (\s _ -> s <= slotThreshold - slotSpacing) (gammaContext g)
-      removedSolvedKeys = [v | (_, SolvedG v _) <- IntMap.toList removedSlots]
-      removedExistKeys = [v | (_, ExistG v _ _) <- IntMap.toList removedSlots]
-      solvedMap' = foldl' (flip Map.delete) (gammaSolved g) removedSolvedKeys
-      existMap' = foldl' (flip Map.delete) (gammaExist g) removedExistKeys
-  in g
-    { gammaContext = kept
-    , gammaSlot = slotThreshold
-    , gammaExist = existMap'
-    , gammaSolved = solvedMap'
-    }
+  let (kept, removed) = IntMap.spanAntitone (<= slotThreshold - slotSpacing) (gammaContext g)
+   in unindexEntries True (IntMap.toList removed) g {gammaContext = kept, gammaSlot = slotThreshold}
 
 selectorType :: Gamma -> Selector -> MorlocMonad (Gamma, TypeU)
 selectorType g0 SelectorEnd = do
@@ -2596,8 +2747,8 @@ selectorType g0 (SelectorIdx x xs) = do
       Nothing -> selectorType g SelectorEnd
 selectorType g0 (SelectorKey x xs) = do
   xs' <- mapM (secondM weaveSelectors) (groupSort (x : xs))
-  (g1, ss) <- statefulMapM selectorType g0 (map snd xs')
-  return $ newvarRich ([], Closed) (zip (map (Key . fst) xs') ss, Open) "_pattern_" g1
+  (g1, ss) <- statefulMapM (\gx (k, s) -> second ((,) (Key k)) <$> selectorType gx s) g0 xs'
+  return $ newvarRich ([], Closed) (ss, Open) "_pattern_" g1
 selectorType g0 (SelectorBracketIndex s) = do
   -- The receiver must be a list; bracket-index strips one Array layer
   -- and the inner selector applies to the element type. Produce an
@@ -2795,16 +2946,13 @@ renameWithMap g0 t0 =
    in if null nvs && null svs && null rvs && null lvs && null evs
       then (g0, t0, id)
       else
-        let (g1, nvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@n")) g0 nvs
-            (g2, svs') = statefulMap (\g (TV s) -> tvarname g (s <> "@s")) g1 svs
-            (g3, rvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@r")) g2 rvs
-            (g4, lvs') = statefulMap (\g (TV s) -> tvarname g (s <> "@l")) g3 lvs
-            (g5, evs') = statefulMap (\g (TV s) -> tvarname g (s <> "@e")) g4 evs
-            natMap = Map.fromList (zip nvs nvs')
-            strMap = Map.fromList (zip svs svs')
-            recMap = Map.fromList (zip rvs rvs')
-            listMap = Map.fromList (zip lvs lvs')
-            effMap = Map.fromList (zip evs evs')
+        let freshMap suffix g vs =
+              second Map.fromList (statefulMap (\gx v@(TV s) -> second ((,) v) (tvarname gx (s <> suffix))) g vs)
+            (g1, natMap) = freshMap "@n" g0 nvs
+            (g2, strMap) = freshMap "@s" g1 svs
+            (g3, recMap) = freshMap "@r" g2 rvs
+            (g4, listMap) = freshMap "@l" g3 lvs
+            (g5, effMap) = freshMap "@e" g4 evs
             rw = renameKindedVars natMap strMap recMap listMap effMap
          in (g5, rw t0, rw)
 
@@ -2905,7 +3053,7 @@ cleanTypeName t0 =
       allGeneric = nub (vs ++ evs ++ nvs ++ svs ++ rvs)
       fixed = collectFixedNames (Set.fromList allGeneric) body
       pool = filter (\(TV n) -> Set.notMember n fixed) letterPool
-      renameMap = Map.fromList (zip allGeneric pool)
+      renameMap = Map.fromList (zipPrefix allGeneric pool)
       renamedBody = applyVarRenaming renameMap body
       renamedVs = map (\v -> Map.findWithDefault v v renameMap) vs
    in simplifyNats $ qualify renamedVs renamedBody
@@ -3505,6 +3653,8 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (NamU _ n [] rs)
       | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <> "=" <> f True t | (k, t) <- rs]))
       | otherwise = pretty n
+    f _ (ExistU _ (ts@(_ : _), pc) ([], _)) = parens (hcat (punctuate ", " (map (f True) ts <> rest pc)))
+    f _ (ExistU _ ([], _) (rs@(_ : _), rc)) = braces (hcat (punctuate ", " ([pretty k <> "=" <> f False t | (k, t) <- rs] <> rest rc)))
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v
@@ -3523,6 +3673,8 @@ prettyTypeU = renderClean . cleanTypeName
     layerU t = f False t
     arrowArg t@(FunU _ _) = parens (f True t)
     arrowArg t = f True t
+    rest Open = ["..."]
+    rest Closed = []
 
 -- | Render two TypeUs with a shared rename pool so distinct freshened
 -- variables get distinct clean names. Without this, calling
@@ -3544,44 +3696,14 @@ evarname g prefix =
   let i = gammaCounter g
    in (g {gammaCounter = i + 1}, EV (prefix <> "@@" <> MT.pack (show i)))
 
--- | Find a @Packable@ instance whose @pack@ output head matches the
--- outer TVar of @nativeT@, and return @pack@'s input (the decomposed
--- form) with the instance's type parameters substituted from
--- @nativeT@'s args. The class is @class Packable a b where pack :: a
--- -> b@; pack composes recursively toward the wire format, so its
--- input @a@ is the decomposed/serializable form for the wrapped
--- output @b@. This is the tier-2 wire-form lookup that runs after a
--- literal-check or codegen-dispatch rule fails to find a structural
--- match via 'TE.wireParentRoot' (newtype bodies). For example, with
--- @instance Packable (List (Tuple2 a b)) (Map a b)@ and a literal at
--- @Map Str Int@, returns @List (Tuple2 Str Int)@. Returns 'Nothing'
--- if no instance applies.
-findPackableWireForm :: TypeU -> MorlocMonad (Maybe TypeU)
-findPackableWireForm nativeT = do
-  let nativeTV = extractKey nativeT
-      nativeArgs = case nativeT of
-        AppU _ args -> args
-        _           -> []
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup (EV "pack") sigmap of
-    Nothing -> return Nothing
-    Just inst -> return $ listToMaybe
-      [ wireSubstituted
-      | TermTypes (Just et) _ _ <- instanceTerms inst
-      , let (_, t) = unqualify (etype et)
-      , (wireForm, outputType) <- case t of
-          FunU [w] o -> [(w, o)]
-          _          -> []
-      , extractKey outputType == nativeTV
-      , let outputParams = case outputType of
-              AppU _ args -> [v | VarU v <- args]
-              _           -> []
-      , length outputParams == length nativeArgs
-      , let wireSubstituted = foldr
-              (\(v, t') acc -> substituteTVar v t' acc)
-              wireForm
-              (zip outputParams nativeArgs)
-      ]
+-- | A quantified type with each of its variables a fresh existential, and
+-- the substitution.
+instantiateAll :: Gamma -> TypeU -> (Gamma, TypeU -> TypeU, TypeU)
+instantiateAll g0 t0 =
+  let (vs, body) = unqualify t0
+      (g1, exs) = statefulMap (\g w -> newvar (unTVar w <> "_") g) g0 vs
+      sub t = foldr (\(w, x) acc -> substituteTVar w x acc) t (zipSame vs exs)
+   in (g1, sub, sub body)
 
 -- debugging -------------------
 
@@ -3610,3 +3732,4 @@ peak = insetSay . pretty
 
 peakGen :: (Foldable f) => AnnoS g f c -> MorlocMonad ()
 peakGen = insetSay . pretty
+

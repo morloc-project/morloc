@@ -18,6 +18,7 @@ type declarations, and collects type definitions and source mappings into
 -}
 module Morloc.Frontend.Restructure (restructure) where
 
+import Morloc.Data.Zip (indexed, zipPrefix, zipSame, zipWithPrefix, zipWithSame)
 import qualified Control.Monad.State.Strict as St
 import qualified Data.Graph as Graph
 import Data.Set (Set)
@@ -32,6 +33,7 @@ import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
+import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
@@ -126,7 +128,7 @@ markConstants e0@(ExprI _ (ModE _ es)) = do
         mapM_ (\(v, a) -> do
                  if constant locals a && Set.member v (referenced body) then mark a else return ()
                  expr locals a)
-          (zip vs args)
+          (zipPrefix vs args)
         expr (Set.union locals (Set.fromList vs)) body
       LamE vs body -> expr (Set.union locals (Set.fromList vs)) body
       LetE binds body -> letChain locals binds body
@@ -198,8 +200,33 @@ expandStructuralTypes d = do
     expandModule sc e = do
       e' <- AST.mapTypeInExprI (expandStructuralAliases sc) (writtenAliasDocs sc e)
       checkExpandable sc e'
-      let e'' = expandClassSigs sc e'
+      let e'' = flattenSigs (expandClassSigs sc e')
       return e''
+
+    -- APP-1: a result that an alias expands to a function belongs to the
+    -- signature's own argument list (@Int -> F n@ with @type F n = V n ->
+    -- Int@ is @Int -> V n -> Int@), so no reader of a signature sees the
+    -- grouping. The parameters it adds have no docstrings of their own.
+    flattenSigs :: ExprI -> ExprI
+    flattenSigs (ExprI i (ModE m es)) = ExprI i (ModE m (map flattenSigs es))
+    flattenSigs (ExprI i (SigE (Signature v l et))) = ExprI i (SigE (Signature v l (flattenSig et)))
+    flattenSigs (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [Signature v l (flattenSig et) | Signature v l et <- sigs]))
+    flattenSigs e = e
+
+    flattenSig :: EType -> EType
+    flattenSig et =
+      let t' = flatTop (etype et)
+          arity = length (fst (uncurryU t'))
+          docs = case edocs et of
+            ArgDocSig cmd args ret
+              | arity > length args -> ArgDocSig cmd (args <> replicate (arity - length args) defaultValue) ret
+            d -> d
+       in et {etype = t', edocs = docs}
+
+    flatTop (ForallU v t) = ForallU v (flatTop t)
+    flatTop t@(FunU (_ : _) _) = uncurry FunU (uncurryU t)
+    flatTop t = t
 
     -- DOC-3: a function, effect or optional alias carries its docstring
     -- where a signature names it, and the expansion drops the name.
@@ -214,7 +241,7 @@ expandStructuralTypes d = do
     sigAliasDocs sc et = case (edocs et, unforall (etype et)) of
       (ArgDocSig cmd args ret, FunU ts r)
         | length ts == length args ->
-            et { edocs = ArgDocSig cmd (zipWith (position sc) ts args) (position sc r ret) }
+            et { edocs = ArgDocSig cmd (zipWithSame (position sc) ts args) (position sc r ret) }
       (ArgDocSig cmd args ret, t) ->
         let inherited = position sc t cmd
         in et { edocs = ArgDocSig cmd { docLines = docLines inherited, docReturn = docReturn inherited } args ret }
@@ -465,8 +492,33 @@ checkMutualRecursion d = do
         ]
       sccs = Graph.stronglyConnComp nodes
   mapM_ (rejectCyclic nodes) sccs
+  let defs = Map.fromList [(i, ([p | Left (p, _) <- vs], t)) | (i, Nothing, _, vs, t, _) <- allTypedefs, all isLeft vs]
+      aliases = Map.fromList [(v, ([p | Left (p, _) <- vs], t)) | (_, Nothing, v, vs, t, TypedefAlias) <- allTypedefs, all isLeft vs, notRecord t]
+      notRecord t = case t of
+        NamU {} -> False
+        _ -> True
+  mapM_ (rejectGrowing defs aliases) sccs
   return d
   where
+    -- A cycle of type definitions whose instances keep growing as they are
+    -- followed (`Nest [a]` in `record Nest a`) has no finite expansion, and
+    -- its values no finite wire form.
+    rejectGrowing ::
+      Map Int ([TVar], TypeU) ->
+      Map TVar ([TVar], TypeU) ->
+      Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) ->
+      MorlocMonad ()
+    rejectGrowing defs aliases (Graph.CyclicSCC xs) =
+      let general = [(i, v) | (i, Nothing, v, _) <- xs]
+          members = Map.fromList [(v, d) | (i, v) <- general, Just d <- [Map.lookup i defs]]
+       in case [(i, v, t) | (i, v) <- take 1 general, Just t <- [TE.growingInstance members (Map.withoutKeys aliases (Map.keysSet members)) v]] of
+            (i, v, t) : _ ->
+              MM.throwSourcedError i $
+                "The type" <+> squotes (pretty v) <+> "reaches" <+> squotes (pretty t)
+                  <> ", a larger instance at every nesting, so its values have no finite wire form."
+            [] -> return ()
+    rejectGrowing _ _ _ = return ()
+
     rejectCyclic ::
       [((Int, Maybe Lang, TVar, TypedefKind), (Maybe Lang, TVar), [(Maybe Lang, TVar)])] ->
       Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) ->
@@ -544,7 +596,7 @@ resolveImports d0 =
 
       case export of
         ExportAll -> do
-          exports <- mapM addIndex (Set.toList allSymbols) |>> Set.fromList
+          exports <- mapM (addIndex e) (Set.toList allSymbols) |>> Set.fromList
           return $ AST.setExport (ExportMany exports []) e
         (ExportMany ungroupedExports groups) ->
           let allExplicit = Set.unions (ungroupedExports : [exportGroupMembers g | g <- groups])
@@ -558,7 +610,7 @@ resolveImports d0 =
                           (\g -> g {exportGroupMembers = resolveExplicitSymbols allSymbols (exportGroupMembers g)})
                           groups
                   resolvedUngrouped <-
-                    exportCtorsWithTypes allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
+                    exportCtorsWithTypes e allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
                   MM.throwRejected $
@@ -591,8 +643,9 @@ resolveImports d0 =
     -- a constructor is not a command. The type may have been named in any
     -- export group; the associations go with the ungrouped exports, since
     -- a group is a set of commands.
-    exportCtorsWithTypes :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol) -> MorlocMonad (Set (Int, Symbol))
-    exportCtorsWithTypes ss allExplicit ungrouped = do
+    exportCtorsWithTypes ::
+      ExprI -> Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol) -> MorlocMonad (Set (Int, Symbol))
+    exportCtorsWithTypes e ss allExplicit ungrouped = do
       let exportedTypes = Set.fromList [t | (_, TypeSymbol t) <- Set.toList allExplicit]
           carried =
             Set.fromList
@@ -601,11 +654,14 @@ resolveImports d0 =
               , Set.member t exportedTypes
               ]
           already = Set.map snd allExplicit
-      extra <- mapM addIndex (Set.toList (carried `Set.difference` already))
+      extra <- mapM (addIndex e) (Set.toList (carried `Set.difference` already))
       return $ Set.union ungrouped (Set.fromList extra)
 
-    addIndex :: a -> MorlocMonad (Int, a)
-    addIndex x = (,) <$> MM.getCounter <*> pure x
+    -- an export the module did not list by name is located at its export
+    addIndex :: ExprI -> a -> MorlocMonad (Int, a)
+    addIndex e x = do
+      i <- maybe MM.getCounter MM.getCounterWithPos (AST.findExportIndex e)
+      return (i, x)
 
     -- TODO: distinguish between these expressions at the type-level
     --       the contains unresolved imports, that later resolved
@@ -835,7 +891,7 @@ handleTypeDeclarations = DAG.mapNode f
     isNotSelfDef :: ExprI -> Bool
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing v [] (VarU v') _ _))) = v /= v'
     isNotSelfDef (ExprI _ (TypE (ExprTypeE Nothing (VarU -> v) (map (either (VarU . fst) id) -> vs) (AppU v' vs') _ _))) =
-      v /= v' || length vs /= length vs' || not (all (uncurry (==)) (zip vs vs'))
+      v /= v' || vs /= vs'
     isNotSelfDef _ = True
 
 handleBinops :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
@@ -906,9 +962,7 @@ handleBinops d0 = do
         f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
         f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
-        f (ExprI i (NamE rs)) = do
-          es' <- mapM (f . snd) rs
-          return $ ExprI i (NamE (zip (map fst rs) es'))
+        f (ExprI i (NamE rs)) = NamE <$> mapM (traverse f) rs |>> ExprI i
         f (ExprI i (AppE e es)) = AppE <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LamE vs e)) = LamE vs <$> f e |>> ExprI i
         f (ExprI i (AnnE e t)) = AnnE <$> f e <*> pure t |>> ExprI i
@@ -1214,14 +1268,99 @@ collectTypes fullDag = do
           , let hs = [(l, fields) | (l, fields, _) <- headerLabels b]
           , not (null hs)
           ]
-      concrete =
-        Map.map (completeRecords general) $
-          Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
+  reg <- MM.gets stateLangRegistry
+  homes <- MM.gets stateTypeHomes
+  packages <- MM.gets stateModulePackages
+  checkClassKindPlacement reg packages fullDag
+  let declared = Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
+      (concrete0, classes) =
+        classForms reg homes . Map.map (completeRecords general) $
+          withDefaultKinds reg general declared
+      (concrete, dataClasses, ignored) = dataClassForms reg homes general concrete0
+  mapM_
+    ( \(lang, v) ->
+        MM.warnAt (-1) $
+          "the" <+> pretty lang <+> "form of" <+> squotes (pretty v)
+            <+> "is not used: its values are instances of a `data` type's generated class (GEN-12)"
+    )
+    ignored
+  MM.modify' $ \s -> s {stateGeneratedClasses = classes, stateGeneratedData = dataClasses}
   let modules = map fst (Map.elems fullDag)
+  checkFormLists modules
   checkConflictingForms modules Nothing general
   checkReservedDeclarations general
   mapM_ (\(lang, sc) -> checkConflictingForms modules (Just lang) sc) (Map.toList concrete)
   MM.modify' $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete, stateNewtypeHeaders = headers}
+
+-- | Why a form's list cannot be read (NATIVE-1): every later pass pairs a
+-- form's list with the type's parameters by position, so the parameters it
+-- names must follow the declaration's order, and each `$N` must name a type
+-- item of the list.
+formListProblem :: [Either (TVar, Kind) TypeU] -> TypeU -> Maybe MDoc
+formListProblem ps (AppU (VarU (TV tmpl)) items)
+  | not (increasing positions) =
+      Just $
+        "its list names the parameters" <+> hsep (map pretty named)
+          <+> "out of the declaration's order;"
+          <+> "list them in the order the type declares them"
+  | Just n <- find (\k -> k < 1 || k > toInteger (length typeItems)) (macroIndices tmpl) =
+      Just $
+        "its template names $" <> pretty n <> ", but its list has" <+> pretty (length typeItems)
+          <+> "type item(s); $N names a type parameter, never a Nat, Str or Rec one"
+  | otherwise = Nothing
+  where
+    named = [item | item <- items, isJust (position item)]
+    typeItems = filter (isTypeItem ps) items
+    positions = mapMaybe position items
+    -- the declaration position an item names: a parameter's variable, or a
+    -- specialized parameter's type
+    position item = findIndex (`names` item) ps
+    names (Left (v, _)) (VarU v') = v == v'
+    names (Right t) x = t == x
+    names _ _ = False
+    increasing xs = and (zipWithPrefix (<) xs (drop 1 xs))
+formListProblem ps (NamU _ (TV form) items _)
+  | Just n <- find (\k -> k < 1 || k > toInteger (length typeItems)) (macroIndices form) =
+      Just $
+        "its form names $" <> pretty n <> ", but its list has" <+> pretty (length typeItems)
+          <+> "type item(s); $N names a type parameter, never a Nat, Str or Rec one"
+  | otherwise = Nothing
+  where
+    typeItems = filter (isTypeItem ps) items
+formListProblem _ _ = Nothing
+
+-- | Whether an item of a form's list is a type: a parameter of kind Type,
+-- or a type that is not a kind literal.
+isTypeItem :: [Either (TVar, Kind) TypeU] -> TypeU -> Bool
+isTypeItem ps item = case find (`names` item) ps of
+  Just (Left (_, k)) -> k == KindType
+  _ -> isNothing (kindOfU item)
+  where
+    names (Left (v, _)) (VarU v') = v == v'
+    names (Right t) x = t == x
+    names _ _ = False
+
+-- | The indices of the `$N` macros of a template.
+macroIndices :: Text -> [Integer]
+macroIndices t = case T.breakOn "$" t of
+  (_, rest)
+    | T.null rest -> []
+    | otherwise ->
+        let (digits, after) = T.span (\c -> c >= '0' && c <= '9') (T.drop 1 rest)
+         in if T.null digits then macroIndices (T.drop 1 rest) else read (T.unpack digits) : macroIndices after
+
+-- | Refuse a form whose list cannot be read (NATIVE-1).
+checkFormLists :: [ExprI] -> MorlocMonad ()
+checkFormLists = mapM_ check
+  where
+    check :: ExprI -> MorlocMonad ()
+    check (ExprI _ (ModE _ es)) = mapM_ check es
+    check (ExprI i (TypE (ExprTypeE (Just (lang, _)) v vs t _ _))) = case formListProblem vs t of
+      Just why ->
+        MM.throwSourcedError i $
+          "The" <+> pretty lang <+> "form of" <+> squotes (pretty v) <+> "cannot be read:" <+> why
+      Nothing -> return ()
+    check _ = return ()
 
 -- | Two declarations of one type, or two forms of it in one language, that
 -- apply to the same parameters but say different things.
@@ -1234,7 +1373,7 @@ checkConflictingForms modules lang scope =
             <+> hsep (punctuate "," (map (squotes . pretty) vs))
             <> "; a type is declared once, and has one form per language for each parameter pattern"
           decls = [(i, paramPattern ps) | (i, ps) <- concatMap (typedefDecls lang v0) modules]
-          repeats = [(i, pat) | (k, (i, pat)) <- zip [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
+          repeats = [(i, pat) | (k, (i, pat)) <- indexed decls, pat `elem` map snd (take k decls)]
        in case repeats ++ drop 1 decls of
             (i, pat) : _ -> do
               let samePattern = [j | (j, pat') <- decls, j /= i, pat' == pat]
@@ -1280,7 +1419,12 @@ paramPattern ps = St.evalState (mapM norm ps) Map.empty
 -- | A name the compiler defines is one type: every declaration of it in the
 -- program must say the same thing.
 checkReservedDeclarations :: Scope -> MorlocMonad ()
-checkReservedDeclarations scope =
+checkReservedDeclarations scope = do
+  case [v | (v@(TV n), _) <- Map.toList scope, isTupleName n] of
+    [] -> return ()
+    (v : _) ->
+      MM.throwRejected $
+        "The tuple type" <+> squotes (pretty v) <+> "is built in and cannot be declared"
   case [v | (v@(TV n), _ : _ : _) <- Map.toList scope, isReservedTypeName n] of
     [] -> return ()
     vs ->
@@ -1639,6 +1783,188 @@ checkInstanceOnRoot dag gscope =
         headOf bnd (AppU h _)        = headOf bnd h
         headOf _   _                 = Nothing
 
+-- | In a language whose records may be classes (GEN-11), every `data` type
+-- is a class too (GEN-12): its form there is its class's qualified name at
+-- its type parameters, which is then its schema hint. A user-written form
+-- of it in such a language is replaced, and reported.
+dataClassForms ::
+  LR.LangRegistry ->
+  Map TVar TypeHome ->
+  Scope ->
+  Map Lang Scope ->
+  (Map Lang Scope, Map Text TVar, [(Lang, TVar)])
+dataClassForms reg homes general scopes =
+  (Map.mapWithKey add scopes, Map.fromList [(q, v) | (lang, _) <- Map.toList scopes, (v, q, _) <- datas lang], ignored)
+  where
+    kindsOf lang = maybe LR.noTypeKinds LR.lreTypeKinds (Map.lookup (langName lang) (LR.lrEntries reg))
+    classLang lang = not (Map.null (LR.classKindForms (kindsOf lang)))
+    datas lang =
+      [ (v, q, ps)
+      | classLang lang
+      , Just p <- [LR.tkPrefix (kindsOf lang)]
+      , (v, (ps, _, _, _, TypedefEnum) : _) <- Map.toList general
+      , Just h <- [homeOf v]
+      , let q = T.intercalate "." (p : typeHomePath h <> [typeHomeName h])
+      ]
+    -- A type the compiler itself declares (`Try`) has no module; its
+    -- classes live under `_builtin`, a component no installed module can
+    -- produce.
+    homeOf v@(TV n) = case Map.lookup v homes of
+      Just h -> Just h
+      Nothing | isReservedTypeName n -> Just (TypeHome ["_builtin"] n)
+      Nothing -> Nothing
+    -- A newtype over a `data` type holds a value of that type, an instance
+    -- of its class.
+    newtypes lang =
+      [ (v, q, ps)
+      | (v, (ps, body, _, _, TypedefNewtype) : _) <- Map.toList general
+      , Just d <- [dataUnder (0 :: Int) body]
+      , (d', q, _) <- datas lang
+      , d' == d
+      ]
+    dataUnder n t
+      | n > 16 = Nothing
+      | otherwise = case headOf t of
+          Just h -> case Map.findWithDefault [] h general of
+            (_, _, _, _, TypedefEnum) : _ -> Just h
+            (_, body, _, _, k) : _ | k `elem` [TypedefNewtype, TypedefAlias] -> dataUnder (n + 1) body
+            _ -> Nothing
+          Nothing -> Nothing
+    headOf t = case t of
+      VarU h -> Just h
+      AppU (VarU h) _ -> Just h
+      _ -> Nothing
+    add lang scope =
+      Map.union
+        (Map.fromList [(v, [(ps, form q ps, ArgDocAlias defaultValue, True, TypedefAlias)]) | (v, q, ps) <- datas lang <> newtypes lang])
+        scope
+    form q ps = case [VarU x | Left (x, KindType) <- ps] of
+      [] -> VarU (TV q)
+      xs -> AppU (VarU (TV q)) xs
+    ignored =
+      [ (lang, v)
+      | (lang, scope) <- Map.toList scopes
+      , (v, _, _) <- datas lang <> newtypes lang
+      , Map.member v scope
+      ]
+
+
+-- | Give each record of a class kind (GEN-11) its class's qualified name as
+-- its form: the language's class prefix, the declaring module's path and
+-- the record's name. That name is also the record's schema hint, by which
+-- the runtime finds the class. Returns the classes, by qualified name.
+classForms ::
+  LR.LangRegistry ->
+  Map TVar TypeHome ->
+  Map Lang Scope ->
+  (Map Lang Scope, Map Text (LR.ClassKind, TVar))
+classForms reg homes scopes = (Map.mapWithKey rewrite scopes, classes)
+  where
+    kindsOf lang = maybe LR.noTypeKinds LR.lreTypeKinds (Map.lookup (langName lang) (LR.lrEntries reg))
+    classOf = LR.classKindForms . kindsOf
+    qualified lang v = do
+      p <- LR.tkPrefix (kindsOf lang)
+      h <- Map.lookup v homes
+      return $ T.intercalate "." (p : typeHomePath h <> [typeHomeName h])
+    rewrite lang = Map.mapWithKey $ \v -> map $ \e@(ps, body, d, terminal, k) -> case body of
+      NamU o (TV f) args rs
+        | Map.member f (classOf lang), Just q <- qualified lang v -> (ps, NamU o (TV q) args rs, d, terminal, k)
+      _ -> e
+    classes =
+      Map.fromList
+        [ (q, (c, v))
+        | (lang, scope) <- Map.toList scopes
+        , (v, entries) <- Map.toList scope
+        , (_, NamU _ (TV f) _ _, _, _, _) <- entries
+        , Just c <- [Map.lookup f (classOf lang)]
+        , Just q <- [qualified lang v]
+        ]
+
+-- | A class kind changes how every value of the record is built and read,
+-- so only the package declaring the record, or the package's
+-- implementation module for the language (@<package>-py@, M3), may choose
+-- one; a record of another package keeps the form its own package gives
+-- it. The modules of no package (a script and its local imports) are one
+-- package. A record may have one class kind in a language, whatever its
+-- parameters.
+checkClassKindPlacement :: LR.LangRegistry -> Map MVar Text -> DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
+checkClassKindPlacement reg packages fullDag = mapM_ check perModule >> mapM_ checkOne (Map.toList formsByRecord)
+  where
+    perModule = [(m, AST.findTypedefs e) | (m, (e, _)) <- Map.toList fullDag]
+    packageOf m = Map.findWithDefault "." m packages
+    declaringModule = Map.fromList [(v, m) | (m, (g, _)) <- perModule, v <- Map.keys g]
+    classForms' lang = Map.keysSet . LR.classKindForms $
+      maybe LR.noTypeKinds LR.lreTypeKinds (Map.lookup (langName lang) (LR.lrEntries reg))
+    formsByRecord =
+      Map.fromListWith Set.union
+        [ ((lang, v), Set.singleton f)
+        | (_, (_, concretes)) <- perModule
+        , (lang, scope) <- Map.toList concretes
+        , (v, entries) <- Map.toList scope
+        , (_, NamU _ (TV f) _ _, _, _, _) <- entries
+        ]
+    checkOne :: ((Lang, TVar), Set.Set Text) -> MorlocMonad ()
+    checkOne ((lang, v), fs)
+      | Set.size fs > 1 && not (Set.null (Set.intersection fs (classForms' lang))) =
+          MM.throwRejected $
+            "the record" <+> pretty v <+> "is given more than one" <+> pretty (langName lang)
+              <+> "form, and one of them is a class kind; a record has one class in a language"
+      | otherwise = return ()
+    check :: (MVar, (Scope, Map Lang Scope)) -> MorlocMonad ()
+    check (m, (_, concretes)) =
+      sequence_
+        [ MM.throwRejected $
+            "the" <+> pretty (langName lang) <+> "class kind of the record" <+> pretty v
+              <+> "is chosen in module" <+> squotes (pretty m) <> ", but only the module declaring it ("
+              <> squotes (pretty d) <> ") or its package's" <+> squotes (pretty (packageOf d <> "-" <> langName lang))
+              <+> "may choose it"
+        | (lang, scope) <- Map.toList concretes
+        , (v, entries) <- Map.toList scope
+        , (_, NamU _ (TV f) _ _, _, _, _) <- entries
+        , Set.member f (classForms' lang)
+        , Just d <- [Map.lookup v declaringModule]
+        , packageOf m /= packageOf d
+        , packageOf d == "." || unMVar m /= packageOf d <> "-" <> langName lang
+        ]
+
+-- | Give every record without a form in a language the program uses that
+-- language's default kind (GEN-1), as if the program had written the form. An @object@ is a
+-- class the user writes, so it gets none. The entry's fields
+-- are left empty for 'completeRecords' to fill from the declaration.
+withDefaultKinds :: LR.LangRegistry -> Scope -> Map Lang Scope -> Map Lang Scope
+withDefaultKinds reg general declared = foldr addLang declared langs
+  where
+    -- Only the languages the program gives forms in: the keys of the
+    -- concrete scope are the languages it uses.
+    langs =
+      [ (lang, form)
+      | (n, e) <- Map.toList (LR.lrEntries reg)
+      , let lang = Lang n (LR.lreExtension e)
+      , Map.member lang declared
+      , let kinds = LR.lreTypeKinds e
+      , Just def <- [LR.tkRecordDefault kinds]
+      , Just spec <- [Map.lookup def (LR.tkRecordKinds kinds)]
+      , let form = LR.ksForm spec
+      ]
+    -- A parameter of another kind has no native form (GEN-9), so it is not
+    -- listed. A type parameter no field uses is listed; inference erases
+    -- its argument.
+    records =
+      [ (v, (ps, o, d))
+      | (v, (ps, NamU o@NamRecord _ _ _, d, _, TypedefNewtype) : _) <- Map.toList general
+      ]
+    typeParam (Left (_, k)) = k == KindType
+    typeParam (Right _) = True
+    addLang (lang, form) m =
+      let have = Map.findWithDefault Map.empty lang m
+          synthesized =
+            Map.fromList
+              [ (v, [(ps, NamU o (TV form) [either (VarU . fst) id x | x <- ps, typeParam x] [], d, True, TypedefAlias)])
+              | (v, (ps, o, d)) <- records
+              , not (Map.member v have)
+              ]
+       in if Map.null synthesized then m else Map.insert lang (Map.union have synthesized) m
+
 {- | links the general entries from records to their abbreviated concrete cousins.
 For example:
   record (Person a) = Person {name :: Str, info a}
@@ -1676,7 +2002,7 @@ mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
     isNovel [] _ = True
     isNovel ((vs2, t2, _, isTerminal1, kind1) : ys) x@(vs1, t1, _, isTerminal2, kind2)
       | (length vs1 == length vs2)
-          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(fst v1, fst v2) | (Left v1, Left v2) <- zip vs1 vs2]
+          && t1 == foldl (\t (v1, v2) -> rename v2 v1 t) t2 [(fst v1, fst v2) | (Left v1, Left v2) <- zipSame vs1 vs2]
           && isTerminal1 == isTerminal2
           && kind1 == kind2 =
           False
@@ -1941,7 +2267,7 @@ refineKinds dag = do
                (KindList _, _) -> goSlot k a
                (KindSet _, _) -> goSlot k a
                _ -> go a
-            | (k, a) <- zip kinds args]
+            | (k, a) <- zipPrefix kinds args]
             ++ [go a | a <- drop (length kinds) args]
           Nothing -> Map.unions (map go args)
         go (NatVarU v) = Map.singleton v KindNat
@@ -2534,7 +2860,7 @@ checkAliasApplications dag scope = do
       [ (i, v, p, pk, a, ak)
       | (i, v, args) <- applied
       , Just ((ps, _, _, _, TypedefAlias) : _) <- [Map.lookup v scope]
-      , (Left (p, pk), a) <- zip ps args
+      , (Left (p, pk), a) <- zipSame ps args
       , not (isVariable a)
       , Just ak <- [evidentKind scope a]
       , ak /= pk
@@ -2546,8 +2872,7 @@ checkAliasApplications dag scope = do
       _ -> False
     arity v = case Map.lookup v scope of
       Just entries@((ps, _, _, _, _) : _)
-        | all (\(_, _, _, _, k) -> k == TypedefAlias) entries
-        , all isLeft ps ->
+        | all (\(_, _, _, _, k) -> k == TypedefAlias) entries ->
             Just (length ps)
       _ -> Nothing
     bad =
@@ -2579,7 +2904,7 @@ checkTypeApplications dag scope = do
       MM.throwSourcedError i $
         squotes (pretty t) <+> "has kind" <+> pretty k
           <> ", but a type that classifies a value has kind Type"
-  case [(i, v, ns, length args) | (i, v, args) <- valueHeads <> bodyApplications, Just ns <- [arities v], length args `notElem` ns] of
+  case [(i, v, ns, length args) | (i, v, args) <- valueHeads <> bodyApplications <> fieldHeads, Just ns <- [arities v], length args `notElem` ns] of
     [] -> return ()
     ((i, v, ns, k) : _) ->
       MM.throwSourcedError i $
@@ -2614,7 +2939,7 @@ checkTypeApplications dag scope = do
       , Just entries <- [Map.lookup v scope]
       , not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries)
       , (ps : _) <- [[ps | (ps, _, _, _, _) <- entries, length ps == length args]]
-      , (Left (p, pk), a) <- zip ps args
+      , (Left (p, pk), a) <- zipSame ps args
       , not (isVariable a)
       , Just ak <- [kindIn a]
       , ak /= pk
@@ -2628,9 +2953,10 @@ checkTypeApplications dag scope = do
       VarU (TV n) -> isTypeVariableName n
       KVarU _ -> True
       _ -> False
-    arities v = case Map.lookup v scope of
+    arities v@(TV n) = case Map.lookup v scope of
       Just entries@(_ : _) | not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries) ->
         Just [length ps | (ps, _, _, _, _) <- entries]
+      Nothing | Just k <- tupleArity n -> Just [k]
       _ -> Nothing
     -- The application at the head of a type, for the arity check.
     headApplication t = case TE.flattenApp t of
@@ -2660,6 +2986,16 @@ checkTypeApplications dag scope = do
       , ExprI i (TypE (ExprTypeE Nothing _ _ body _ _)) <- everyExpr m
       , (v, args@(_ : _)) <- typeApplications body
       ]
+    -- A record field classifies a value, so it is applied to every parameter.
+    fieldHeads =
+      [ (i, v', args')
+      | (_, (m, _)) <- Map.toList dag
+      , ExprI i (TypE (ExprTypeE Nothing _ _ (NamU _ _ _ rs) _ _)) <- everyExpr m
+      , (_, ft) <- rs
+      , u <- valuePositions ft
+      , (v, args) <- headApplication u
+      , (v', args') <- [throughAliases (64 :: Int) v args]
+      ]
     valueTypes =
       [ (i, u)
       | (_, (m, _)) <- Map.toList dag
@@ -2677,12 +3013,12 @@ checkTypeApplications dag scope = do
         LitU (LRec fs) -> concatMap (valuePositions . snd) fs
         RecExtendU _ x rest | isRecordType t -> valuePositions x <> fieldPositions rest
         _ -> case TE.flattenApp t of
-          AppU (VarU v@(TV n)) args
+          AppU (VarU v) args
             | Just entries <- Map.lookup v scope ->
                 case [ps | (ps, _, _, _, _) <- entries, length ps == length args] of
-                  (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zip ps args]
+                  (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zipSame ps args]
                   [] -> []
-            | v == BT.list || (T.isPrefixOf "Tuple" n && v == BT.tuple (length args)) -> concatMap valuePositions args
+            | v == BT.list || v == BT.tuple (length args) -> concatMap valuePositions args
           _ -> []
     fieldPositions r = case r of
       RecExtendU _ x rest -> valuePositions x <> fieldPositions rest
@@ -2782,7 +3118,7 @@ inferAliasParamKinds dag = do
         | Just (params, b) <- Map.lookup h others
         , Set.notMember h seen
         , length params == length args ->
-            unfoldOthers others (Set.insert h seen) (substituteAll (zip params args) b)
+            unfoldOthers others (Set.insert h seen) (substituteAll (zipSame params args) b)
       VarU h
         | Just ([], b) <- Map.lookup h others
         , Set.notMember h seen ->
@@ -2857,7 +3193,7 @@ inferAliasParamKinds dag = do
       AppU (VarU h) args
         | Just ks <- Map.lookup h km
         , length ks == length args ->
-            concat (zipWith (go . Just) ks args)
+            concat (zipWithSame (go . Just) ks args)
       AppU h args -> go (Just KindType) h ++ concatMap (go (Just KindType)) args
       OpU op args
         | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] ->
@@ -2868,7 +3204,7 @@ inferAliasParamKinds dag = do
              in case (kind, op, args) of
                   (Just KindRec, OpNatSub, [a, b]) -> go kind a ++ go Nothing b
                   _ -> concatMap (go kind) args
-        | otherwise -> concat (zipWith go (opOperandKinds op (length args)) args)
+        | otherwise -> concat (zipWithSame go (opOperandKinds op (length args)) args)
       LitU (LRec fs) -> concatMap (go (Just KindType) . snd) fs
       LitU _ -> concatMap (go Nothing) (typeUChildren t)
       _ -> concatMap (go (Just KindType)) (typeUChildren t)
@@ -2883,5 +3219,5 @@ inferAliasParamKinds dag = do
       | Just ks <- Map.lookup v km
       , all isLeft ps
       , length ks == length ps =
-          ExprI i (TypE (ExprTypeE Nothing v [Left (p, k) | (Left (p, _), k) <- zip ps ks] body doc TypedefAlias))
+          ExprI i (TypE (ExprTypeE Nothing v [Left (p, k) | (Left (p, _), k) <- zipSame ps ks] body doc TypedefAlias))
     rewrite _ e = e

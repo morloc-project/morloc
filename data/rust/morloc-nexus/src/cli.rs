@@ -2,11 +2,6 @@
 //!
 //! The nexus has three explicit roles -- `run`, `daemon`, `router` --
 //! each a clap subcommand on the top-level `morloc-nexus` binary.
-//! Compiled wrapper scripts always hardcode `morloc-nexus run "$0"
-//! "$@"`, so a user's `./my-prog -h` resolves to `morloc-nexus run
-//! ./my-prog -h` and its clap-generated help shows only the run-side
-//! options. Daemon and router options are only reachable through
-//! explicit `morloc-nexus daemon` / `morloc-nexus router` invocations.
 //!
 //! ## Two-pass parse
 //!
@@ -22,7 +17,7 @@
 //! `morloc-nexus`, and only the manifest knows the user's exported
 //! command surface.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
@@ -40,7 +35,7 @@ use crate::dispatch::{NexusConfig, OutputFormat};
     about = "Morloc nexus: CLI dispatcher for compiled morloc programs.",
     long_about = "Morloc nexus binary.\n\n\
                   Programs compiled with `morloc make` ship a small shell wrapper that \
-                  re-execs into `morloc-nexus run <wrapper>`; users normally interact with \
+                  re-execs into `morloc-nexus run <manifest>`; users normally interact with \
                   the wrapper rather than this binary directly. Use `daemon` to serve a \
                   compiled program as a long-lived process and `router` to multiplex many \
                   installed programs from one process."
@@ -126,10 +121,12 @@ pub struct DispatchOptions {
     /// flag, so the on-disk packet is self-contained. When N > 0 the
     /// MESG payload is additionally zstd-compressed; the schema
     /// metadata block stays in the clear. 0 = no compression,
-    /// 1 = fastest, 9 = maximum. A returned value defaults to 0; a
-    /// stream written to stdout defaults to its `@write` level, which
-    /// this flag overrides when given.
-    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    /// 1 = fastest, 9 = maximum. A returned value defaults to 0. A
+    /// stream written to stdout is compressed only for packet or voidstar
+    /// output, at this level when given, else at its `@write` level; any
+    /// other form receives it uncompressed.
+    #[arg(short = 'z', long = "compression-level", value_name = "N",
+          value_parser = clap::value_parser!(u8).range(0..=9))]
     pub compression_level: Option<u8>,
 }
 
@@ -211,10 +208,9 @@ pub struct DaemonArgs {
     pub output_form: Option<DaemonOutputForm>,
 
     /// zstd compression preset (0..=9) for `-f packet` output. A returned
-    /// value defaults to 0; a stream written to stdout defaults to its
-    /// `@write` level, which this flag overrides when given. Ignored for
-    /// `-f json`.
-    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    /// value defaults to 0. Ignored for `-f json`.
+    #[arg(short = 'z', long = "compression-level", value_name = "N",
+          value_parser = clap::value_parser!(u8).range(0..=9))]
     pub compression_level: Option<u8>,
 
     /// Suppress morloc-emitted log lines on stderr.
@@ -321,13 +317,10 @@ pub struct McpArgs {
     pub allow_no_auth: bool,
 }
 
-/// Multi-program router across installed programs. Doesn't take a
-/// single program target -- it serves every `exe/<name>/manifest.json`
-/// it finds under the exe directory.
+/// Multi-program router across installed programs.
 #[derive(Args, Debug)]
 pub struct RouterArgs {
-    /// Path to the exe directory (one `<name>/manifest.json` per installed
-    /// program). Defaults to `$MORLOC_HOME/exe`.
+    /// Path to the exe directory.
     #[arg(long, value_name = "PATH")]
     pub fdb: Option<String>,
 
@@ -448,6 +441,12 @@ pub struct FileArgs {
     /// Ignored without `--validate`.
     #[arg(long, value_name = "STRING")]
     pub schema: Option<String>,
+
+    /// Close a stream file its writer did not finish (no footer, a
+    /// temporary one, or one that says FAILED): keep every complete batch
+    /// and write a final footer marked REPAIRED, which readers accept.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 /// Read a data file and re-emit it in a chosen output format. Uses
@@ -1056,13 +1055,15 @@ fn manifest_from_marker(content: &str, target: &str) -> Option<String> {
 }
 
 /// Join a launcher-relative path to the launcher's own directory, passing an
-/// absolute path through unchanged.
+/// absolute path through unchanged. A target reached through links is the
+/// launcher they name, so its directory is that file's.
 fn resolve_against_launcher(path: &str, target: &str) -> String {
     let p = Path::new(path);
     if p.is_absolute() {
         return path.to_string();
     }
-    Path::new(target)
+    let launcher = std::fs::canonicalize(target).unwrap_or_else(|_| PathBuf::from(target));
+    launcher
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .join(p)
@@ -2640,6 +2641,25 @@ mod tests {
              # morloc-manifest: {rel}\n\
              export MORLOC_PROG_NAME=\"$0\"\n\
              self=\"$0\"\n\
+             case \"$self\" in */*) : ;; *) self=$(command -v -- \"$0\") || self=./$0 ;; esac\n\
+             while [ -L \"$self\" ]; do l=$(readlink -- \"$self\"); case \"$l\" in /*) self=$l ;; *) self=${{self%/*}}/$l ;; esac; done\n\
+             case \"$self\" in */*) d=${{self%/*}} ;; *) d=. ;; esac\n\
+             d=$(CDPATH= cd -P -- \"${{d:-/}}\" && pwd)\n\
+             exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
+            rel = rel_manifest
+        )
+        .into_bytes()
+    }
+
+    /// The self-relative shape as earlier compilers wrote it, computing `$d`
+    /// with `dirname`. Build trees outlive the compiler that wrote them, so
+    /// this must still resolve.
+    fn wrapper_self_relative_dirname(rel_manifest: &str) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\n\
+             # morloc-manifest: {rel}\n\
+             export MORLOC_PROG_NAME=\"$0\"\n\
+             self=\"$0\"\n\
              case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac\n\
              d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)\n\
              exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
@@ -2716,7 +2736,42 @@ mod tests {
             "nexus",
             &wrapper_self_relative("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_a_launcher_through_file_links_against_the_launchers_directory() {
+        // A link elsewhere, and a relative chain of two, name the launcher
+        // itself; its manifest is beside the launcher, not beside a link.
+        let (_, tmp) = resolve_launcher(
+            "filelink",
+            "nexus",
+            &wrapper_self_relative("nexus-build/manifest.json"),
+        );
+        let real = tmp.canonicalize().unwrap();
+        let want = real.join("nexus-build/manifest.json").to_string_lossy().into_owned();
+        let other = tmp.join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink("../nexus", other.join("one")).unwrap();
+        std::os::unix::fs::symlink("one", other.join("two")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("nexus"), other.join("abs")).unwrap();
+        for link in ["one", "two", "abs"] {
+            let resolved = resolve_manifest_target(&other.join(link).to_string_lossy()).unwrap();
+            assert_eq!(resolved, want, "through link {}", link);
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolves_a_self_relative_wrapper_written_with_dirname() {
+        let (resolved, tmp) = resolve_launcher(
+            "selfreldirname",
+            "nexus",
+            &wrapper_self_relative_dirname("nexus-build/manifest.json"),
+        );
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2730,7 +2785,7 @@ mod tests {
             "mydaemon",
             &wrapper_self_relative("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2749,7 +2804,7 @@ mod tests {
             "nexus",
             &undeclared_wrapper_self_relative("nexus-build/manifest.json"),
         );
-        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        assert_eq!(resolved, tmp.canonicalize().unwrap().join("nexus-build/manifest.json").to_string_lossy());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

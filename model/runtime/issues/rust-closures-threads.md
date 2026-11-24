@@ -35,14 +35,14 @@ spec should still state the outcome.
 
 ## Recursive values shared across threads contend on refcounts [measured]
 
-A projection out of a recursive value clones the child's `RecBox` (one
+A projection out of a recursive value clones the child's arm (one
 atomic increment and decrement per node visit). Single-threaded, `Arc` and
 `Rc` measured equal (13-30 ns per node, ratio 0.83-1.01, noisy machine).
 Threads walking ONE shared tree contend: a 2^21-node walk x4 took 110 ms
 on one thread and 620 ms on two (separate trees: 148 ms and 214 ms). So
 `pmap` over elements that share subtrees can be slower than `map`.
 Candidate: match projections borrow instead of clone. Benchmark source:
-a Rust replica of the generated walk (Rc vs Arc RecBox).
+a Rust replica of the generated walk (Rc vs Arc arms).
 
 ## Registry costs where nothing crosses [read]
 
@@ -80,8 +80,10 @@ measured.
 `addTo s xs = seqMap (\x -> x + sharedGet s) xs` fails with
 "Cannot find constructor in VarF \"Shared\"  finalType=Shared" pointing at
 the lambda. The same message appears for a Rust function taking a type
-mapped only in Python (`go :: Blob -> [Int] -> [Int]`). Either is a
-missing case or an unrealizable program; the message names neither.
+mapped only in Python (`go :: Blob -> [Int] -> [Int]`) [now 2026-11-02 a
+located "Could not resolve type for variable 'Blob'"]. The capture case is
+a missing case or an unrealizable program; the message names neither, and
+it reproduces in C++ too (compiler/issues/opaque-types.md).
 
 ## A failed call on a persistent host thread leaves tracked state [read]
 
@@ -91,3 +93,10 @@ thread that outlives the call (a rayon or other persistent pool) skips
 `release_packet` while unwinding, so the blocks it tracked and the frames
 it pushed stay on that thread until it exits. Each caught failure there
 leaks its argument blocks for the life of the process. Not reproduced.
+- **A C++ pool's dispatch catch can throw out of the pool's C entry.**
+  [read 2026-11-20, DA review] PANIC-6 gap. `cpp_local_dispatch` and
+  `cpp_remote_dispatch` (pool.cpp) build the fail packet's message with
+  std::string inside their catch handlers; a bad_alloc there escapes the
+  dispatcher into the C pool loop (terminate or undefined behaviour) instead
+  of failing the call. `_mlc_try`'s handlers allocate the same way, but there
+  the new exception only escapes the `@try`.

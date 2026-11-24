@@ -1,4 +1,7 @@
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -42,13 +45,22 @@ module Morloc.Namespace.Expr
   , ungroup
   , bracketArity
   , selectorHasBracket
-  , unappliedPatternArity
+  , PatApp (..)
+  , PatEvidence (..)
+  , noPatEvidence
+  , ArgMethod (..)
+  , patAppPattern
+  , applyPattern
+  , patternArity
   , Pattern (..)
   , Intrinsic (..)
   , SaveFormat (..)
   , saveFormatName
   , intrinsicName
+  , isWrite
   , intrinsicArity
+  , WireComparison (..)
+  , derivedComparisons
   , InternalApp (..)
   , InternalView (..)
   , viewInternal
@@ -80,8 +92,17 @@ module Morloc.Namespace.Expr
   , Coercion (..)
   , CastDir (..)
   , InstanceOrigin (..)
+  , InstanceKey (..)
+  , Impl (..)
+  , InstanceDecl (..)
+  , ClassInfo (..)
+  , InstanceEnv (..)
+  , Evidence (..)
+  , evidenceInstance
   , applyCoercion
   , ManyPoly (..)
+  , Many (..)
+  , unMany
   , mapAnnoSM
   , mapExprSM
   , mapAnnoS
@@ -108,12 +129,14 @@ import Data.Aeson (FromJSON (..), ToJSON (..), (.!=), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Options (..), defaultOptions)
 import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Map as Map
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Morloc.Data.Doc
+import Morloc.Data.Zip (zipExact)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 
@@ -350,9 +373,8 @@ ungroup (SelectorIdx x xs) = concat [map ((:) (Left i)) (ungroup s) | (i, s) <- 
 -- | DFS-count of bracket steps in a Selector. Each
 -- 'SelectorBracketIndex' contributes 1 runtime arg (the index); each
 -- 'SelectorBracketSlice' contributes 3 (start, stop, step). Used by
--- the typechecker to validate @App (PatCall (PatternStruct sel)) args@
--- arity: @args@ must be @bracketArity sel + 1@ (the +1 is the
--- receiver).
+-- 'applyPattern' to check a getter's arguments: they are @bracketArity sel
+-- + 1@ (the +1 is the receiver).
 bracketArity :: Selector -> Int
 bracketArity SelectorEnd = 0
 bracketArity (SelectorBracketIndex s) = 1 + bracketArity s
@@ -379,29 +401,68 @@ data Pattern
   | PatternStruct Selector
   -- ^ Field / index accessor (record .field, tuple .0).
   | PatternBracketIndex
-  -- ^ Python-style bracket index (xs[i]). Carries no payload; the index
-  -- expression and receiver are passed via the outer AppS as
-  -- [index, receiver]. The typechecker synthesizes the result type as
+  -- ^ Python-style bracket index (xs[i]). Carries no payload; its arguments
+  -- are the index and the receiver ('PatIndex').
+  -- The typechecker synthesizes the result type as
   -- the receiver's element type. The codegen translator emits the
   -- appropriate native indexing operation based on the receiver type.
   | PatternBracketSlice
   -- ^ Python-style bracket slice (xs[i:j:k]). Carries no payload; the
   -- three bound expressions (start, stop, step; each Null or an Int64
-  -- after toIndex wrapping) and the receiver are passed via the outer
-  -- AppS as [start, stop, step, receiver]. The typechecker synthesizes
+  -- after toIndex wrapping) and the receiver are its arguments
+  -- ('PatSlice'). The typechecker synthesizes
   -- the result type structurally: a Nat-parameterized container has
   -- its outer Nat replaced by NatUnknown; otherwise the receiver type
   -- is preserved. The codegen translator emits the appropriate native
   -- slicing operation.
   deriving (Show, Ord, Eq)
 
--- | The arguments a pattern takes when it appears unapplied. A setter only
--- appears applied to its values, so an unapplied 'PatternStruct' is a getter.
-unappliedPatternArity :: Pattern -> Int
-unappliedPatternArity (PatternText _ ss) = length ss
-unappliedPatternArity (PatternStruct s) = bracketArity s + 1
-unappliedPatternArity PatternBracketIndex = 2
-unappliedPatternArity PatternBracketSlice = 4
+-- | A pattern with the values it is applied to, in the order they are
+-- evaluated. Elsewhere a pattern used as a function is a lambda around one
+-- of these.
+data PatApp a
+  = -- | Text, then each interpolated value and the text after it.
+    PatText Text [(a, Text)]
+  | -- | The bracket bounds in depth-first order, then the receiver.
+    PatGet Selector [a] a
+  | -- | The receiver, then a new value for each leaf of the selector.
+    PatSet Selector a (NonEmpty a)
+  | -- | The index, then the receiver.
+    PatIndex a a
+  | -- | The start, stop and step, then the receiver.
+    PatSlice a a a a
+  deriving (Show, Ord, Eq, Functor, Foldable, Traversable)
+
+-- | The pattern a 'PatApp' applies.
+patAppPattern :: PatApp a -> Pattern
+patAppPattern app = case app of
+  PatText s xs -> PatternText s (map snd xs)
+  PatGet s _ _ -> PatternStruct s
+  PatSet s _ _ -> PatternStruct s
+  PatIndex _ _ -> PatternBracketIndex
+  PatSlice {} -> PatternBracketSlice
+
+-- | A pattern applied to arguments, if they are the arguments it takes. Any
+-- argument beyond a getter's receiver is a value a setter stores.
+applyPattern :: Pattern -> [a] -> Maybe (PatApp a)
+applyPattern pat args = case (pat, args) of
+  (PatternText s ss, _) -> PatText s <$> zipExact args ss
+  (PatternStruct s, _) | selectorHasBracket s -> case splitAt (bracketArity s) args of
+    (bounds, [rcv]) | length bounds == bracketArity s -> Just (PatGet s bounds rcv)
+    _ -> Nothing
+  (PatternStruct s, [rcv]) -> Just (PatGet s [] rcv)
+  (PatternStruct s, rcv : v : vs) -> Just (PatSet s rcv (v :| vs))
+  (PatternBracketIndex, [i, rcv]) -> Just (PatIndex i rcv)
+  (PatternBracketSlice, [start, stop, step, rcv]) -> Just (PatSlice start stop step rcv)
+  _ -> Nothing
+
+-- | The number of arguments a pattern used as a function takes. A setter is
+-- only ever written applied to its values, so a selector is a getter.
+patternArity :: Pattern -> Int
+patternArity (PatternText _ ss) = length ss
+patternArity (PatternStruct s) = bracketArity s + 1
+patternArity PatternBracketIndex = 2
+patternArity PatternBracketSlice = 4
 
 -- | The file format a save intrinsic writes.
 data SaveFormat
@@ -442,9 +503,10 @@ data Intrinsic
                   -- the desugar's bracket-accessor lowering when a slice is
                   -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
                   -- a user-facing @\@map@ -- there is no entry in 'parseIntrinsic'.
-                  -- The pure-runtime evaluator executes this as a direct
-                  -- per-element loop over MORLOC_ARRAY; the pool path resolves
-                  -- it to the language's @Functor.map@ instance.
+                  -- Instance resolution makes it a use of @Functor.map@ where
+                  -- an instance implements it; otherwise the pure-runtime
+                  -- evaluator executes it as a direct per-element loop over
+                  -- MORLOC_ARRAY. A fused walk of an IFile keeps it.
   | IntrMapOptional -- ^ internal @(a -> b) -> ?a -> ?b@: apply a function to
                   -- an optional's value, if it has one. Emitted only by the
                   -- host adapter ('Morloc.CodeGenerator.EffectBoundary'),
@@ -509,6 +571,8 @@ data Intrinsic
   | IntrStream      -- ^ @stream :: IFile [a] -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
+  | IntrSinkWrite   -- ^ internal: the @write of a @collect sink, typed as
+                    -- @write; a write that raises fails its stream (STRM-9).
   | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> (Try Str ())@ --
                     -- emit one sub-packet of element-list type. The Int is
                     -- the zstd compression level (0 = uncompressed); the
@@ -534,11 +598,19 @@ data Intrinsic
                     -- (the second open gives an Err arm via the CAS-per-kind
                     -- guard). Read-time failures (EOF, malformed packet)
                     -- surface at @next, whose result carries them as an Err arm.
-  | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
-                    -- process stdout as an OStream. @write routes through
-                    -- the nexus. At most one @stdout per nexus.
-  | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
-                    -- @stdout for stderr.
+  | IntrStdout      -- ^ internal @<IO> OStream a@: open process stdout as
+                    -- an OStream; @write routes through the nexus. NOT
+                    -- user-facing: emitted only by the expansion of
+                    -- 'IntrStdoutBracket' and 'IntrCollect'.
+  | IntrStdoutBracket -- ^ @stdout :: (OStream a -> <IO,e> b) -> <IO,e> (Collect a)@
+                    -- (STRM-8). Desugar-expands to
+                    -- `do { o <- internal open; _ <- body o; @closeCollect o }`.
+  | IntrCloseCollect -- ^ internal @OStream a -> <IO> (Collect a)@: close the
+                    -- stdout stream and give the command its result
+                    -- (STRM-7). NOT user-facing; erased to 'IntrClose' after
+                    -- typechecking.
+  | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- open process stderr
+                    -- as an OStream, like the internal stdout open.
   | IntrThrow       -- ^ @throw :: e -> a@ -- abandon the computation,
                     -- rendering the payload into the traceback. A bottom
                     -- rather than a tracked effect: it does not return, so
@@ -558,10 +630,10 @@ data Intrinsic
                     -- element_count). Used by the offset-aware `@with`/
                     -- `@render` synthesis to thread the per-batch element
                     -- offset into a handler; also user-callable.
-  | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> ()@
+  | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> (Collect a)@
                     -- Provide the default stdout sink to a producer body and
                     -- manage its lifecycle. Desugar-expands to
-                    -- `do { o <- @stdout; body (@write 0 o); @close o }`. The
+                    -- `do { o <- open; body (@write 0 o); @closeCollect o }`. The
                     -- sink type `[a] -> ...` carries the stream element type,
                     -- which the `@with`/`@render` handler synthesis reads off
                     -- to type the flag handlers.
@@ -573,21 +645,6 @@ data Intrinsic
                     -- call ends, and return its path. NOT user-facing;
                     -- synthesized by the whole-form `@with`/`@render` handler
                     -- to gather a stream to disk before applying the handler.
-  | IntrCellNew     -- ^ @cellnew :: b -> <IO> (Cell b)@ -- create a fold
-                    -- accumulator seeded with the given value. NOT
-                    -- user-facing; synthesized by the `@fold` handler form.
-  | IntrCellGet     -- ^ @cellget :: Cell b -> <IO> b@ -- read the calling
-                    -- thread's accumulator, or the seed if that thread has
-                    -- not folded yet.
-  | IntrCellPut     -- ^ @cellput :: Cell b -> b -> <IO> ()@ -- replace the
-                    -- calling thread's accumulator. Thread-local, so a
-                    -- producer driving its sink from several threads loses
-                    -- no updates and needs no lock.
-  | IntrCellReduce  -- ^ @cellreduce :: (b -> b -> b) -> Cell b -> <IO> b@ --
-                    -- merge every thread's accumulator with the handler's
-                    -- `combine` and release the cell. Never sees an empty
-                    -- cell: one that was never folded into answers with its
-                    -- seed, which is what an empty stream folds to.
   | IntrReplay      -- ^ @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> ()@ --
                     -- call the function on every frame (sub-packet) of the
                     -- stream, in order, empty frames included. Synthesized
@@ -607,187 +664,146 @@ data Intrinsic
                     -- around the wire form of a Packable literal: gives it
                     -- the form the pool's decoder gives a received value of
                     -- its schema (NATIVE-8). Python and R only.
-  | IntrCellSlots   -- ^ internal @cellslots :: Cell b -> <IO> [b]: every
-                    -- accumulator of a cell, in its wire form, and the cell
-                    -- released. With IntrReduceList it is how @cellreduce
-                    -- runs when a packer builds the accumulator's native form.
-  | IntrReduceList  -- ^ internal @reducelist :: (b -> b -> b) -> [b] -> b,
-                    -- over a non-empty list.
+  | IntrFold        -- ^ internal @fold :: b -> (b -> [a] -> b) -> (b -> b -> b)
+                    -- -> (Cell b -> <IO> ()) -> <IO> b: run the function on a
+                    -- fresh fold handle and return the slots it folded,
+                    -- combined (fold.md). Synthesized by the `@fold` handler.
+  | IntrFoldFile    -- ^ internal: the @fold of a Python or R pool whose handle
+                    -- crosses pools: batches go through a temp-file stream
+                    -- and are stepped after the function returns (FOLD-9).
+  | IntrFoldPut     -- ^ internal @foldput :: (b -> [a] -> b) -> Cell b -> [a]
+                    -- -> <IO> (): step this thread's slot by a batch
+                    -- (FOLD-1), or send it on (SIDE-4, FOLD-9).
+  | IntrGather      -- ^ internal @gather :: (Cell [a] -> <IO> ()) -> <IO> [a]:
+                    -- run the function on a fresh gather handle and return
+                    -- every batch put into it, in order (SIDE-6). Synthesized
+                    -- by the whole-list `@with`/`@render` handler form.
+  | IntrGatherPut   -- ^ internal @gatherput :: Cell [a] -> [a] -> <IO> (): add
+                    -- a batch to a gather (SIDE-4).
+  | IntrGatherNative -- ^ internal: @gather keeping its batches in the pool's
+                    -- own list, chosen by Serialize where the batch has a
+                    -- wire form and the language holds batches natively.
+  | IntrGatherPutNative -- ^ internal: the @gatherput of a native gather.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
                     -- chains). The selector chain is encoded as a path string
                     -- (`.1.[]`, `.foo.[:]`, etc.); bracket steps consume
                     -- runtime args in DFS order. Lowers to a single per-
-                    -- language @_mlc_ifile_walk@ call. NOT user-facing; arity
-                    -- is dynamic (path + handle + 0..n bracket bounds), so
-                    -- 'intrinsicArity' is intentionally undefined.
-  deriving (Show, Ord, Eq)
+                    -- language @_mlc_ifile_walk@ call. NOT user-facing; its
+                    -- argument count varies (path + handle + 0..n bracket
+                    -- bounds), so it has no fixed arity.
+  deriving (Show, Ord, Eq, Enum, Bounded)
+
+-- | A derived comparison method over its two parameters (DERIV-2).
+data WireComparison
+  = -- | the intrinsic applied to the parameters, swapped if True
+    WireCall Intrinsic Bool
+  | WireNot WireComparison
+  deriving (Show, Eq)
+
+-- | The methods a derived @Eq@ or @Ord@ instance gives.
+derivedComparisons :: Text -> Maybe [(Text, WireComparison)]
+derivedComparisons "Eq" = Just [("==", WireCall IntrEq False), ("!=", WireNot (WireCall IntrEq False))]
+derivedComparisons "Ord" =
+  Just
+    [ ("<=", WireCall IntrLe False)
+    , (">=", WireCall IntrLe True)
+    , -- the wire order is total (DERIV-3)
+      ("<", WireNot (WireCall IntrLe True))
+    , (">", WireNot (WireCall IntrLe False))
+    ]
+derivedComparisons _ = Nothing
 
 -- | Map intrinsic to its canonical name
+-- | Everything known of an intrinsic before typechecking: its name, its
+-- arity (none for one whose argument count varies), whether it performs IO (its type carries an @IO@ effect; the eval
+-- sandbox forbids the IO ones written directly), and whether a program may
+-- write it as @name. One equation per constructor, so a new intrinsic
+-- without a row is an incomplete-pattern warning.
+data IntrSig = IntrSig
+  { sigName :: Text
+  , sigArity :: Maybe Int
+  , sigIO :: Bool
+  , sigWritten :: Bool
+  }
+
+intrinsicSig :: Intrinsic -> IntrSig
+intrinsicSig IntrSave = IntrSig "save" (Just 3) True True
+intrinsicSig IntrSaveJ = IntrSig "savej" (Just 2) True True
+intrinsicSig IntrLoad = IntrSig "load" (Just 1) True True
+intrinsicSig IntrHash = IntrSig "hash" (Just 1) False True
+intrinsicSig IntrEq = IntrSig "eq" (Just 2) False True
+intrinsicSig IntrLe = IntrSig "le" (Just 2) False True
+intrinsicSig IntrVersion = IntrSig "version" (Just 0) False True
+intrinsicSig IntrCompiled = IntrSig "compiled" (Just 0) False True
+intrinsicSig IntrLang = IntrSig "lang" (Just 0) False True
+intrinsicSig IntrSchema = IntrSig "schema" (Just 1) False True
+intrinsicSig IntrTypeof = IntrSig "typeof" (Just 1) False True
+intrinsicSig IntrShow = IntrSig "show" (Just 1) False True
+intrinsicSig IntrRead = IntrSig "read" (Just 1) False True
+intrinsicSig IntrDatafile = IntrSig "datafile" (Just 1) False True
+intrinsicSig IntrUnpack = IntrSig "unpack" (Just 1) True False
+intrinsicSig IntrOpen = IntrSig "open" (Just 1) True True
+intrinsicSig IntrClose = IntrSig "close" (Just 1) True True
+intrinsicSig IntrFSchema = IntrSig "fschema" (Just 1) True True
+intrinsicSig IntrMap = IntrSig "map" (Just 2) False False
+intrinsicSig IntrMapOptional = IntrSig "mapoptional" (Just 2) False False
+intrinsicSig IntrTagTest = IntrSig "tagtest" (Just 2) False False
+intrinsicSig IntrNewtypeUnwrap = IntrSig "unwrap" (Just 1) False False
+intrinsicSig IntrNewtypeWrap = IntrSig "wrap" (Just 1) False False
+intrinsicSig IntrCtorField = IntrSig "ctorfield" (Just 3) False False
+intrinsicSig IntrListLenTest = IntrSig "listlentest" (Just 2) False False
+intrinsicSig IntrListElem = IntrSig "listelem" (Just 2) False False
+intrinsicSig IntrFLength = IntrSig "flen" (Just 1) True True
+intrinsicSig IntrStreamLayout = IntrSig "streamLayout" (Just 1) True True
+intrinsicSig IntrNext = IntrSig "next" (Just 1) True True
+intrinsicSig IntrStream = IntrSig "stream" (Just 1) True True
+intrinsicSig IntrWrite = IntrSig "write" (Just 3) True True
+intrinsicSig IntrSinkWrite = IntrSig "write" (Just 3) True False
+intrinsicSig IntrAppend = IntrSig "append" (Just 1) True True
+intrinsicSig IntrConcat = IntrSig "concat" (Just 2) True True
+intrinsicSig IntrFlush = IntrSig "flush" (Just 1) True True
+intrinsicSig IntrStdin = IntrSig "stdin" (Just 0) True True
+intrinsicSig IntrStdout = IntrSig "stdout" (Just 0) True False
+intrinsicSig IntrStdoutBracket = IntrSig "stdout" (Just 1) True True
+intrinsicSig IntrCloseCollect = IntrSig "closeCollect" (Just 1) True False
+intrinsicSig IntrStderr = IntrSig "stderr" (Just 0) True True
+intrinsicSig IntrThrow = IntrSig "throw" (Just 1) False True
+intrinsicSig IntrTry = IntrSig "try" (Just 1) False True
+intrinsicSig IntrTell = IntrSig "tell" (Just 0) True True
+intrinsicSig IntrCollect = IntrSig "collect" (Just 1) True True
+intrinsicSig IntrShape = IntrSig "shape" (Just 2) False False
+intrinsicSig IntrTmpfile = IntrSig "tmpfile" (Just 0) True False
+intrinsicSig IntrReplay = IntrSig "replay" (Just 2) True False
+intrinsicSig IntrChannel = IntrSig "channel" (Just 0) True False
+intrinsicSig IntrSpawn = IntrSig "spawn" (Just 2) True False
+intrinsicSig IntrSettle = IntrSig "settle" (Just 1) True False
+intrinsicSig IntrGather = IntrSig "gather" (Just 1) True False
+intrinsicSig IntrGatherPut = IntrSig "gatherput" (Just 2) True False
+intrinsicSig IntrGatherNative = IntrSig "gathernative" (Just 1) True False
+intrinsicSig IntrGatherPutNative = IntrSig "gatherputnative" (Just 2) True False
+intrinsicSig IntrFold = IntrSig "fold" (Just 4) True False
+intrinsicSig IntrFoldFile = IntrSig "foldfile" (Just 4) True False
+intrinsicSig IntrFoldPut = IntrSig "foldput" (Just 3) True False
+intrinsicSig IntrIFileWalk = IntrSig "ifile_walk" Nothing True False
+intrinsicSig IntrConform = IntrSig "conform" (Just 1) False False
+
+-- | @write and the @write of a @collect sink, which differ only in printing.
+isWrite :: Intrinsic -> Bool
+isWrite i = i == IntrWrite || i == IntrSinkWrite
+
 intrinsicName :: Intrinsic -> Text
-intrinsicName IntrSave = "save"
-intrinsicName IntrSaveJ = "savej"
-intrinsicName IntrLoad = "load"
-intrinsicName IntrHash = "hash"
-intrinsicName IntrEq = "eq"
-intrinsicName IntrLe = "le"
-intrinsicName IntrVersion = "version"
-intrinsicName IntrCompiled = "compiled"
-intrinsicName IntrLang = "lang"
-intrinsicName IntrSchema = "schema"
-intrinsicName IntrTypeof = "typeof"
-intrinsicName IntrShow = "show"
-intrinsicName IntrRead = "read"
-intrinsicName IntrDatafile = "datafile"
-intrinsicName IntrUnpack = "unpack"
-intrinsicName IntrOpen = "open"
-intrinsicName IntrClose = "close"
-intrinsicName IntrFSchema = "fschema"
-intrinsicName IntrMap = "map"
-intrinsicName IntrMapOptional = "mapoptional"
-intrinsicName IntrTagTest = "tagtest"
-intrinsicName IntrNewtypeUnwrap = "unwrap"
-intrinsicName IntrNewtypeWrap = "wrap"
-intrinsicName IntrCtorField = "ctorfield"
-intrinsicName IntrListLenTest = "listlentest"
-intrinsicName IntrListElem = "listelem"
-intrinsicName IntrFLength = "flen"
-intrinsicName IntrStreamLayout = "streamlayout"
-intrinsicName IntrNext = "next"
-intrinsicName IntrStream = "stream"
-intrinsicName IntrWrite = "write"
-intrinsicName IntrAppend = "append"
-intrinsicName IntrConcat = "concat"
-intrinsicName IntrFlush = "flush"
-intrinsicName IntrStdin = "stdin"
-intrinsicName IntrStdout = "stdout"
-intrinsicName IntrStderr = "stderr"
-intrinsicName IntrThrow = "throw"
-intrinsicName IntrTry = "try"
-intrinsicName IntrTell = "tell"
-intrinsicName IntrCollect = "collect"
-intrinsicName IntrShape = "shape"
-intrinsicName IntrTmpfile = "tmpfile"
-intrinsicName IntrCellNew = "cellnew"
-intrinsicName IntrCellGet = "cellget"
-intrinsicName IntrCellPut = "cellput"
-intrinsicName IntrCellReduce = "cellreduce"
-intrinsicName IntrReplay = "replay"
-intrinsicName IntrChannel = "channel"
-intrinsicName IntrSpawn = "spawn"
-intrinsicName IntrSettle = "settle"
-intrinsicName IntrIFileWalk = "ifile_walk"
-intrinsicName IntrConform = "conform"
-intrinsicName IntrCellSlots = "cellslots"
-intrinsicName IntrReduceList = "reducelist"
+intrinsicName = sigName . intrinsicSig
 
--- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
--- (see 'Morloc.Frontend.Typecheck.intrinsicType'/'intrinsicTypeG'). Used by the
--- eval sandbox to forbid directly-written IO intrinsics while leaving pure ones
--- (`@lang`, `@show`, `IntrMap`, ...) usable. Kept exhaustive on purpose: a new
--- 'Intrinsic' constructor triggers a non-exhaustive warning, forcing an explicit
--- IO/pure classification rather than silently defaulting to allowed.
 intrinsicIsIO :: Intrinsic -> Bool
-intrinsicIsIO IntrSave = True
-intrinsicIsIO IntrSaveJ = True
-intrinsicIsIO IntrLoad = True
-intrinsicIsIO IntrOpen = True
-intrinsicIsIO IntrClose = True
-intrinsicIsIO IntrFSchema = True
-intrinsicIsIO IntrFLength = True
-intrinsicIsIO IntrStreamLayout = True
-intrinsicIsIO IntrNext = True
-intrinsicIsIO IntrStream = True
-intrinsicIsIO IntrWrite = True
-intrinsicIsIO IntrAppend = True
-intrinsicIsIO IntrConcat = True
-intrinsicIsIO IntrFlush = True
-intrinsicIsIO IntrStdin = True
-intrinsicIsIO IntrStdout = True
-intrinsicIsIO IntrStderr = True
-intrinsicIsIO IntrTell = True
-intrinsicIsIO IntrTmpfile = True
--- @collect desugar-expands to @stdout/@write/@close (all IO); classify IO so a
--- stray @collect that reached this check is still refused.
-intrinsicIsIO IntrCollect = True
-intrinsicIsIO IntrShape = False
--- Synthesized post-typecheck (never user-written); IO by nature.
-intrinsicIsIO IntrIFileWalk = True
-intrinsicIsIO IntrConform = False
-intrinsicIsIO IntrCellSlots = True
-intrinsicIsIO IntrReduceList = False
--- Synthesized by the `@fold` handler form; all touch runtime-owned state.
-intrinsicIsIO IntrCellNew = True
-intrinsicIsIO IntrCellGet = True
-intrinsicIsIO IntrCellPut = True
-intrinsicIsIO IntrCellReduce = True
-intrinsicIsIO IntrReplay = True
-intrinsicIsIO IntrChannel = True
-intrinsicIsIO IntrSpawn = True
-intrinsicIsIO IntrSettle = True
--- No IO: safe to write directly in a sandboxed eval.
-intrinsicIsIO IntrHash = False
-intrinsicIsIO IntrEq = False
-intrinsicIsIO IntrLe = False
-intrinsicIsIO IntrVersion = False
-intrinsicIsIO IntrCompiled = False
-intrinsicIsIO IntrLang = False
-intrinsicIsIO IntrSchema = False
-intrinsicIsIO IntrTypeof = False
-intrinsicIsIO IntrShow = False
-intrinsicIsIO IntrRead = False
-intrinsicIsIO IntrDatafile = False
-intrinsicIsIO IntrUnpack = True
-intrinsicIsIO IntrMap = False
-intrinsicIsIO IntrMapOptional = False
-intrinsicIsIO IntrTagTest = False
-intrinsicIsIO IntrNewtypeUnwrap = False
-intrinsicIsIO IntrNewtypeWrap = False
-intrinsicIsIO IntrCtorField = False
-intrinsicIsIO IntrListLenTest = False
-intrinsicIsIO IntrListElem = False
-intrinsicIsIO IntrThrow = False
-intrinsicIsIO IntrTry = False
+intrinsicIsIO = sigIO . intrinsicSig
 
--- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
+intrinsicArity :: Intrinsic -> Maybe Int
+intrinsicArity = sigArity . intrinsicSig
+
 parseIntrinsic :: Text -> Maybe Intrinsic
-parseIntrinsic "save" = Just IntrSave
-parseIntrinsic "savej" = Just IntrSaveJ
-parseIntrinsic "load" = Just IntrLoad
-parseIntrinsic "hash" = Just IntrHash
-parseIntrinsic "eq" = Just IntrEq
-parseIntrinsic "le" = Just IntrLe
-parseIntrinsic "version" = Just IntrVersion
-parseIntrinsic "compiled" = Just IntrCompiled
-parseIntrinsic "lang" = Just IntrLang
-parseIntrinsic "schema" = Just IntrSchema
-parseIntrinsic "typeof" = Just IntrTypeof
-parseIntrinsic "show" = Just IntrShow
-parseIntrinsic "read" = Just IntrRead
-parseIntrinsic "datafile" = Just IntrDatafile
-parseIntrinsic "open" = Just IntrOpen
-parseIntrinsic "close" = Just IntrClose
-parseIntrinsic "fschema" = Just IntrFSchema
--- @flen is user-facing so users can alias: `length = @flen` in stdlib.
--- IntrIFileWalk is compiler-internal (synthesized from `.[i] f`, `.foo f`,
--- etc. by Express.hs and Nexus.hs); no entry here.
-parseIntrinsic "flen" = Just IntrFLength
-parseIntrinsic "streamLayout" = Just IntrStreamLayout
-parseIntrinsic "next" = Just IntrNext
-parseIntrinsic "stream" = Just IntrStream
-parseIntrinsic "write" = Just IntrWrite
-parseIntrinsic "append" = Just IntrAppend
-parseIntrinsic "concat" = Just IntrConcat
-parseIntrinsic "flush" = Just IntrFlush
-parseIntrinsic "stdin" = Just IntrStdin
-parseIntrinsic "stdout" = Just IntrStdout
-parseIntrinsic "stderr" = Just IntrStderr
-parseIntrinsic "throw" = Just IntrThrow
-parseIntrinsic "try" = Just IntrTry
-parseIntrinsic "tell" = Just IntrTell
-parseIntrinsic "collect" = Just IntrCollect
-parseIntrinsic _ = Nothing
+parseIntrinsic t = lookup t [(sigName (intrinsicSig x), x) | x <- [minBound .. maxBound], sigWritten (intrinsicSig x)]
 
 -- | An intrinsic only the compiler writes, with its fixed arguments; a
 -- literal argument a consumer rebuilds is kept beside its value.
@@ -822,63 +838,6 @@ viewInternal intr args = case intr of
   _ -> NotInternal
 
 -- | Expected number of arguments for each intrinsic
-intrinsicArity :: Intrinsic -> Int
-intrinsicArity IntrSave = 3
-intrinsicArity IntrTagTest = 2
-intrinsicArity IntrNewtypeUnwrap = 1
-intrinsicArity IntrNewtypeWrap = 1
-intrinsicArity IntrCtorField = 3
-intrinsicArity IntrListLenTest = 2
-intrinsicArity IntrListElem = 2
-intrinsicArity IntrSaveJ = 2
-intrinsicArity IntrLoad = 1
-intrinsicArity IntrHash = 1
-intrinsicArity IntrEq = 2
-intrinsicArity IntrLe = 2
-intrinsicArity IntrVersion = 0
-intrinsicArity IntrCompiled = 0
-intrinsicArity IntrLang = 0
-intrinsicArity IntrSchema = 1
-intrinsicArity IntrTypeof = 1
-intrinsicArity IntrShow = 1
-intrinsicArity IntrRead = 1
-intrinsicArity IntrDatafile = 1
-intrinsicArity IntrUnpack = 1
-intrinsicArity IntrOpen = 1
-intrinsicArity IntrClose = 1
-intrinsicArity IntrFSchema = 1
-intrinsicArity IntrMap = 2
-intrinsicArity IntrMapOptional = 2
-intrinsicArity IntrFLength = 1
-intrinsicArity IntrStreamLayout = 1
-intrinsicArity IntrNext = 1
-intrinsicArity IntrStream = 1
-intrinsicArity IntrWrite = 3
-intrinsicArity IntrAppend = 1
-intrinsicArity IntrConcat = 2
-intrinsicArity IntrFlush = 1
-intrinsicArity IntrStdin = 0
-intrinsicArity IntrStdout = 0
-intrinsicArity IntrStderr = 0
-intrinsicArity IntrThrow = 1
-intrinsicArity IntrTry = 1
-intrinsicArity IntrTell = 0
-intrinsicArity IntrCollect = 1
-intrinsicArity IntrShape = 2
-intrinsicArity IntrTmpfile = 0
-intrinsicArity IntrCellNew = 1
-intrinsicArity IntrCellGet = 1
-intrinsicArity IntrCellPut = 2
-intrinsicArity IntrCellReduce = 2
-intrinsicArity IntrReplay = 2
-intrinsicArity IntrChannel = 0
-intrinsicArity IntrSpawn = 2
-intrinsicArity IntrSettle = 1
-intrinsicArity IntrConform = 1
-intrinsicArity IntrCellSlots = 1
-intrinsicArity IntrReduceList = 2
-intrinsicArity IntrIFileWalk =
-  error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
@@ -1061,6 +1020,92 @@ data CastDir = Unwrap | Wrap
 data InstanceOrigin = Declared | Derived
   deriving (Show, Eq, Ord)
 
+-- | An instance's identity: its class and its head in 'canonicalHead' form,
+-- so that alpha-equivalent heads are one key.
+data InstanceKey = InstanceKey
+  { ikClass :: ClassName
+  , ikHead :: ([TVar], [TypeU])
+  }
+  deriving (Show, Eq, Ord)
+
+-- | An implementation an instance gives for a method.
+data Impl
+  = ImplSource MVar (Indexed Source)
+  | -- | The method's type in its own declaration's variable names.
+    ImplBody EType ExprI
+  | -- | A derived @pack@ or @unpack@, a representation cast (NEWT-7).
+    ImplCast EType ExprI
+  deriving (Show, Eq, Ord)
+
+-- | One instance, merged across every declaration of its key (CLS-2).
+data InstanceDecl = InstanceDecl
+  { idKey :: InstanceKey
+  , idContext :: [Constraint]
+  -- ^ written in the key's variable names; a variable the head lacks is an
+  -- unsolved existential
+  , idMethods :: Map.Map EVar (EType, [Impl])
+  -- ^ each method the instance declares, at the instance's types in the
+  -- variable names of its latest declaration, with its implementations
+  , idSites :: [Int]
+  , idOrigin :: InstanceOrigin
+  }
+  deriving (Show, Eq, Ord)
+
+data ClassInfo = ClassInfo
+  { ciVars :: [TVar]
+  , ciSupers :: [Constraint]
+  , ciMethods :: Map.Map EVar EType
+  , ciModule :: MVar
+  -- ^ the module that declares the class
+  }
+  deriving (Show, Eq, Ord)
+
+-- | How the classes a pattern calls through are met (CLS-2): the instance
+-- that serves its receiver, and the instance casting each bracket bound. Each
+-- is absent where nothing in the program serves it: a pool then has no call to
+-- make, while the nexus may need none.
+data PatEvidence = PatEvidence
+  { patReceiver :: Maybe Evidence
+  , patBounds :: [Maybe Evidence]
+  }
+  deriving (Show, Eq, Ord)
+
+-- | A method whose class may serve a value, and the input the value takes.
+data ArgMethod = ArgMethod ClassName EVar Int
+  deriving (Show, Eq, Ord)
+
+noPatEvidence :: PatEvidence
+noPatEvidence = PatEvidence Nothing []
+
+data InstanceEnv = InstanceEnv
+  { ieByClass :: Map.Map ClassName [InstanceDecl]
+  , ieClasses :: Map.Map ClassName ClassInfo
+  , ieMethods :: Map.Map EVar (ClassName, [TVar])
+  -- ^ the class each method was declared in, with that class's variables
+  , ieFundeps :: Map.Map ClassName [Int]
+  -- ^ the class-argument positions the other arguments determine
+  }
+  deriving (Show, Eq, Ord)
+
+instance Defaultable InstanceEnv where
+  defaultValue = InstanceEnv Map.empty Map.empty Map.empty Map.empty
+
+-- | How a constraint at a use is met.
+data Evidence
+  = -- | The instance, the values of its key's variables, and the evidence
+    -- for its context.
+    EvInstance InstanceKey [TypeU] [Evidence]
+  | -- | No instance: the derived comparison (DERIV-6).
+    EvDerived ClassName TypeU
+  | -- | A constraint of the signature being checked.
+    EvGiven Constraint
+  deriving (Show, Eq, Ord)
+
+-- | The instance an evidence names, if it names one.
+evidenceInstance :: Evidence -> Maybe InstanceKey
+evidenceInstance (EvInstance k _ _) = Just k
+evidenceInstance _ = Nothing
+
 -- | Apply a coercion to a type, returning the coerced type.
 -- CoerceToOptional widens the RESULT type; under an effect wrapper the
 -- result is the inner type, so the OptionalU is placed under the EffectU
@@ -1071,7 +1116,9 @@ applyCoercion CoerceToOptional t = OptionalU t
 applyCoercion (CoerceNewtype _ t) _ = t
 
 
-data ExecutableExpr = SrcCall Source | PatCall Pattern
+-- | A call of a sourced function carries the index the source is declared
+-- under, which names the term it implements and so its signature.
+data ExecutableExpr = SrcCall (Indexed Source)
   deriving (Ord, Eq, Show)
 
 data AnnoS g f c = AnnoS g c (ExprS g f c)
@@ -1082,6 +1129,9 @@ data ExprS g f c
   | BndS EVar
   | VarS EVar (f (AnnoS g f c))
   | AppS (AnnoS g f c) [AnnoS g f c]
+  -- | A pattern applied to its arguments. The first annotations are the
+  -- pattern's own, as a function of those arguments.
+  | PatS g c PatEvidence (PatApp (AnnoS g f c))
   | LamS [EVar] (AnnoS g f c)
   | LstS [AnnoS g f c]
   | TupS [AnnoS g f c]
@@ -1134,8 +1184,31 @@ data ShapeForm
 data PreTyped f where
   PreTyped :: PreTyped ManyPoly
 
-data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
+-- | A use before instance resolution: a term's implementations, or a class
+-- method's candidate instances, each with its method type.
+data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(InstanceKey, EType, [a])]
   deriving (Show, Eq, Ord)
+
+-- | A use after instance resolution: how its class constraints are met, and
+-- its implementations, each a method's with the instance it was selected
+-- for (CLS-2).
+data Many a = Many {manyEvidence :: [Evidence], manyAlts :: [(Maybe InstanceKey, a)]}
+  deriving (Show)
+
+unMany :: Many a -> [a]
+unMany = map snd . manyAlts
+
+instance Functor Many where
+  fmap f (Many ev xs) = Many ev [(k, f x) | (k, x) <- xs]
+
+instance Traversable Many where
+  traverse f (Many ev xs) = Many ev <$> traverse (traverse f) xs
+
+instance Foldable Many where
+  foldr f b = foldr f b . unMany
+
+instance (Pretty a) => Pretty (Many a) where
+  pretty = list . map pretty . unMany
 
 ---- Class instances
 
@@ -1145,17 +1218,17 @@ instance HasOneLanguage Source where
 
 instance Functor ManyPoly where
   fmap f (MonomorphicExpr t xs) = MonomorphicExpr t (map f xs)
-  fmap f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t (map (second (map f)) xs)
+  fmap f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t [(k, et, map f es) | (k, et, es) <- xs]
 
 instance Traversable ManyPoly where
   traverse f (MonomorphicExpr t xs) = MonomorphicExpr t <$> traverse f xs
   traverse f (PolymorphicExpr cls v t xs) = PolymorphicExpr cls v t <$> traverse f2 xs
     where
-      f2 (t', x) = (,) t' <$> traverse f x
+      f2 (k, t', x) = (,,) k t' <$> traverse f x
 
 instance Foldable ManyPoly where
   foldr f b (MonomorphicExpr _ xs) = foldr f b xs
-  foldr f b (PolymorphicExpr _ _ _ (concatMap snd -> xs)) = foldr f b xs
+  foldr f b (PolymorphicExpr _ _ _ xs) = foldr f b [x | (_, _, es) <- xs, x <- es]
 
 instance Defaultable ModuleConfig where
   defaultValue =
@@ -1290,6 +1363,9 @@ mapExprSM ::
   (Traversable f, Monad m) => (AnnoS g f c -> m (AnnoS g' f c')) -> ExprS g f c -> m (ExprS g' f c')
 mapExprSM f (VarS v xs) = VarS v <$> traverse f xs
 mapExprSM f (AppS x xs) = AppS <$> f x <*> mapM f xs
+mapExprSM f (PatS g c ev app) = do
+  AnnoS g' c' _ <- f (AnnoS g c UniS)
+  PatS g' c' ev <$> traverse f app
 mapExprSM f (LamS vs x) = LamS vs <$> f x
 mapExprSM f (ShapeS w sh r) = ShapeS w sh <$> f r
 mapExprSM f (LstS xs) = LstS <$> mapM f xs
@@ -1359,6 +1435,7 @@ foldExprS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> ExprS g f c -> m
 foldExprS f (VarS _ xs)       = foldMap f xs
 foldExprS f (ShapeS _ _ r)    = f r
 foldExprS f (AppS x xs)       = f x <> foldMap f xs
+foldExprS f (PatS _ _ _ app)  = foldMap f app
 foldExprS f (LamS _ x)        = f x
 foldExprS f (LstS xs)         = foldMap f xs
 foldExprS f (TupS xs)         = foldMap f xs
@@ -1562,6 +1639,7 @@ instance (Foldable f) => Pretty (AnnoS a f b) where
 
 instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (AppS e es) = "(AppS" <+> list (map pretty (e : es)) <> ")"
+  pretty (PatS _ _ _ app) = "(PatS" <+> pretty (patAppPattern app) <+> list (map pretty (toList app)) <> ")"
   pretty (ShapeS _ _ r) = "(ShapeS" <+> pretty r <> ")"
   pretty (VarS v res) = "(VarS" <+> pretty v <+> "=" <+> list (map pretty (toList res)) <> ")"
   pretty (LamS vs e) = "(LamS" <+> list (map pretty vs) <+> "->" <+> pretty e <> ")"
@@ -1588,8 +1666,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (LabelS k e) = "(LabelS" <+> pretty k <+> pretty e <> ")"
 
 instance Pretty ExecutableExpr where
-  pretty (SrcCall src) = pretty src
-  pretty (PatCall pat) = pretty pat
+  pretty (SrcCall (Idx _ src)) = pretty src
 
 instance Pretty Signature where
   pretty (Signature v _ e) = pretty v <+> "::" <+> pretty (etype e)

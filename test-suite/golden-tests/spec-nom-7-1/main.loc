@@ -1,0 +1,48 @@
+-- NOM-7: a back-reference names a declaration that encloses it. A newtype
+-- with a form of its own over a recursive record or `data` type renames the
+-- declaration, and the references inside it follow (`Forest`, `Bush`, a
+-- list of them, a field of one); a reference cut at an enclosing node keeps
+-- that node's name (`Node` holding `Grove`). Inside `Rose Bush` the inner
+-- references mean `Bush`, so a value that nests a `Rose Bush` where a
+-- `Rose Int` belongs is refused.
+module main (forestId, bushId, forestsId, woodId, nodeId, grove, nlId, rbId, rrId)
+
+import root-py
+
+record Tree where
+  val :: Int
+  kids :: [Tree]
+
+newtype Forest = Tree
+type Py => Forest = "dict"
+
+record Wood where
+  f :: Forest
+  t :: Tree
+
+data Rose a = Rose a [Rose a]
+
+newtype Bush = Rose Int
+type Py => Bush = "dict"
+
+data Node = Node Int [Grove]
+
+newtype Grove = Node
+type Py => Grove = "dict"
+
+newtype NL = List NL
+type Py => NL = "list"
+
+source Py from "ids.py"
+  ( "ident" as forestId, "ident" as bushId, "ident" as forestsId, "ident" as woodId
+  , "ident" as nodeId, "ident" as grove, "ident" as nlId, "ident" as rbId, "ident" as rrId )
+
+forestId :: Forest -> Forest
+bushId :: Bush -> Bush
+forestsId :: [Forest] -> [Forest]
+woodId :: Wood -> Wood
+nodeId :: Node -> Node
+grove :: Grove -> Grove
+nlId :: NL -> NL
+rbId :: Rose Bush -> Rose Bush
+rrId :: Rose (Rose Int) -> Rose (Rose Int)

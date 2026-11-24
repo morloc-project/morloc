@@ -1,9 +1,9 @@
 -- A streaming command whose guard and match arms each end in `@collect`
 -- streams from exactly one site per run, so its actions compose into each
 -- arm's sink and run on a fresh run of the command, with no saved output.
--- `partial` has an arm that streams nothing: an action there cannot compose
--- into every way the command can end, so it runs on the saved output.
--- `pair` destructures its parameter, which must not hide its `@collect`.
+-- `partial` has an arm whose producer streams nothing, which is still one
+-- `@collect` (STRM-4). `pair` destructures its parameter, which must not
+-- hide its `@collect`.
 
 module main (branchy, partial, pair)
 
@@ -38,7 +38,7 @@ showAcc :: Acc -> Str
 --' @render -a/--all=joinAll
 --' @render -b/--batches=showBatch @stream @default
 --' @render -f/--folded=showAcc @fold=addBatch @init=zero @combine=merge
-branchy :: Str -> <IO> ()
+branchy :: Str -> <IO> (Collect Int)
 branchy s =
   ? s == "a" = @collect produce
   : match (@read s :: Try Str Int)
@@ -47,10 +47,10 @@ branchy s =
 
 --' Stream from one arm, or not at all
 --' @render -a/--all=joinAll
-partial :: Bool -> <IO> ()
-partial b = ? b = @collect produce : nothing
+partial :: Bool -> <IO> (Collect Int)
+partial b = ? b = @collect produce : @collect (\k -> nothing)
 
 --' Stream from a destructured parameter
 --' @render -a/--all=joinAll
-pair :: (Int, Int) -> <IO> ()
+pair :: (Int, Int) -> <IO> (Collect Int)
 pair (n, _) = @collect (produceUpTo n)

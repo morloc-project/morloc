@@ -1,0 +1,156 @@
+--' Large Str batches to @stdout, raw and as a packet stream
+module main (rawOut, packetOut, genOnly)
+
+import root-cpp
+
+source Cpp from "gen.hpp" ("mk", "body", "render", "gen_only" as genOnly)
+
+--' One batch naming its body size
+mk :: Int -> [Int]
+--' A body of n bytes
+body :: Int -> Str
+--' A batch as its body
+render :: [Int] -> Str
+--' Build k bodies of n bytes and count the nonempty ones
+genOnly :: Int -> Int -> Int
+
+--' Send 64 batches to a sink
+produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+produce n sink = do
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  _ <- sink (mk n)
+  sink (mk n)
+
+--' Stream 64 bodies of n bytes as raw text
+--' @render -t/--text=render @stream @default
+rawOut :: Int -> <IO> (Collect Int)
+rawOut n = @collect (produce n)
+
+--' Write 64 bodies of n bytes to a Str stream on stdout
+packetOut :: Int -> <IO> (Collect Str)
+packetOut n = @stdout (\o -> do
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n]
+  @write 0 o [body n])

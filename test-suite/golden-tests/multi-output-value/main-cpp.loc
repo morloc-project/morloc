@@ -5,13 +5,8 @@
 -- run alone: a rendered text, one that takes the command's third argument
 -- (`$3`), and a sink that prints its output itself. The body's own print
 -- goes to stdout, never into a file.
---
--- `noisy` also writes a stream to `@stdout` before returning its value.
--- That stream is the body's own output, so it reaches stdout whatever the
--- actions are: formatted as usual beside a `@render` action, and still
--- there under `--no-stdout`.
 
-module mainc (squares, noisy)
+module mainc (squares)
 
 import root-cpp
 
@@ -40,13 +35,3 @@ summary :: [Int] -> Int
 --' @with   -m/--summary=summary
 squares :: Str -> Int -> Int -> <IO> [Int]
 squares log n _ = build log n
-
---' Squares, after writing a stream of its own
---' @render -l/--lines=asLines
---' @with   -m/--summary=summary
-noisy :: Str -> Int -> <IO> [Int]
-noisy log n = do
-  o <- @stdout
-  @write 0 o [7, 8]
-  @close o
-  build log n

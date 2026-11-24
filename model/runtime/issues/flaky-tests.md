@@ -5,7 +5,7 @@
   2026-10-10 failed
   `process::tests::the_sweeper_waits_for_a_group_to_end_then_sweeps_its_dead_run`
   at the `.unwrap()` on `Spawn::run` in its helper `start_group`
-  (morloc-nexus/src/process.rs:2132); five isolated reruns and one workspace rerun passed. The
+  (morloc-nexus/src/process.rs:2138); five isolated reruns and one workspace rerun passed. The
   error value was not captured; cause unknown.
 - **Reader slot test fails under the gate.** [reproduced once] Against
   SLOT-9. The full gate on 2026-10-11 failed
@@ -21,6 +21,20 @@
   (morloc-test) has a 1 s timeout; under `-j 6` it hit TIMEOUT at 1.05 s,
   while alone it takes 0.07 s (3 runs). A wall-clock bound in a parallel
   suite measures the machine; counting steps would test linearity.
+- **The helper ceiling test fails on a loaded machine.** [reproduced
+  2026-11-23, 4 of 4 runs at load average 18 on 12 cores; passed in a
+  workspace run earlier that day] `par_pool::tests::the_helpers_stay_under_the_ceiling`
+  (morloc-runtime/src/par_pool.rs:963) asserts that the pool reaches half
+  of MAX_HELPERS (127) helper threads within one 400-span run; under load it
+  reached 88 to 112. The bound measures how fast the machine starts
+  threads, not the ceiling rule.
+- **A test process aborts on a thread-local destructor.** [reproduced
+  2026-11-22 and 2026-11-23, both `cargo test --workspace` runs] Against
+  PANIC-1. The morloc-runtime lib run prints `fatal runtime error: thread
+  local panicked on drop, aborting` right after the `lifeline::tests`
+  lines; no test fails, so the process is likely a forked or re-executed
+  child. Which test, and which thread-local, is unknown; a run with
+  `--test-threads=1` would place it.
 - **The integration suite deletes every morloc run's resources on the
   machine.** [reproduced 2026-10-14] Gap: no item says what a test may
   remove. `cleanupMorlocResources`
@@ -66,17 +80,6 @@
   Unconfirmed guess: a channel test holding the exclusive guard waits
   forever. gdb cannot attach in the container (no CAP_SYS_PTRACE); run the
   test binary as gdb's inferior and interrupt it to see every stack.
-- **Stream depth-share test may see other tests' writers.** [speculative,
-  from review] `streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth`
-  (morloc-runtime/src/stream.rs) expects exact depths computed from the
-  process-wide list of hosted writers. A writer another test left open is
-  counted until it ends; the test waits up to 10 s for the depth to rise,
-  which covers writers that end, not one left open for the whole run.
-  Passed in every run so far (5 full lib runs, 2026-10-15).
-  Since d9b97d00 taking an exclusive guard reports and stops writers that
-  earlier tests left, and releasing one fails a test that leaves its own,
-  so a leaked writer no longer reaches this test; delete this entry if no
-  failure is seen.
 - **Bare-forked test children hold other tests' descriptors.** [read,
   one failure reproduced 2026-10-15] Spec gap: FORK-3 covers exec, not a
   fork without one. Tests fork without exec (`exits_cleanly_in_a_forked_child`,
@@ -94,3 +97,21 @@
   loop on `listener.incoming()` that never ends; every reuse test leaves
   one blocked thread (and its socket) for the rest of the run. Harmless so
   far, but they were mistaken for stuck tests in a hang's thread list.
+
+- **`compaction_gives_the_same_bytes_whichever_side_moves` fails
+  intermittently.** [reproduced once, 2026-11-08, b55a76cd9 plus uncommitted
+  UTF-8 work] In a full `cargo test --workspace`, write_behind.rs:424
+  panicked with `Shm("Failed to find absptr 0x7f9db8d80110 in shared
+  memory")`. It passed alone and in the next full run. Likely another
+  test's registry teardown or volume reset racing it; unconfirmed.
+- **A typechecker timing test times out under a parallel run.**
+  [reproduced once, 2026-11-20] The unit test "long non-tuple composition
+  chain stays linear" hit its 1 s timeout in a full `-j 6` suite run
+  (1.03 s); alone it takes 0.14 s, three runs of three. A wall-clock bound
+  in a suite that runs beside builds measures load as much as growth; a
+  step count, or a ratio between two sizes, would not.
+- **Complexity timing tests time out under load.** [reproduced,
+  2026-11-23] At `-j 6` under load 15, three wall-clock tests in the
+  Complexity group timed out (1 s and 10 s budgets, and the deep
+  singly-used-parameter chain at k=4000, then at 20 s). Each passes alone.
+  Same cause as the entry above: a wall-clock bound measures load.

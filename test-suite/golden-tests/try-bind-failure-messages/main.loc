@@ -1,0 +1,35 @@
+-- What a failed refutable bind over a `Try Str a` reports. A bare `Ok x`
+-- that meets an Err fails with the Err message. Any other pattern can fail
+-- on an Ok value, and then reports the value it met.
+
+module main (bareOnErr, errOnOk, litOnOk, nestedOnOk)
+
+import root-py
+
+wrap :: Int -> <IO> (Try Str Int)
+wrap n = do
+  ? n > 0 = Ok n : Err "not positive"
+
+wrapPair :: Int -> <IO> (Try Str (Int, Int))
+wrapPair n = do
+  Ok (n, n)
+
+bareOnErr :: Int -> <IO> Int
+bareOnErr n = do
+  Ok x <- wrap n
+  x
+
+errOnOk :: Int -> <IO> Str
+errOnOk n = do
+  Err e <- wrap n
+  e
+
+litOnOk :: Int -> <IO> Int
+litOnOk n = do
+  Ok 5 <- wrap n
+  n
+
+nestedOnOk :: Int -> <IO> Int
+nestedOnOk n = do
+  Ok (1, x) <- wrapPair n
+  x

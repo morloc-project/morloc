@@ -25,20 +25,17 @@ sumList xs = fold (+) 0 xs
 doubleList :: [Int] -> [Int]
 doubleList xs = map (\x -> x * 2) xs
 
-producer :: <IO> ()
-producer = do
-  o <- @stdout :: <IO> OStream Int
+producer :: <IO> (Collect Int)
+producer = @stdout (\o -> do
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5, 6]
   @flush o
-  @write 0 o [7, 8, 9, 10]
-  @close o
+  @write 0 o [7, 8, 9, 10])
 
-doubler :: <IO> ()
-doubler = do
+doubler :: <IO> (Collect Int)
+doubler = @stdout (\o -> do
   Ok s <- @stdin  :: <IO> (Try Str (IStream Int))
-  o <- @stdout :: <IO> OStream Int
   Ok xs1 <- @next s
   @write 0 o (doubleList xs1)
   @flush o
@@ -46,8 +43,7 @@ doubler = do
   @write 0 o (doubleList xs2)
   @flush o
   Ok xs3 <- @next s
-  @write 0 o (doubleList xs3)
-  @close o
+  @write 0 o (doubleList xs3))
 
 checkSum :: <IO> Int
 checkSum = do

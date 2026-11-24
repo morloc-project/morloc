@@ -14,6 +14,8 @@ contradictory, such as two constants of one type with different values.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair, checkRecursion) where
 
+import Data.Foldable (toList)
+import Morloc.Data.Zip (zipPrefix, zipSame, zipWithSame)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
@@ -32,7 +34,7 @@ toE :: AnnoS (Indexed Type) Many Int -> E
 toE (AnnoS g _ UniS) = LitP g MUni
 toE (AnnoS g _ NullS) = LitP g MNull
 toE (AnnoS g _ (BndS v)) = BndP g v
-toE (AnnoS g _ (VarS v (Many es))) = VarP g v (map toE es)
+toE (AnnoS g _ (VarS v es)) = VarP g v (map toE (unMany es))
 toE (AnnoS g _ (AppS e es)) = AppP g (toE e) (map toE es)
 toE (AnnoS g _ (LamS vs e)) = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es)) = LstP g (map toE es)
@@ -45,12 +47,13 @@ toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
 toE (AnnoS g _ (ConS _ n _ xs)) = ConP g n (map toE xs)
-toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
-toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
-  LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))
-toE (AnnoS g _ (ExeS (PatCall (PatternStruct s)))) = PatP g s
-toE (AnnoS g _ (ExeS (PatCall PatternBracketIndex))) = BracketIndexP g
-toE (AnnoS g _ (ExeS (PatCall PatternBracketSlice))) = BracketSliceP g
+toE (AnnoS g _ (ExeS (SrcCall (Idx _ s)))) = SrcP g s
+toE (AnnoS g _ (PatS fg _ _ app)) = AppP g (patE fg (patAppPattern app)) (map toE (toList app))
+  where
+    patE i (PatternText t ts) = LitP i (MStr (t <> DT.concat ["#{}" <> t' | t' <- ts]))
+    patE i (PatternStruct sel) = PatP i sel
+    patE i PatternBracketIndex = BracketIndexP i
+    patE i PatternBracketSlice = BracketSliceP i
 toE (AnnoS g _ (LetBndS v)) = BndP g v
 toE (AnnoS g _ (CallS v)) = BndP g v
 toE (AnnoS _ _ (LetS _ _ body)) = toE body
@@ -112,7 +115,7 @@ checkRecursion specs termOf owners sites = go [] id
   where
     go :: [Member g] -> (Demand -> Demand) -> AnnoS g Many Int -> MorlocMonad ()
     go open here node@(AnnoS _ c e) = case e of
-      VarS v (Many alts) ->
+      VarS v alts ->
         mapM_ (\alt -> go (Member v (termOf c) alt here : open) id alt) alts
       CallS v
         | not (Set.member v specs)
@@ -123,7 +126,7 @@ checkRecursion specs termOf owners sites = go [] id
     -- the demand of each member on the next, and of the last on the first
     checkCycle :: [Member g] -> (Demand -> Demand) -> MorlocMonad ()
     checkCycle members final =
-      let ring = zip members (map memberIncoming (drop 1 members) <> [final])
+      let ring = zipSame members (map memberIncoming (drop 1 members) <> [final])
           rotations = take (length ring) (iterate rotate ring)
           rotate xs = drop 1 xs <> take 1 xs
        in case [m | r@((m, _) : _) <- rotations, needsItself m r] of
@@ -286,7 +289,7 @@ checkPair i e10 e20 = do
         let k = min (length vs1) (length vs2)
             used = Set.unions [freeTerms b1, freeTerms b2, Set.fromList (vs1 <> vs2), params]
             fresh = take k [v | j <- [(0 :: Int) ..], let v = EV (DT.pack ("x" <> show j)), Set.notMember v used]
-            rename vs body = foldr (\(v, r) acc -> substituteEVar v r acc) body (zip vs fresh)
+            rename vs body = foldr (\(v, r) acc -> substituteEVar v r acc) body (zipPrefix vs fresh)
             rest g vs body = case drop k vs of
               [] -> rename vs body
               more -> LamP g more (rename vs body)
@@ -306,12 +309,17 @@ checkPair i e10 e20 = do
                 <> "b:" <+> pretty y
       (LstP _ xs, LstP _ ys)
         | length xs /= length ys -> reject "Containers of unequal length"
-        | otherwise -> sequence_ (zipWith next xs ys)
-      (TupP _ xs, TupP _ ys) -> sequence_ (zipWith next xs ys)
-      (NamP _ rs1, NamP _ rs2) -> sequence_ [next x y | (k, x) <- rs1, Just y <- [lookup k rs2]]
+        | otherwise -> sequence_ (zipWithSame next xs ys)
+      (TupP _ xs, TupP _ ys)
+        | length xs /= length ys -> MM.throwCompilerBug "valuecheck: two alternatives of one type are tuples of different sizes"
+        | otherwise -> sequence_ (zipWithSame next xs ys)
+      (NamP _ rs1, NamP _ rs2)
+        | sort (map fst rs1) /= sort (map fst rs2) -> MM.throwCompilerBug "valuecheck: two alternatives of one type are records with different fields"
+        | otherwise -> sequence_ [next x y | (k, x) <- rs1, Just y <- [lookup k rs2]]
       (ConP _ c1 xs, ConP _ c2 ys)
         | c1 /= c2 -> reject "Different constructors"
-        | otherwise -> sequence_ (zipWith next xs ys)
+        | length xs /= length ys -> MM.throwCompilerBug "valuecheck: one constructor applied to different numbers of fields"
+        | otherwise -> sequence_ (zipWithSame next xs ys)
       -- a value made optional is null only if it was itself null
       (CoerceP CoerceToOptional _ x, LitP _ MNull)
         | isConstant x && not (isNull x) -> reject "A value is compared with null"

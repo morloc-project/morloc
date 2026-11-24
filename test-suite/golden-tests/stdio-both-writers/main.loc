@@ -12,9 +12,8 @@ module main (dataAndLog)
 
 import root-py
 
-dataAndLog :: <IO> ()
-dataAndLog = do
-  o <- @stdout :: <IO> OStream Int
+dataAndLog :: <IO> (Collect Int)
+dataAndLog = @stdout (\o -> do
   e <- @stderr :: <IO> OStream Str
   @write 0 e ["started"]
   @flush e
@@ -25,5 +24,4 @@ dataAndLog = do
   @write 0 o [400, 500, 600]
   @flush o
   @write 0 e ["done"]
-  @close o
-  @close e
+  @close e)

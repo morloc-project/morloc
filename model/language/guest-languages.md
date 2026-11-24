@@ -12,7 +12,7 @@ the guest and its host does not cross a pool. Futhark is a guest of C++.
 
 ### GUEST-2 A guest signature is checked against the guest's own declaration
 Intent: proposed
-Code: deviates (issues/guests.md)
+Code: unaudited
 
 Unlike SRC-3, the build checks a guest function's morloc signature against
 the entry point the guest compiler reports: arity, element types and rank.
@@ -20,7 +20,7 @@ A mismatch is a build error naming the term.
 
 ### GUEST-3 A guest signature may use only types the guest can represent
 Intent: proposed
-Code: deviates (issues/guests.md)
+Code: unaudited
 
 For Futhark that is fixed-width numeric scalars and vectors and matrices of
 them. Any other type in a guest signature is rejected at build.

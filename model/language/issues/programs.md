@@ -62,11 +62,11 @@ Reproduced on 0.109.0 unless marked.
 - **`@stdin` and a bare `@arg` above a function are dropped silently.**
   [reproduced, 2026-10-21] Against DIAG-4's common ground (every other
   misplaced argument directive is an error). CodeGenerator/Docstrings.hs:
-  303-320 `validateCommandLevelDirectives` lists no `stdin`; a value-less
+  296-313 `validateCommandLevelDirectives` lists no `stdin`; a value-less
   `@arg` sets no `docArg`. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis3.loc, dirarg.loc.
-- **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Command
-  group names collide with ungrouped command names: [math]"; "Source file
-  not found: ./nofile.py"; unknown-directive and `@literal` warnings;
+- **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Source
+  file not found: ./nofile.py" (Grammars/Translator/Generic.hs:367-368,
+  Pools/CAbi/Members/Cpp.hs:2800); unknown-directive and `@literal` warnings;
   `morloc eval` allow-list refusal. `morloc eval -e 'import root-py;
   @write "x" 1'` is located at `<expr>:3:1-12`, a generated wrapper line.
 - **Program rules with no item.** [reproduced, 2026-10-21]

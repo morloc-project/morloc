@@ -1,0 +1,10 @@
+module main (f, g)
+
+import convert (stdValue)
+import bio/convert (bioValue)
+
+f :: Int
+f = stdValue
+
+g :: Int
+g = bioValue

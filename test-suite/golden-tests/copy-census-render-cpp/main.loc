@@ -1,0 +1,29 @@
+-- Copy census for a C++ `@render @stream` sink: each rendered body is
+-- written to stdout once, so no body is copied on its way to the stream.
+-- Each body starts with the count of large allocations render did not
+-- make, taken before it is built; the first count is always 0, a copy of
+-- a body shows in the count of the next one, and the fourth body sees the
+-- third's.
+module main (texts)
+
+import root-cpp
+
+source Cpp from "impl.hpp" ("mk", "render")
+
+--' One batch holding one value
+mk :: Int -> [Int]
+--' A large body starting with the copies made so far
+render :: [Int] -> Str
+
+--' Send four batches to a sink
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 1)
+  _ <- sink (mk 2)
+  _ <- sink (mk 3)
+  sink (mk 4)
+
+--' Stream each batch as text
+--' @render -t/--text=render @stream @default
+texts :: Int -> <IO> (Collect Int)
+texts n = @collect produce

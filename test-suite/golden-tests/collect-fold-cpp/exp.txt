@@ -4,3 +4,5 @@ sum=15 batches=1,2,3
 0,1,2,3,4,5
 --- fold: four threads, one accumulator each ---
 sum=45 batches=4 merges=3
+--- fold to a file: four threads, list to stdout ---
+sum=45 batches=4 merges=0

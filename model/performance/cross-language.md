@@ -7,7 +7,7 @@ made inside one pool.
 Intent: ruled 2026-10-13
 Bench: xl-calls
 Model: t(n) = c + b*n; the outer language's loop calls a function sourced in the inner language n times with an I64; b is one round trip
-Measured: pending
+Measured: 2026-11-12-0416-395049507+dirty (kept connections into Python and R callees), load 11 falling to 2.6. b in us: py->cpp 25.1, py->rs 25.1, cpp->py 28.0, cpp->rs 24.6, rs->py 26.5, rs->cpp 25.8; into R 97-118, from R 118-137. Before kept connections (2026-11-12 sweep, load 1.8-3): cpp->py 38.3, rs->py 40.5.
 Goal: py->cpp.b <= 20 us, cpp->py.b <= 20 us, cpp->rs.b <= 20 us, rs->cpp.b <= 20 us, py->rs.b <= 20 us, rs->py.b <= 20 us
 Limit: py->cpp.b <= 40 us, cpp->py.b <= 40 us, cpp->rs.b <= 40 us, rs->cpp.b <= 40 us, py->rs.b <= 40 us, rs->py.b <= 40 us
 

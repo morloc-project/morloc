@@ -14,12 +14,21 @@ use morloc_runtime_types::packet::read_schema_from_meta;
 // ── Runtime FFI ────────────────────────────────────────────────────────────
 
 extern "C" {
+    /// Write a `[Str]`/`[[U8]]`/`[U8]` sub-packet's bodies to `fd` where they
+    /// lie; returns a `morloc_runtime_types::RAW_*` code (`*errmsg` on failure).
+    /// The sub-packet is given as `head` (header and metadata) and
+    /// `payload` (its payload region, with or without the alignment padding).
+    fn mlc_write_raw_subpacket(
+        head: *const u8, head_len: u64, payload: *const u8, payload_len: u64, fd: i32, errmsg: *mut *mut c_char,
+    ) -> i32;
+
     /// Materialise one voidstar `Array<T>` in SHM from a self-contained
     /// `MORLOC_DATA_PACKET` sub-packet's bytes. `elem_schema` is the
     /// element schema `T` (streams are list-shaped, so the sub-packet's
-    /// value is `[T]`). Returns the SHM voidstar, or null on error.
+    /// value is `[T]`), read as a frame of this run's own output.
+    /// Returns the SHM voidstar, or null on error.
     /// Caller owns the voidstar and frees it with `shfree`.
-    fn mlc_materialize_subpacket_from_bytes(
+    fn mlc_materialize_own_subpacket_from_bytes(
         bytes: *const u8,
         n: u64,
         elem_schema: *const CSchema,
@@ -34,9 +43,9 @@ extern "C" {
         errmsg: *mut *mut c_char,
     ) -> i32;
 
-    /// Emit a `Str`/`[Str]` voidstar as verbatim bytes to fd 1 (the `-f raw`
-    /// format). `schema` is the full `[Str]` value schema.
-    fn print_voidstar_raw(
+    /// Emit a voidstar list of render results as their verbatim bytes to
+    /// fd 1, in order. `schema` is the full list schema.
+    fn print_voidstar_raw_batches(
         data: *const c_void,
         schema: *const CSchema,
         errmsg: *mut *mut c_char,
@@ -212,16 +221,82 @@ impl From<String> for WriteError {
     fn from(s: String) -> Self { WriteError::Other(s) }
 }
 
+/// One frame from the custodian (a sub-packet or a footer), as the parts
+/// whose concatenation it is (SLOT-16).
+#[derive(Clone, Copy)]
+pub struct Frame<'a>(pub &'a [&'a [u8]]);
+
+impl<'a> Frame<'a> {
+    pub fn len(&self) -> usize {
+        self.0.iter().map(|p| p.len()).sum()
+    }
+
+    /// The first 32 bytes, the packet header.
+    pub fn header(&self) -> Option<[u8; 32]> {
+        let mut h = [0u8; 32];
+        let mut at = 0;
+        for p in self.0 {
+            let n = p.len().min(32 - at);
+            h[at..at + n].copy_from_slice(&p[..n]);
+            at += n;
+            if at == 32 {
+                return Some(h);
+            }
+        }
+        None
+    }
+
+    /// The frame as one slice, copied only when it has several parts.
+    pub fn joined(&self) -> std::borrow::Cow<'a, [u8]> {
+        match self.0 {
+            [] => std::borrow::Cow::Borrowed(&[]),
+            [one] => std::borrow::Cow::Borrowed(one),
+            parts => std::borrow::Cow::Owned(parts.concat()),
+        }
+    }
+}
+
 fn write_all_fd(fd: i32, bytes: &[u8]) -> Result<(), WriteError> {
-    let mut off = 0usize;
-    while off < bytes.len() {
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes.as_ptr().add(off) as *const c_void,
-                bytes.len() - off,
-            )
-        };
+    write_parts_fd(fd, &[bytes])
+}
+
+fn write_parts_fd(fd: i32, parts: &[&[u8]]) -> Result<(), WriteError> {
+    writev_all_with(fd, parts, |iov| unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as i32) })
+}
+
+/// Write every part in order through `write`, which returns as `writev`
+/// does, resuming after a short write.
+fn writev_all_with(
+    fd: i32,
+    parts: &[&[u8]],
+    mut write: impl FnMut(&[libc::iovec]) -> isize,
+) -> Result<(), WriteError> {
+    const MAX_IOV: usize = 64;
+    // Darwin refuses a writev of more than INT_MAX bytes.
+    const MAX_BYTES: usize = 1 << 30;
+    let mut i = 0;
+    let mut skip = 0usize;
+    let mut iov: Vec<libc::iovec> = Vec::with_capacity(parts.len().min(MAX_IOV));
+    loop {
+        while i < parts.len() && parts[i].len() == skip {
+            i += 1;
+            skip = 0;
+        }
+        if i == parts.len() {
+            return Ok(());
+        }
+        iov.clear();
+        let mut total = 0usize;
+        for (k, p) in parts[i..].iter().take(MAX_IOV).enumerate() {
+            let p = if k == 0 { &p[skip..] } else { p };
+            let take = p.len().min(MAX_BYTES - total);
+            iov.push(libc::iovec { iov_base: p.as_ptr() as *mut c_void, iov_len: take });
+            total += take;
+            if total == MAX_BYTES {
+                break;
+            }
+        }
+        let n = write(&iov);
         if n < 0 {
             let e = std::io::Error::last_os_error();
             if e.raw_os_error() == Some(libc::EINTR) { continue; }
@@ -233,15 +308,29 @@ fn write_all_fd(fd: i32, bytes: &[u8]) -> Result<(), WriteError> {
         if n == 0 {
             return Err(WriteError::Other(format!("write(fd {}) returned 0", fd)));
         }
-        off += n as usize;
+        let mut n = n as usize;
+        while n > 0 {
+            let left = parts[i].len() - skip;
+            if n < left {
+                skip += n;
+                break;
+            }
+            n -= left;
+            i += 1;
+            skip = 0;
+        }
     }
-    Ok(())
 }
 
 /// Write raw bytes to `fd`. Public wrapper over the internal writer for
 /// the transcoding paths (JSON brackets, footer pass-through).
 pub unsafe fn write_bytes_to_fd(fd: i32, bytes: &[u8]) -> Result<(), WriteError> {
     write_all_fd(fd, bytes)
+}
+
+/// Write a frame's parts to `fd`, in order, without joining them.
+pub unsafe fn write_frame_to_fd(fd: i32, frame: Frame<'_>) -> Result<(), WriteError> {
+    write_parts_fd(fd, frame.0)
 }
 
 // ── stdout format transcoding ───────────────────────────────────────────────
@@ -312,7 +401,7 @@ unsafe fn materialize(
 ) -> Result<(ShmVoidstar, *mut CSchema, *mut CSchema), String> {
     let (value_c, elem_c) = build_value_and_elem_cschema(value_schema_str)?;
     let mut err: *mut c_char = std::ptr::null_mut();
-    let vs = mlc_materialize_subpacket_from_bytes(
+    let vs = mlc_materialize_own_subpacket_from_bytes(
         bytes.as_ptr(),
         bytes.len() as u64,
         elem_c,
@@ -362,17 +451,84 @@ pub unsafe fn emit_subpacket_jsonl(bytes: &[u8], value_schema_str: &str) -> Resu
     emit_subpacket_with(bytes, value_schema_str, "jsonl emit", print_voidstar_jsonl)
 }
 
-/// Emit one sub-packet's `[Str]` bodies verbatim to fd 1 (the `-f raw`
-/// format for `render` handlers).
-pub unsafe fn emit_subpacket_raw(bytes: &[u8], value_schema_str: &str) -> Result<(), WriteError> {
-    emit_subpacket_with(bytes, value_schema_str, "raw emit", print_voidstar_raw)
+/// Emit one sub-packet of render results verbatim to fd 1 (the `-f raw`
+/// format for `render` handlers). `head_len` is the length of its header
+/// and metadata.
+pub unsafe fn emit_subpacket_raw(frame: Frame<'_>, head_len: usize) -> Result<(), WriteError> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = out.flush() {
+        return Err(if e.kind() == std::io::ErrorKind::BrokenPipe { WriteError::BrokenPipe } else { WriteError::Other(format!("raw emit: {e}")) });
+    }
+    let joined;
+    let (head, payload) = match frame.0 {
+        [head, payload, ..] if head.len() == head_len => (*head, *payload),
+        _ => {
+            joined = frame.joined();
+            if joined.len() < head_len {
+                return Err(WriteError::Other("raw emit: a sub-packet is shorter than its header".into()));
+            }
+            joined.split_at(head_len)
+        }
+    };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    match mlc_write_raw_subpacket(
+        head.as_ptr(), head.len() as u64, payload.as_ptr(), payload.len() as u64, libc::STDOUT_FILENO, &mut err,
+    ) {
+        morloc_runtime_types::RAW_WRITTEN => Ok(()),
+        morloc_runtime_types::RAW_PIPE_CLOSED => Err(WriteError::BrokenPipe),
+        morloc_runtime_types::RAW_NOT_HANDLED => {
+            drop(out);
+            let bytes = frame.joined();
+            let schema = subpacket_value_schema_str(&bytes)?;
+            emit_subpacket_with(&bytes, &schema, "raw emit", print_voidstar_raw_batches)
+        }
+        _ => Err(WriteError::Other(format!("raw emit: {}", take_err(err)))),
+    }
 }
 
-/// Render one sub-packet's `[T]` as a JSON array string and return the
-/// comma-joined element body with the outer `[` / `]` stripped, so the
-/// caller can splice it into a single streamed JSON array across
-/// sub-packets. Returns an empty string for an empty sub-packet.
-pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Result<String, String> {
+/// A sub-packet's `[T]` rendered as JSON, held in the runtime's malloc'd
+/// string; `inner` is the comma-joined element body with the outer `[` /
+/// `]` stripped, so the caller can splice it into a single streamed JSON
+/// array across sub-packets.
+pub struct JsonInner {
+    ptr: *mut c_char,
+    body: std::ops::Range<usize>,
+}
+
+impl JsonInner {
+    pub fn inner(&self) -> &[u8] {
+        // SAFETY: `body` lies within the string `ptr` holds.
+        unsafe {
+            std::slice::from_raw_parts((self.ptr as *const u8).add(self.body.start), self.body.len())
+        }
+    }
+}
+
+impl Drop for JsonInner {
+    fn drop(&mut self) {
+        unsafe { libc::free(self.ptr as *mut c_void) };
+    }
+}
+
+/// The byte range of a rendered JSON array's element body: the text
+/// between its outer brackets, whitespace-trimmed.
+fn json_array_body(s: &str) -> Result<std::ops::Range<usize>, String> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err(format!(
+            "streamed JSON sub-packet did not render as an array (got `{}`)",
+            trimmed,
+        ));
+    }
+    let body = trimmed[1..trimmed.len() - 1].trim();
+    let start = body.as_ptr() as usize - s.as_ptr() as usize;
+    Ok(start..start + body.len())
+}
+
+/// Render one sub-packet's `[T]` as JSON; empty `inner` for an empty
+/// sub-packet.
+pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Result<JsonInner, String> {
     let (vs, value_c, elem_c) = materialize(bytes, value_schema_str)?;
     let mut err: *mut c_char = std::ptr::null_mut();
     let s_ptr = voidstar_to_json_string(vs.0, value_c, &mut err);
@@ -381,15 +537,144 @@ pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Resu
     if s_ptr.is_null() {
         return Err(format!("json render: {}", take_err(err)));
     }
-    let s = std::ffi::CStr::from_ptr(s_ptr).to_string_lossy().into_owned();
-    libc::free(s_ptr as *mut c_void);
-    let trimmed = s.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
-        return Err(format!(
-            "streamed JSON sub-packet did not render as an array (got `{}`)",
-            trimmed,
-        ));
-    }
-    Ok(trimmed[1..trimmed.len() - 1].trim().to_string())
+    let mut out = JsonInner { ptr: s_ptr, body: 0..0 };
+    let s = std::ffi::CStr::from_ptr(s_ptr)
+        .to_str()
+        .map_err(|e| format!("json render: output is not valid UTF-8 (byte {})", e.valid_up_to()))?;
+    out.body = json_array_body(s)?;
+    Ok(out)
 }
 
+
+#[cfg(test)]
+mod json_array_body_tests {
+    use super::json_array_body;
+
+    fn copied(s: &str) -> String {
+        let trimmed = s.trim();
+        trimmed[1..trimmed.len() - 1].trim().to_string()
+    }
+
+    #[test]
+    fn the_body_slice_matches_the_trimmed_copy() {
+        for s in ["[]", "[1,2,3]", " [ 1 , 2 ]\n", "[\"a\",\"b\"]", "\t[[1],[2]] ", "[ ]", "[\"\u{e9}\"]"] {
+            let r = json_array_body(s).unwrap();
+            assert_eq!(&s[r], copied(s), "input {s:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_array_is_refused() {
+        for s in ["", "1", "\"x\"", "[1", "1]", "{}"] {
+            assert!(json_array_body(s).is_err(), "input {s:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_write_tests {
+    use super::{write_frame_to_fd, writev_all_with, Frame, WriteError};
+
+    fn set_errno(e: i32) {
+        #[cfg(target_os = "linux")]
+        unsafe { *libc::__errno_location() = e };
+        #[cfg(target_os = "macos")]
+        unsafe { *libc::__error() = e };
+    }
+
+    fn sample() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let head: Vec<u8> = (0..72u8).collect();
+        let payload: Vec<u8> = (0..200_003u32).map(|i| (i * 7 % 251) as u8).collect();
+        (head, payload, vec![0u8; 5])
+    }
+
+    fn read_all(fd: i32) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n as usize]);
+        }
+        got
+    }
+
+    #[test]
+    fn a_frame_written_in_parts_is_the_joined_frame() {
+        let (head, payload, pad) = sample();
+        let joined = [&head[..], &payload, &pad].concat();
+        for parts in [
+            vec![&head[..], &payload[..], &pad[..]],
+            vec![&head[..], &payload[..], &[][..]],
+            vec![&joined[..]],
+            vec![&[][..], &joined[..10], &[][..], &joined[10..]],
+        ] {
+            let want: Vec<u8> = parts.concat();
+            let frame = Frame(&parts);
+            assert_eq!(frame.len(), want.len());
+            assert_eq!(&frame.header().unwrap()[..], &want[..32]);
+            assert!(frame.joined() == want);
+            let mut fds = [0i32; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            let reader = fds[0];
+            let t = std::thread::spawn(move || read_all(reader));
+            unsafe { write_frame_to_fd(fds[1], frame) }.unwrap();
+            unsafe { libc::close(fds[1]) };
+            let got = t.join().unwrap();
+            unsafe { libc::close(fds[0]) };
+            assert!(got == want, "the bytes written differ from the joined frame");
+        }
+        assert!(Frame(&[&head[..20], &head[20..31]]).header().is_none());
+        assert!(matches!(Frame(&[&joined[..]]).joined(), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn short_writes_and_interrupts_resume_where_they_stopped() {
+        let (head, payload, pad) = sample();
+        let parts: Vec<&[u8]> = vec![&head, &[], &payload, &pad];
+        let want = parts.concat();
+        for cap in [1usize, 3, 71, 72, 73, 4096, 1 << 20] {
+            let mut got = Vec::new();
+            let mut calls = 0;
+            writev_all_with(-1, &parts, |iov| {
+                calls += 1;
+                if calls % 3 == 0 {
+                    set_errno(libc::EINTR);
+                    return -1;
+                }
+                let mut left = cap;
+                for v in iov {
+                    let n = v.iov_len.min(left);
+                    got.extend_from_slice(unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, n) });
+                    left -= n;
+                    if left == 0 {
+                        break;
+                    }
+                }
+                (cap - left) as isize
+            })
+            .unwrap();
+            assert!(got == want, "cap {cap}: the bytes written differ from the parts");
+        }
+    }
+
+    #[test]
+    fn a_closed_reader_is_a_broken_pipe_and_a_stuck_writer_an_error() {
+        let (head, payload, pad) = sample();
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { libc::close(fds[0]) };
+        let r = unsafe { write_frame_to_fd(fds[1], Frame(&[&head, &payload, &pad])) };
+        unsafe { libc::close(fds[1]) };
+        assert!(matches!(r, Err(WriteError::BrokenPipe)), "{r:?}");
+        let r = writev_all_with(-1, &[&head[..]], |_| 0);
+        assert!(matches!(r, Err(WriteError::Other(_))), "{r:?}");
+        let r = writev_all_with(-1, &[&head[..]], |_| {
+            set_errno(libc::EIO);
+            -1
+        });
+        assert!(matches!(r, Err(WriteError::Other(_))), "{r:?}");
+    }
+}

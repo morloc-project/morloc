@@ -1,0 +1,4 @@
+name: main
+version: 0.0.0
+rust-deps:
+  ndarray: "0.16"

@@ -8,7 +8,7 @@ pub fn ident_term(x: &Term) -> Term {
 
 // Twice (Wrap (Add (Lit v) (Neg Zero)))
 //
-// A generated arm holds its fields in the runtime's RecBox; a tuple of the
+// A generated arm holds its fields in its generated arm type; a tuple of the
 // fields converts into it.
 pub fn build(v: f64) -> Term {
     let inner = Expr::Add((

@@ -1,7 +1,7 @@
 //! C ABI wrappers for HTTP request/response handling.
 //! Replaces http.c.
 
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
 use std::ptr;
 
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
@@ -9,30 +9,40 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 const HTTP_MAX_HEADERS: usize = 8192;
 const HTTP_MAX_REQUEST: usize = 4 * 1024 * 1024;
 
-// ── C-compatible types ───────────────────────────────────────────────────────
+// -- Parsed HTTP requests --
 
-#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HttpMethod {
-    Get = 0,
-    Post = 1,
-    Delete = 2,
-    Options = 3,
-    Head = 4,
+    Get,
+    Post,
+    Delete,
+    Options,
+    Head,
 }
 
-#[repr(C)]
 pub struct HttpRequest {
     pub method: HttpMethod,
-    pub path: [c_char; 256],
-    pub body: *mut c_char,
-    pub body_len: usize,
+    pub path: String,
+    pub body: Vec<u8>,
     /// Query string (the part after `?`), empty when absent. Kept separate from
     /// `path` so path matching stays exact.
-    pub query: [c_char; 256],
+    pub query: String,
     /// Whether the request carries the daemon's bearer token, or none is set.
     pub authorized: bool,
 }
+
+/// Why a request was refused before routing; `too_large` marks one past a
+/// cap (NET-10).
+pub struct Refusal {
+    pub why: String,
+    pub too_large: bool,
+}
+
+fn refuse(why: impl Into<String>) -> Refusal {
+    Refusal { why: why.into(), too_large: false }
+}
+
+// -- C-compatible types --
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,56 +78,13 @@ pub struct DaemonRequest {
     pub render_default: bool,
 }
 
-// ── http_parse_request ───────────────────────────────────────────────────────
+// -- http_parse_request --
 
-/// The body length a request head declares: digits only, and every
-/// `Content-Length` header must agree (RFC 9110 8.6); none means 0.
-fn content_length_of(head: &str) -> Result<usize, String> {
-    let mut found: Option<&str> = None;
-    for line in head.split("\r\n").skip(1) {
-        let Some((name, value)) = line.split_once(':') else { continue };
-        if !name.trim().eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        let value = value.trim();
-        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(format!("invalid Content-Length: {}", value));
-        }
-        match found {
-            Some(prev) if prev != value => return Err("conflicting Content-Length headers".into()),
-            _ => found = Some(value),
-        }
-    }
-    found.map_or(Ok(0), |v| v.parse().map_err(|_| format!("invalid Content-Length: {}", v)))
+pub(crate) fn http_parse_request(fd: i32) -> Result<HttpRequest, Refusal> {
+    parse_request_within(fd, morloc_runtime_types::net_limits::HEAD_LIMIT)
 }
 
-/// The value of the first header named `name` (case-insensitive).
-fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
-    head.split("\r\n").skip(1).find_map(|line| {
-        let (k, v) = line.split_once(':')?;
-        k.trim().eq_ignore_ascii_case(name).then_some(v)
-    })
-}
-
-/// Null with `errmsg` set on a refused request; `too_large` says the body was
-/// past the cap (NET-10).
-pub(crate) unsafe fn http_parse_request(
-    fd: i32,
-    errmsg: *mut *mut c_char,
-    too_large: &mut bool,
-) -> *mut HttpRequest {
-    parse_request_within(fd, morloc_runtime_types::net_limits::HEAD_LIMIT, errmsg, too_large)
-}
-
-unsafe fn parse_request_within(
-    fd: i32,
-    head_limit: std::time::Duration,
-    errmsg: *mut *mut c_char,
-    too_large: &mut bool,
-) -> *mut HttpRequest {
-    clear_errmsg(errmsg);
-    *too_large = false;
-
+fn parse_request_within(fd: i32, head_limit: std::time::Duration) -> Result<HttpRequest, Refusal> {
     use morloc_runtime_types::net_limits::{body_limit, peek_by, recv_by};
     // NET-2
     let head_until = std::time::Instant::now() + head_limit;
@@ -130,16 +97,10 @@ unsafe fn parse_request_within(
 
     while header_len < HTTP_MAX_HEADERS - 1 {
         let room = HTTP_MAX_HEADERS - 1 - header_len;
-        let n = match peek_by(fd, header_buf.as_mut_ptr().add(header_len), room, head_until) {
-            Ok(0) => {
-                set_errmsg(errmsg, &MorlocError::Other("Connection closed while reading HTTP headers".into()));
-                return ptr::null_mut();
-            }
+        let n = match unsafe { peek_by(fd, header_buf.as_mut_ptr().add(header_len), room, head_until) } {
+            Ok(0) => return Err(refuse("Connection closed while reading HTTP headers")),
             Ok(n) => n,
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Other(format!("Reading HTTP headers: {e}")));
-                return ptr::null_mut();
-            }
+            Err(e) => return Err(refuse(format!("Reading HTTP headers: {e}"))),
         };
         let from = header_len.saturating_sub(3);
         let take = match header_buf[from..header_len + n].windows(4).position(|w| w == b"\r\n\r\n") {
@@ -151,16 +112,10 @@ unsafe fn parse_request_within(
         };
         let mut got = 0;
         while got < take {
-            match recv_by(fd, header_buf.as_mut_ptr().add(header_len + got), take - got, head_until) {
+            match unsafe { recv_by(fd, header_buf.as_mut_ptr().add(header_len + got), take - got, head_until) } {
                 Ok(k) if k > 0 => got += k,
-                failed => {
-                    let why = match failed {
-                        Err(e) => format!("Reading HTTP headers: {e}"),
-                        Ok(_) => "Connection closed while reading HTTP headers".to_string(),
-                    };
-                    set_errmsg(errmsg, &MorlocError::Other(why));
-                    return ptr::null_mut();
-                }
+                Err(e) => return Err(refuse(format!("Reading HTTP headers: {e}"))),
+                Ok(_) => return Err(refuse("Connection closed while reading HTTP headers")),
             }
         }
         header_len += take;
@@ -170,118 +125,48 @@ unsafe fn parse_request_within(
     }
 
     if !head_done {
-        *too_large = true;
-        set_errmsg(errmsg, &MorlocError::Other("the request headers are larger than this server takes".into()));
-        return ptr::null_mut();
+        return Err(Refusal { why: "the request headers are larger than this server takes".into(), too_large: true });
     }
 
-    let header_str = std::str::from_utf8(&header_buf[..header_len]).unwrap_or("");
-
-    // Allocate request
-    let req = libc::calloc(1, std::mem::size_of::<HttpRequest>()) as *mut HttpRequest;
-    if req.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other("Failed to allocate http_request_t".into()));
-        return ptr::null_mut();
-    }
-
-    // Parse method
-    if header_str.starts_with("GET ") {
-        (*req).method = HttpMethod::Get;
-    } else if header_str.starts_with("POST ") {
-        (*req).method = HttpMethod::Post;
-    } else if header_str.starts_with("DELETE ") {
-        (*req).method = HttpMethod::Delete;
-    } else if header_str.starts_with("OPTIONS ") {
-        (*req).method = HttpMethod::Options;
-    } else if header_str.starts_with("HEAD ") {
-        (*req).method = HttpMethod::Head;
-    } else {
-        libc::free(req as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Other("Unsupported HTTP method".into()));
-        return ptr::null_mut();
-    }
-
-    // Parse path
-    let first_space = header_str.find(' ').unwrap_or(0) + 1;
-    let path_end = header_str[first_space..].find(' ').map(|p| first_space + p).unwrap_or(first_space);
-    let raw_path = &header_str[first_space..path_end];
-    // Split off the query string (`?...`), keeping `path` exact for matching.
-    let (path, query) = match raw_path.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (raw_path, ""),
+    let head = morloc_runtime_types::http_head::parse(&header_buf[..header_len])
+        .map_err(|e| Refusal { why: e.why, too_large: e.too_large })?;
+    let method = match head.method {
+        "GET" => HttpMethod::Get,
+        "POST" => HttpMethod::Post,
+        "DELETE" => HttpMethod::Delete,
+        "OPTIONS" => HttpMethod::Options,
+        "HEAD" => HttpMethod::Head,
+        other => return Err(refuse(format!("unsupported HTTP method: {other}"))),
     };
-    let path_len = path.len().min(255);
-    ptr::copy_nonoverlapping(path.as_ptr(), (*req).path.as_mut_ptr() as *mut u8, path_len);
-    (*req).path[path_len] = 0;
-    let query_len = query.len().min(255);
-    ptr::copy_nonoverlapping(query.as_ptr(), (*req).query.as_mut_ptr() as *mut u8, query_len);
-    (*req).query[query_len] = 0;
-
-    (*req).authorized = match crate::daemon_ffi::http_token() {
+    let authorized = match crate::daemon_ffi::http_token() {
         None => true,
-        Some(token) => morloc_runtime_types::bearer::authorizes(header_value(header_str, "authorization"), &token),
+        Some(token) => morloc_runtime_types::bearer::authorizes(head.header("authorization"), &token),
     };
 
-    let content_length: usize = match content_length_of(header_str) {
-        Ok(n) => n,
-        Err(msg) => {
-            libc::free(req as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Other(msg));
-            return ptr::null_mut();
-        }
-    };
-
-    // Read body
-    if content_length > 0 {
-        if content_length > HTTP_MAX_REQUEST {
-            *too_large = true;
-            libc::free(req as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Other(format!("the request body is {} bytes; this server takes at most {}", content_length, HTTP_MAX_REQUEST)));
-            return ptr::null_mut();
-        }
-
-        let body = libc::malloc(content_length + 1) as *mut u8;
-        if body.is_null() {
-            libc::free(req as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Other("Failed to allocate HTTP body buffer".into()));
-            return ptr::null_mut();
-        }
-
-        // NET-2
-        let body_until = std::time::Instant::now() + body_limit(content_length);
-        let mut total = 0;
-        while total < content_length {
-            match recv_by(fd, body.add(total), content_length - total, body_until) {
-                Ok(n) if n > 0 => total += n,
-                failed => {
-                    libc::free(body as *mut c_void);
-                    libc::free(req as *mut c_void);
-                    let why = match failed {
-                        Err(e) => format!("Reading HTTP body: {e}"),
-                        Ok(_) => "Connection closed while reading HTTP body".to_string(),
-                    };
-                    set_errmsg(errmsg, &MorlocError::Other(why));
-                    return ptr::null_mut();
-                }
-            }
-        }
-        *body.add(content_length) = 0;
-        (*req).body = body as *mut c_char;
-        (*req).body_len = content_length;
+    let content_length = head.content_length;
+    if content_length > HTTP_MAX_REQUEST {
+        return Err(Refusal {
+            why: format!("the request body is {} bytes; this server takes at most {}", content_length, HTTP_MAX_REQUEST),
+            too_large: true,
+        });
     }
 
-    req
-}
-
-pub(crate) unsafe fn http_free_request(req: *mut HttpRequest) {
-    if req.is_null() { return; }
-    if !(*req).body.is_null() {
-        libc::free((*req).body as *mut c_void);
+    let mut body = vec![0u8; content_length];
+    // NET-2
+    let body_until = std::time::Instant::now() + body_limit(content_length);
+    let mut total = 0;
+    while total < content_length {
+        match unsafe { recv_by(fd, body.as_mut_ptr().add(total), content_length - total, body_until) } {
+            Ok(n) if n > 0 => total += n,
+            Err(e) => return Err(refuse(format!("Reading HTTP body: {e}"))),
+            Ok(_) => return Err(refuse("Connection closed while reading HTTP body")),
+        }
     }
-    libc::free(req as *mut c_void);
+
+    Ok(HttpRequest { method, path: head.path, body, query: head.query, authorized })
 }
 
-// ── http_write_response ──────────────────────────────────────────────────────
+// -- http_write_response --
 
 fn http_status_text(status: i32) -> &'static str {
     morloc_runtime_types::http_query::reason_phrase(status)
@@ -320,6 +205,29 @@ pub(crate) unsafe fn write_response_ex(
         std::ffi::CStr::from_ptr(extra_headers).to_str().unwrap_or("")
     };
 
+    let body: &[u8] = if body.is_null() || body_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(body as *const u8, body_len)
+    };
+    write_parts(fd, status, ct, &[body], extra)
+}
+
+/// One response whose body is `parts` in order, sent with one gathered
+/// write per syscall rather than joined first.
+pub(crate) unsafe fn write_response_parts(
+    fd: i32,
+    status: i32,
+    content_type: &str,
+    parts: &[&[u8]],
+    extra_headers: &std::ffi::CStr,
+) -> bool {
+    crate::daemon_ffi::note_reply_started();
+    write_parts(fd, status, content_type, parts, extra_headers.to_str().unwrap_or(""))
+}
+
+unsafe fn write_parts(fd: i32, status: i32, ct: &str, parts: &[&[u8]], extra: &str) -> bool {
+    let body_len: usize = parts.iter().map(|p| p.len()).sum();
     let header = format!(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
@@ -331,23 +239,15 @@ pub(crate) unsafe fn write_response_ex(
          {}\r\n",
         status, http_status_text(status), ct, body_len, extra
     );
-
-    // send_all retries on EAGAIN (non-blocking client fd on macOS) and on a
-    // short header/body send, rather than truncating the response mid-message.
-    if !crate::ipc_ffi::send_all(fd, header.as_ptr(), header.len()) {
-        return false;
+    let mut iov: Vec<libc::iovec> = Vec::with_capacity(parts.len() + 1);
+    iov.push(libc::iovec { iov_base: header.as_ptr() as *mut libc::c_void, iov_len: header.len() });
+    if !crate::daemon_ffi::reply_without_body() {
+        iov.extend(parts.iter().map(|p| libc::iovec { iov_base: p.as_ptr() as *mut libc::c_void, iov_len: p.len() }));
     }
-
-    if !body.is_null() && body_len > 0 && !crate::daemon_ffi::reply_without_body() {
-        if !crate::ipc_ffi::send_all(fd, body as *const u8, body_len) {
-            return false;
-        }
-    }
-
-    true
+    crate::ipc_ffi::send_parts(fd, &mut iov).is_ok()
 }
 
-// ── http_to_daemon_request ───────────────────────────────────────────────────
+// -- http_to_daemon_request --
 
 /// Read a top-level string field out of a JSON request body.
 ///
@@ -384,11 +284,28 @@ unsafe fn body_string(
     }
 }
 
+/// `text` as a malloc'd C string, or the refusal of the request when its
+/// `what` holds a NUL character.
+unsafe fn c_dup(
+    text: &str,
+    what: &str,
+    dreq: *mut DaemonRequest,
+    errmsg: *mut *mut c_char,
+) -> Result<*mut c_char, ()> {
+    match std::ffi::CString::new(text) {
+        Ok(c) => Ok(libc::strdup(c.as_ptr())),
+        Err(_) => {
+            crate::daemon_ffi::daemon_free_request(dreq);
+            set_errmsg(errmsg, &MorlocError::Other(format!("the {} holds a NUL character", what)));
+            Err(())
+        }
+    }
+}
+
 /// The eval-family method a request routes to, if any, read from its method
 /// and path alone, before its body.
-pub(crate) unsafe fn eval_route(req: *const HttpRequest) -> Option<DaemonMethod> {
-    let path = std::ffi::CStr::from_ptr((*req).path.as_ptr()).to_str().unwrap_or("");
-    match ((*req).method, path) {
+pub(crate) fn eval_route(req: &HttpRequest) -> Option<DaemonMethod> {
+    match (req.method, req.path.as_str()) {
         (HttpMethod::Post, "/eval") => Some(DaemonMethod::Eval),
         (HttpMethod::Post, "/typecheck") => Some(DaemonMethod::Typecheck),
         (HttpMethod::Post, "/bind") => Some(DaemonMethod::Bind),
@@ -404,7 +321,7 @@ pub(crate) unsafe fn eval_route(req: *const HttpRequest) -> Option<DaemonMethod>
 /// fields, DAEMON_ERROR_NOT_FOUND for an unrecognized route). `error_kind`
 /// may be NULL if the caller doesn't care.
 pub(crate) unsafe fn http_to_daemon_request(
-    req: *mut HttpRequest,
+    req: &HttpRequest,
     errmsg: *mut *mut c_char,
     error_kind: *mut i32,
 ) -> *mut DaemonRequest {
@@ -421,21 +338,16 @@ pub(crate) unsafe fn http_to_daemon_request(
         return ptr::null_mut();
     }
 
-    let path = std::ffi::CStr::from_ptr((*req).path.as_ptr())
-        .to_str().unwrap_or("");
-    let method = (*req).method;
+    let path = req.path.as_str();
+    let method = req.method;
 
-    let body_str = if !(*req).body.is_null() && (*req).body_len > 0 {
-        match std::str::from_utf8(std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len)) {
-            Ok(text) => text,
-            Err(_) => {
-                crate::daemon_ffi::daemon_free_request(dreq);
-                set_errmsg(errmsg, &MorlocError::Other("the request body is not UTF-8".into()));
-                return ptr::null_mut();
-            }
+    let body_str = match std::str::from_utf8(&req.body) {
+        Ok(text) => text,
+        Err(_) => {
+            crate::daemon_ffi::daemon_free_request(dreq);
+            set_errmsg(errmsg, &MorlocError::Other("the request body is not UTF-8".into()));
+            return ptr::null_mut();
         }
-    } else {
-        ""
     };
 
     // GET /health
@@ -457,8 +369,10 @@ pub(crate) unsafe fn http_to_daemon_request(
             return ptr::null_mut();
         };
         if let Some(expr) = expr {
-            let c = std::ffi::CString::new(expr).unwrap_or_default();
-            (*dreq).expr = libc::strdup(c.as_ptr());
+            let Ok(c) = c_dup(&expr, "expression", dreq, errmsg) else {
+                return ptr::null_mut();
+            };
+            (*dreq).expr = c;
         }
         if (*dreq).expr.is_null() {
             crate::daemon_ffi::daemon_free_request(dreq);
@@ -475,8 +389,10 @@ pub(crate) unsafe fn http_to_daemon_request(
             return ptr::null_mut();
         };
         if let Some(expr) = expr {
-            let c = std::ffi::CString::new(expr).unwrap_or_default();
-            (*dreq).expr = libc::strdup(c.as_ptr());
+            let Ok(c) = c_dup(&expr, "expression", dreq, errmsg) else {
+                return ptr::null_mut();
+            };
+            (*dreq).expr = c;
         }
         if (*dreq).expr.is_null() {
             crate::daemon_ffi::daemon_free_request(dreq);
@@ -493,15 +409,19 @@ pub(crate) unsafe fn http_to_daemon_request(
             return ptr::null_mut();
         };
         if let Some(expr) = expr {
-            let c = std::ffi::CString::new(expr).unwrap_or_default();
-            (*dreq).expr = libc::strdup(c.as_ptr());
+            let Ok(c) = c_dup(&expr, "expression", dreq, errmsg) else {
+                return ptr::null_mut();
+            };
+            (*dreq).expr = c;
         }
         let Ok(name) = body_string(body_str, "name", "/bind", dreq, errmsg) else {
             return ptr::null_mut();
         };
         if let Some(name) = name {
-            let c = std::ffi::CString::new(name).unwrap_or_default();
-            (*dreq).name = libc::strdup(c.as_ptr());
+            let Ok(c) = c_dup(&name, "name", dreq, errmsg) else {
+                return ptr::null_mut();
+            };
+            (*dreq).name = c;
         }
         if (*dreq).expr.is_null() {
             crate::daemon_ffi::daemon_free_request(dreq);
@@ -526,8 +446,10 @@ pub(crate) unsafe fn http_to_daemon_request(
             return ptr::null_mut();
         }
         (*dreq).method = DaemonMethod::Unbind;
-        let c = std::ffi::CString::new(name).unwrap_or_default();
-        (*dreq).name = libc::strdup(c.as_ptr());
+        let Ok(c) = c_dup(&name, "name", dreq, errmsg) else {
+            return ptr::null_mut();
+        };
+        (*dreq).name = c;
         return dreq;
     }
 
@@ -540,17 +462,19 @@ pub(crate) unsafe fn http_to_daemon_request(
             return ptr::null_mut();
         }
         (*dreq).method = DaemonMethod::Call;
-        let c = std::ffi::CString::new(cmd_name).unwrap_or_default();
-        (*dreq).command = libc::strdup(c.as_ptr());
+        let Ok(c) = c_dup(cmd_name, "command name", dreq, errmsg) else {
+            return ptr::null_mut();
+        };
+        (*dreq).command = c;
         // `?render=<flag>` selects an output projection; resolved in
         // daemon_dispatch against the command's terminals.
-        let query = std::ffi::CStr::from_ptr((*req).query.as_ptr())
-            .to_str()
-            .unwrap_or("");
+        let query = req.query.as_str();
         match morloc_runtime_types::http_query::render_selection(query) {
             Ok(Some(render)) => {
-                let rc = std::ffi::CString::new(render).unwrap_or_default();
-                (*dreq).render = libc::strdup(rc.as_ptr());
+                let Ok(c) = c_dup(render, "render flag", dreq, errmsg) else {
+                    return ptr::null_mut();
+                };
+                (*dreq).render = c;
             }
             Ok(None) => (*dreq).render_default = true,
             Err(msg) => {
@@ -560,15 +484,13 @@ pub(crate) unsafe fn http_to_daemon_request(
             }
         }
 
-        let body = if (*req).body.is_null() {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len)
-        };
+        let body = &req.body[..];
         match morloc_runtime_types::call_body::args_of(body) {
             Ok(Some(args)) => {
-                let c = std::ffi::CString::new(args).unwrap_or_default();
-                (*dreq).args_json = libc::strdup(c.as_ptr());
+                let Ok(c) = c_dup(args, "arguments", dreq, errmsg) else {
+                    return ptr::null_mut();
+                };
+                (*dreq).args_json = c;
             }
             Ok(None) => {}
             Err(e) => {
@@ -617,33 +539,20 @@ mod body_tests {
             unsafe { libc::close(writer) };
         });
         let start = std::time::Instant::now();
-        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let req = unsafe { super::parse_request_within(reader, std::time::Duration::from_millis(300), &mut err, &mut false) };
-        assert!(req.is_null());
-        assert!(!err.is_null());
-        let msg = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        assert!(msg.contains("too long"), "{msg}");
+        let Err(refusal) = super::parse_request_within(reader, std::time::Duration::from_millis(300)) else {
+            panic!("a trickling head was accepted");
+        };
+        assert!(refusal.why.contains("too long"), "{}", refusal.why);
         assert!(start.elapsed() < std::time::Duration::from_millis(800));
-        unsafe {
-            libc::free(err as *mut libc::c_void);
-            libc::close(reader);
-        }
+        unsafe { libc::close(reader) };
         dripper.join().unwrap();
     }
 
     fn parse(fd: i32) -> (String, String) {
-        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let req = unsafe { super::parse_request_within(fd, std::time::Duration::from_secs(5), &mut err, &mut false) };
-        assert!(!req.is_null(), "{}", unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy());
-        let r = unsafe { &*req };
-        let path = unsafe { std::ffi::CStr::from_ptr(r.path.as_ptr()) }.to_string_lossy().into_owned();
-        let body = if r.body.is_null() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(r.body as *const u8, r.body_len) }).into_owned()
-        };
-        unsafe { super::http_free_request(req) };
-        (path, body)
+        match super::parse_request_within(fd, std::time::Duration::from_secs(5)) {
+            Ok(r) => (r.path, String::from_utf8_lossy(&r.body).into_owned()),
+            Err(e) => panic!("{}", e.why),
+        }
     }
 
     fn pair() -> (i32, i32) {
@@ -676,13 +585,18 @@ mod body_tests {
     }
 
     #[test]
-    fn a_content_length_is_digits_and_its_copies_agree() {
-        let head = |h: &str| format!("POST /call/f HTTP/1.1\r\n{}\r\n", h);
-        assert_eq!(super::content_length_of(&head("Content-Length: 5")), Ok(5));
-        assert_eq!(super::content_length_of(&head("Host: x")), Ok(0));
-        assert!(super::content_length_of(&head("Content-Length: +5")).is_err());
-        assert!(super::content_length_of(&head("Content-Length: 2\r\nContent-Length: 40")).is_err());
-        assert_eq!(super::content_length_of(&head("Content-Length: 2\r\ncontent-length: 2")), Ok(2));
+    fn a_long_path_and_query_are_kept_whole() {
+        let name = "c".repeat(300);
+        let render = "r".repeat(300);
+        let (reader, writer) = pair();
+        send_all(writer, format!("POST /call/{name}?render={render} HTTP/1.1\r\n\r\n").as_bytes());
+        let r = super::parse_request_within(reader, std::time::Duration::from_secs(5)).ok().unwrap();
+        assert_eq!(r.path, format!("/call/{name}"));
+        assert_eq!(r.query, format!("render={render}"));
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
     }
 
     #[test]
@@ -720,31 +634,23 @@ mod body_tests {
         }
     }
 
-    #[test]
-    fn a_header_is_found_by_name_in_any_case() {
-        let head = "POST /call/f HTTP/1.1\r\nHost: x\r\nauthorization: Bearer t\r\n";
-        assert_eq!(super::header_value(head, "Authorization").map(str::trim), Some("Bearer t"));
-        assert_eq!(super::header_value(head, "content-length"), None);
-        assert_eq!(super::header_value("GET /authorization: x HTTP/1.1\r\n", "authorization"), None);
-    }
-
     use super::*;
     use std::ffi::CStr;
 
     fn to_daemon(method: HttpMethod, path: &str, body: &str) -> (*mut DaemonRequest, Option<String>) {
-        let mut req: HttpRequest = unsafe { std::mem::zeroed() };
-        req.method = method;
-        for (i, b) in path.bytes().enumerate() {
-            req.path[i] = b as c_char;
-        }
-        let mut body_bytes = body.as_bytes().to_vec();
-        req.body = body_bytes.as_mut_ptr() as *mut c_char;
-        req.body_len = body_bytes.len();
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        let req = HttpRequest {
+            method,
+            path: path.to_string(),
+            body: body.as_bytes().to_vec(),
+            query: query.to_string(),
+            authorized: false,
+        };
         let mut err: *mut c_char = ptr::null_mut();
-        let dreq = unsafe { http_to_daemon_request(&mut req, &mut err, ptr::null_mut()) };
+        let dreq = unsafe { http_to_daemon_request(&req, &mut err, ptr::null_mut()) };
         let msg = (!err.is_null()).then(|| {
             let m = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-            unsafe { libc::free(err as *mut c_void) };
+            unsafe { libc::free(err as *mut std::ffi::c_void) };
             m
         });
         (dreq, msg)
@@ -754,6 +660,42 @@ mod body_tests {
         let s = unsafe { CStr::from_ptr((*dreq).args_json) }.to_string_lossy().into_owned();
         unsafe { crate::daemon_ffi::daemon_free_request(dreq) };
         s
+    }
+
+    #[test]
+    fn a_body_field_holding_nul_is_refused() {
+        let (d, e) = to_daemon(HttpMethod::Post, "/eval", "{\"expr\":\"f\\u0000x\"}");
+        assert!(d.is_null());
+        assert!(e.is_some_and(|m| m.contains("NUL")));
+    }
+
+    #[test]
+    fn a_long_name_routes_whole() {
+        let (cmd, render, name) = ("c".repeat(300), "r".repeat(300), "b".repeat(300));
+        let (d, e) = to_daemon(HttpMethod::Post, &format!("/call/{cmd}?render={render}"), "[]");
+        assert_eq!(e, None);
+        unsafe {
+            assert_eq!(CStr::from_ptr((*d).command).to_str().unwrap(), cmd);
+            assert_eq!(CStr::from_ptr((*d).render).to_str().unwrap(), render);
+            crate::daemon_ffi::daemon_free_request(d);
+        }
+        let (d, e) = to_daemon(HttpMethod::Delete, &format!("/bindings/{name}"), "");
+        assert_eq!(e, None);
+        unsafe {
+            assert_eq!(CStr::from_ptr((*d).name).to_str().unwrap(), name);
+            crate::daemon_ffi::daemon_free_request(d);
+        }
+    }
+
+    #[test]
+    fn a_daemon_reads_a_request_whose_header_is_not_utf8() {
+        let (reader, writer) = pair();
+        send_all(writer, b"GET /health HTTP/1.1\r\nUser-Agent: \xe9t\xe9\r\n\r\n");
+        assert_eq!(parse(reader), ("/health".to_string(), String::new()));
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
     }
 
     // The args of a /call body reach the daemon as the text they arrived

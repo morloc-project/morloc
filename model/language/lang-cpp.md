@@ -11,7 +11,7 @@ division), OWN (how generated C++ borrows, copies and moves).
 ### CPP-1 A sourced C++ function takes each argument by value or by `const T&`
 Intent: ruled 2026-10-18
 Tests: spec-cpp-1-1
-Code: conforms 2026-10-19
+Code: conforms 2026-11-23
 
 A parameter of a sourced C++ function is `T`, `const T&`, or a template
 parameter that deduces one of these. A parameter of type `T&` is rejected at
@@ -20,6 +20,16 @@ changes its own copy. C++ code that calls a function morloc passed to it
 calls it the same way, never with a non-const reference. This is EVAL-7's
 rule that sourced code never changes an argument, and it holds until morloc
 has a way to say where a value may be changed.
+
+Amended 2026-11-23 (ruled 2026-11-24): a `const T&` parameter may be overloaded with
+a `T&&` one. Both compute the same result (EVAL-7); the `T&&` one may take
+its argument's contents. A `T` parameter next to either is ambiguous in C++.
+Morloc passes an rvalue only at a last read of a value it owns (OWN-2,
+OWN-3, OWN-7), so the `T&&` overload runs exactly where the value is not
+needed again. Sourced code that calls a function value with an rvalue, or
+through `mlc::give(f, std::move(x)...)`, gives the value away and does not
+read it again; `mlc::give` takes rvalues only, and `MLC_GIVE` is defined
+wherever it is available, so a header can still build alone.
 
 ### CPP-2 A sourced C++ function returns a value that owns its data
 Intent: ruled 2026-10-18
@@ -66,16 +76,18 @@ a `const T&`, is safe while other threads do the same with the same object
 copying it.
 
 ### CPP-6 A C++ `data` value and a recursive record field are shared and never changed
-Intent: ruled 2026-10-19
-Tests: spec-cpp-6-1
-Code: conforms 2026-10-19
+Intent: ruled 2026-11-15
+Tests: spec-cpp-6-1, spec-cpp-6-2, spec-cpp-6-3
+Code: conforms 2026-11-21
 
 A `data` type with payloads is a struct holding
 `std::variant<std::shared_ptr<const T_C>...> v`, one alternative per
 constructor in declaration order, where `T_C` is the struct for constructor
 `C`. Morloc generates this form, and a mapped `data` type is written the
 same way. A `?R` field that leads back to its own record is a
-`std::shared_ptr<const R>`, with `nullptr` meaning absent. A copy shares the
+`std::shared_ptr<const R>`, with `nullptr` meaning absent; a value read
+from such a field is the `std::optional<R>` every other `?R` value is, so
+the pointer is storage only. A copy shares the
 arm, and nothing changes an arm after it is built: to change a value, copy
 the arm, change the copy, and wrap it in a new `std::make_shared<T_C>`,
 which converts to the const holder. An arm is never itself a const object:
@@ -86,7 +98,76 @@ store it into a const field. A raw pointer, a `std::unique_ptr`, or a
 `std::shared_ptr` to a non-const type in these positions is rejected at
 build (EVAL-7, CPP-3).
 
-Morloc moves a field out of an arm only when it built the arm itself and no
-other holder shares it, and copies it otherwise (OWN-5). An arm built with
+Morloc moves a field out of an arm it owns when no other holder shares the
+arm, deciding at run time from the arm's count of owners, and copies the
+field otherwise (OWN-5, OWN-7); whoever built the arm. A `std::weak_ptr`, a
+raw pointer or a reference is not an owner and is not counted, so the
+decision rests on EVAL-7: sourced code keeps none of them to a value past
+the call that gave or returned it (ruled 2026-11-21). When nothing in the
+frame names the value after the last field taken from its arm, morloc
+releases the arm at once, so a `std::weak_ptr` kept against EVAL-7 finds it
+expired rather than reading a field that was moved out. A `std::weak_ptr`
+locked on another thread while morloc takes a field has no defined result:
+C++ cannot test that a `std::shared_ptr` has one owner and take it in one
+step, as Rust's `Arc::try_unwrap` does, so the count can rise between the
+test and the move. An arm built with
 `mlc::make_arm` (from `mlc_rec.hpp`) is released in bounded stack (STATE-8);
 one built with `std::make_shared` is released recursively.
+
+A record morloc generates that refers to itself, anywhere in its fields, is
+a handle to its fields instead (GEN-1, ruled 2026-11-15): `struct R {
+std::shared_ptr<const R_fields> p; ... }`, read with `r->k`, beside
+`struct R_fields` holding the fields. Its `?R` is then the ordinary
+`std::optional<R>`, so a field read borrows the field and a copy of `R`
+shares the node. A handle is null only after it is moved from; its default
+constructor holds the one default node of its type. A source builds one as
+`R{{...}}` or `R(R_fields{...})`, whose node, like those pool code builds,
+comes from `mlc::make_arm` wherever `mlc_rec.hpp` can be included.
+
+Why: reversed 2026-11-15 for generated records, whose `?R` was a pointer read as a copy.
+
+### CPP-7 A C++ function value takes a non-scalar parameter by `const A&`
+Intent: ruled 2026-11-21
+Tests: spec-cpp-7-1
+Code: conforms 2026-11-21
+
+A morloc function value in C++ is a `std::function<R(P...)>` whose
+parameter `P` is `A` when `A` is a scalar (`std::is_scalar_v<A>`: an
+integer, floating-point, `bool` or enum type) and `const A&` otherwise,
+wherever morloc spells the type, a template parameter included: a
+let, a parameter or result of a generated function, a field, and what a
+sourced function receives or returns. Applying a function value to a value
+then copies nothing, as applying a Rust function value does (HOST-8); a
+function value that keeps its argument copies it. A
+sourced function written against `std::function<R(A)>` for a non-scalar
+`A` still receives a value it can call, through a conversion, but a
+template that deduces `A` from that spelling does not match. A function value
+with a by-value form (OWN-7) held by a let is a `std::function` whose target
+is an `mlc::owning<R(P...)>`; `mlc::give` calls that form, and any other
+call lends as above (amended 2026-11-23, ruled 2026-11-24).
+
+### CPP-8 The C++ binding's user API is the one set of runtime calls sourced code may make
+Intent: ruled 2026-11-24
+Tests: spec-cpp-8-1
+Code: conforms 2026-11-24
+
+Sourced C++ normally calls nothing of morloc's: it is plain C++ over plain
+values (CPP-1, CPP-3). Where low-level code can do better with the
+runtime's help, the help is a function in the binding's user API, the
+`User API` section of the header `cppmorloc_api.hpp`, which every C++ pool
+includes before the sourced headers. Each function there is optional:
+code that does not call it builds and computes the same result, only
+slower. Each is listed here with its contract, and each has a feature
+macro, so a header that uses one can still build on its own. Anything
+else in the binding, that header's other names included, is used by
+generated code and is not a contract.
+
+- `mlc::give(f, std::move(x)...)` (`MLC_GIVE`) calls the function value `f`,
+  handing it ownership of its arguments, which the caller does not read
+  again. Where `f` has a by-value form (OWN-7) the arguments move into it;
+  otherwise `f` is called as usual and lends them (CPP-1, CPP-7).
+
+The other bindings follow the same rule: a user-facing call lives in the
+binding module that every pool of that language already loads, in a
+section marked as its user API, and is listed in that language's spec
+file.

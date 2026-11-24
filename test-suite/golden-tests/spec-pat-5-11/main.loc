@@ -1,7 +1,7 @@
 -- A bracket on a receiver that is not a list on the wire reaches it only
--- through its instance, which runs in a pool (PAT-5). The nexus evaluator
--- brackets lists natively and must refuse anything else rather than read
--- the receiver as a list.
+-- through its instance, which runs in a pool (PAT-5). This instance has no
+-- implementation in any pool. The nexus evaluator brackets lists natively and
+-- must refuse anything else rather than read the receiver as a list.
 
 module main (first)
 
@@ -9,8 +9,7 @@ import root-py
 
 newtype Two a = (a, a)
 
-instance Indexable Two where
-  source Py from "two.py" ("at" as __access_index__)
+instance Indexable Two
 
 first :: Two Int -> Int
 first p = .[0] p

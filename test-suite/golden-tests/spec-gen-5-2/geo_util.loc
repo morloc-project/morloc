@@ -1,0 +1,6 @@
+module geo_util (fb)
+import root-cpp (Int, idcpp)
+record Pt where
+  y :: Int
+fb :: Pt -> Pt
+fb p = idcpp p

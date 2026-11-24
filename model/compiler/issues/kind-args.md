@@ -13,33 +13,20 @@ erased; no item says how the lowered IR marks a ground row's kind.
 - [read] Walks that still read a ground row as a record (harmless today,
   since a row holds only primitive, Str and optional columns): EffectBoundary
   `hostRecords` collects `@REC`; the Nexus glossary emits an `@REC` entry
-  its filter then drops; C++ `collectCppTypes` writes no static_assert for
-  any typed table; Grammars/Common.hs `collectRecords` walks a row's
+  its filter then drops (Nexus.hs:2052); Grammars/Common.hs `collectRecords` walks a row's
   fields (it collects only generated `"struct"` records); Serial.hs
   `runtimeTs` and its tuple-arity check count a ground row as a runtime
-  type. The collectors that emit code decide through
-  CodeGenerator/ValueArgs.hs; these do not.
+  type. The collectors that emit code read the `RowK` tag Infer.hs:801
+  `retagArg` sets from CodeGenerator/ValueArgs.hs; these walk the `Type`
+  form, where `argOf` (Namespace/Type.hs:1089) still makes a ground row a
+  record.
 - [read] Cpp.hs showDefType counts a ground row as a `$N` type argument:
   it renders a `Type` whose head is the concrete name, so it cannot read
   the declared kinds as the other `$N` sites do. Left for the native-form
   macro refactor.
-- [read] C++ `makeSerial` (Cpp.hs, `isTypeParam`/`templateTerms`) counts a
-  Rec-, List- or Set-kinded parameter as a template slot (`T<r>`) but
-  declares no `template <class>` for it. Left for the macro refactor.
-  [read, 2026-10-29] `isTypeParam (Right t) = True` also counts a Nat or
-  Str binding (`record Cpp => Foo 3`) as a `$N` slot, which showDefType
-  then renders as empty text.
-- [read, 2026-10-29] Kind arguments outside a filtered AppF/NamF list (a
-  FunF argument, an OptionalF payload, a list element) render as empty
-  text: Cpp.hs and Rust.hs cppTypeOf/rustTypeOf NatLitF/NatVoidF/StrLitF/
-  StrVoidF arms, Grammars/Common.hs, and Cpp.hs showDefType including the
-  unreduced NatAddT/NatMulT/NatSubT/NatDivT/StrConcatT.
-- [read, 2026-10-29] Cpp.hs `concrete` sends NatVoidF and StrVoidF to
-  `_ -> False`, so a type with an erased phantom slot (`Vector n a`) is
-  left out of the CPP-3/4/6 build-time checks.
-- [read, 2026-10-29] Namespace/Type.hs unresolvedType2type maps every `OpU`
-  to `NatVoidT`, so a wrong-arity `OpU` (arity is enforced only by the mk*
-  smart constructors) erases silently.
+- [read, 2026-10-29] Namespace/Type.hs `argOf` maps an `OpU` of the wrong
+  arity (arity is enforced only by the mk* smart constructors) to the erased
+  placeholder of its kind, so it erases silently.
 - [read, 2026-10-29] Typecheck/Internal.hs typeUToNatExpr treats any VarU
   or ExistU as a Nat variable, so a deferred pair of two Type-kinded
   variables is classified Nat; isNatExpr misses OpSize, ExistU and

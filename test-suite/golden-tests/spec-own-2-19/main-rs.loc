@@ -1,0 +1,54 @@
+-- Spec OWN-2: the parts of one expression run in an order the compiler
+-- chooses, and a part that keeps a value another part only reads runs
+-- after it, so the keeping read moves the value. Each export prints its
+-- value and the payloads copied in the run (Rust).
+--
+--   readFirst   the read is written first, the keep second: no copy
+--   keepFirst   the keep is written first, the read second: no copy
+--   twoKeeps    two parts keep the value: one copy
+--   viaAlias    a part reads a local that refers into the value: no copy
+module main (readFirst, keepFirst, twoKeeps, viaAlias)
+
+import root
+import root-rust
+
+newtype Pay = Int
+type Rust => Pay = "Pay"
+
+instance Packable Int Pay where
+  source Rust from "pay.rs" ("pay_pack" as pack, "pay_unpack" as unpack)
+
+source Rust from "pay.rs" ("mkp", "keyp", "census")
+
+mkp :: Int -> Pay
+keyp :: Pay -> Int
+census :: Int -> (Int, Int)
+
+record H where
+  q :: Pay
+  z :: Int
+
+record R where
+  p :: Pay
+  k :: Int
+
+holdP :: Pay -> H
+holdP v = {q = v, z = 1}
+
+holdR :: R -> [R]
+holdR r = [r]
+
+mkR :: Int -> R
+mkR n = {p = mkp n, k = 1}
+
+readFirst :: Int -> (Int, Int)
+readFirst n = census (let c = mkp n in keyp c + .z (holdP c))
+
+keepFirst :: Int -> (Int, Int)
+keepFirst n = census (let c = mkp n in .z (holdP c) + keyp c)
+
+twoKeeps :: Int -> (Int, Int)
+twoKeeps n = census (let c = mkp n in .z (holdP c) + .z (holdP c) + keyp c)
+
+viaAlias :: Int -> (Int, Int)
+viaAlias n = census (let r = mkR n in let y = .p r in keyp y + length (holdR r))

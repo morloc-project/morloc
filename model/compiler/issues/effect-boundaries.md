@@ -17,7 +17,7 @@ fails loudly naming itself.
   against compiler/README.md ("stops with an internal error naming the
   item"). `grep 'TC-\|EBND-' library/` finds nothing; EBND-1/2 throw
   unnamed compiler bugs; only EMIT-3's missing return names its item, via
-  Haskell `error` (Imperative.hs:3112). EBND-3 states no checker and none
+  Haskell `error` (Imperative.hs:3349). EBND-3 states no checker and none
   exists (candidate: count `PolyEval` per path after insertion and after
   `lowerSuspensions`). Either the README rule becomes "items that have a
   checker", or each item gets one.
@@ -31,3 +31,14 @@ fails loudly naming itself.
   forceReturnPosition (EffectBoundary.hs goLoop), which descends into
   lambda-form manifolds; forceValuePosition does not. A tail loop whose base
   returns a closure with an effectful body may have that body forced.
+- **Storing a sourced host function in a host-convention record field
+  wraps it twice.** [reproduced, 2026-11-15] Performance, no item. With
+  `record Ops where step :: Int -> <IO> Int` and `{step = bump, ...}`, where
+  `bump` is a sourced C++ function (already in host convention), the field
+  holds an adapter that calls morloc's view of `bump`, which builds a
+  suspension (a `std::bind` allocation and a frame push) and then runs it:
+  16.8 ns per call from a C++ source against 1.7 ns for `bump` in a
+  `std::function` (10M calls, 3 runs). The adapter could store a sourced
+  function whose host form matches the field as it is. The same holds for
+  user-written structs. Repro: a C++ source taking `const Ops&` and timing
+  `o.step(acc + i)` over 10M iterations with `std::chrono::steady_clock`.

@@ -97,6 +97,10 @@ pub struct Manifest {
     /// --unsafe-skip-null-check`. Default false: checks enabled.
     #[serde(default)]
     pub unsafe_skip_null_check: bool,
+    /// When true, the pools do not check that a Str they send is valid
+    /// UTF-8 (FMT-10). Set via `morloc make --unsafe-skip-utf8-check`.
+    #[serde(default)]
+    pub unsafe_skip_utf8_check: bool,
     /// Inline-vs-routed threshold in bytes. None = use libmorloc's
     /// compile-time default (64 KiB). 0 = never inline. Set via
     /// `morloc make --inline-size`. The nexus forwards this value to
@@ -177,6 +181,10 @@ pub struct Build {
     /// produces an actionable "rebuild with the current compiler"
     /// error.
     pub morloc_version: String,
+    /// The prefix of the environment a managed build ran in (PKG-17); its
+    /// `bin` comes first on the pools' PATH. None outside an environment.
+    #[serde(default)]
+    pub env_prefix: Option<String>,
 }
 
 /// Run-scope log templates resolved at compile time. Each subfield is
@@ -1392,6 +1400,17 @@ mod tests {
             }}"#,
             v, commands_json
         )
+    }
+
+    // PKG-17
+    #[test]
+    fn a_build_records_its_environment_prefix_or_none() {
+        let without = wrap("[]");
+        assert_eq!(parse_manifest(&without).unwrap().build.env_prefix, None);
+        let with = without.replace(r#""time": 0,"#, r#""time": 0, "env_prefix": "/env/p","#);
+        assert_eq!(parse_manifest(&with).unwrap().build.env_prefix.as_deref(), Some("/env/p"));
+        let null = without.replace(r#""time": 0,"#, r#""time": 0, "env_prefix": null,"#);
+        assert_eq!(parse_manifest(&null).unwrap().build.env_prefix, None);
     }
 
     #[test]

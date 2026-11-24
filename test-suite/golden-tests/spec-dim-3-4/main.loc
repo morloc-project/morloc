@@ -1,0 +1,22 @@
+-- Spec DIM-3: a command's arguments are read flat (APP-1), so a length
+-- shared with an argument written in a parenthesized result group, or
+-- behind an alias of a function type, is checked at run time like any other.
+module main (dotA, dotP)
+
+import root-py
+import vector-py
+
+source Py from "src.py" ("dot" as dot)
+
+dot :: Vector n Int -> Vector n Int -> Int
+
+--' A dot product of a fixed first vector
+type Dot n = Vector n Int -> Int
+
+--' Dot product, its second argument behind an alias
+dotA :: Vector n Int -> Dot n
+dotA a b = dot a b
+
+--' Dot product, its second argument in a group
+dotP :: Vector n Int -> (Vector n Int -> Int)
+dotP a b = dot a b

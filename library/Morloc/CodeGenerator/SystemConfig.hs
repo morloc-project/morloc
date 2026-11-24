@@ -24,6 +24,10 @@ module Morloc.CodeGenerator.SystemConfig
   , ToolchainHost (..)
   , toolsOutsidePrefix
   , strictToolchainError
+  , managedPrefix
+  , prefixFlags
+  , prefixRustLinkArgs
+  , rustPoolRustflags
   ) where
 
 import qualified System.Info as SI
@@ -33,15 +37,16 @@ import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.System as MS
-import Morloc.Module (OverwriteProtocol (..))
+import Morloc.Module (OverwriteProtocol (..), initPlaneLayout)
 
 import qualified Data.List as DL
+import qualified Data.Text as T
 import Data.Char (isSpace, toUpper)
 import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
+import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
 import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
@@ -122,6 +127,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   ensureDirectory verbose "morloc tmp directory" tmpDir
   ensureDirectory verbose "morloc opt directory" optDir
   ensureDirectory verbose "morloc module directory" srcLibrary
+  -- PLANE-1: a plane of an older layout stops init with the command to remove it
+  initPlaneLayout config
 
   sayInfo verbose $ "Slurm support ... " <> show slurmSupport
 
@@ -182,14 +189,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
     then provisionRustRuntime verbose config homeDir soPath nexusBinPath
     else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
 
-  -- When force is set, clean stale init-owned artifacts. This runs only once
-  -- the runtime has built, so a failed build leaves the installed one usable;
-  -- the runtime and morloc.h are already in place and are kept. Package-installed
-  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
-  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
-  -- here or every `morloc init -f` would force a reinstall of every module
-  -- that uses the `expose:` field. opt/ has no expose target, so it can
-  -- still be fully wiped.
   when (force == ForceOverwrite) $ do
     sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
     forM_ (filter (/= takeFileName soPath) initOwnedLibPaths) $ \p -> removePathIfExists (libDir </> p)
@@ -286,9 +285,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   forM_ DF.langSetups $ \ls -> do
     let tools = DF.lsRequiredTools ls
         marker = langMarkerDir </> DF.lsName ls
-    avail <- mapM (toolAvailableInEnv mStrictPrefix) tools
+    unavailable <- filterM (fmap not . toolAvailableInEnv mStrictPrefix) tools
     alreadyBuilt <- doesFileExist marker
-    let unavailable = [t | (t, False) <- zip tools avail]
     if not (null unavailable)
       then
         let reason = case mStrictPrefix of
@@ -425,6 +423,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
         P.Darwin -> Nothing
         _ -> hasStrip
   stageInstall verbose nexusStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
+  -- LIFE-6: the nexus and libmorloc come from two cargo builds, so a change
+  -- to the runtime source between them leaves a nexus that refuses every run.
+  -- The nexus's own check, run here, fails init instead.
+  (idCode, _, idErr) <- readProcessWithExitCode nexusBinPath ["--build-id"] ""
+  case idCode of
+    ExitSuccess -> return ()
+    ExitFailure _ -> ioError . userError $
+      "the installed morloc-nexus and libmorloc were built from different runtime sources"
+        <> " (the Rust source changed during init); run `morloc init -f` again: " <> idErr
 
   -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
   -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)
@@ -458,15 +465,27 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
         sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
         persistRustSource verbose srcAbs persistedRustDir destExists
     sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-    run verbose "cargo" $
-      [ "build", "--release"
+    -- The warm-up builds with the pool profile so that pool builds reuse
+    -- these artifacts: its rustc flags (PANIC-9) and, on macOS, its packed
+    -- debug information (PANIC-12).
+    run verbose "env" $
+      [ "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
+      , "build", "--release"
       , "--manifest-path", persistedRustDir </> "Cargo.toml"
       , "-p", "rustmorloc"
       , "--target-dir", poolTargetDir
+      , "--config", "profile.release.rustflags=" <> show rustPoolRustflags
       ]
-      -- The pool profile packs debug information on macOS (PANIC-12); the
-      -- warm-up must match it for pool builds to reuse these artifacts.
       ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
+
+-- | PANIC-9: the rustc flags a Rust pool crate and its dependencies build
+-- with. The panic hook tells a user panic from a runtime one by the debug
+-- information of the code that raised it, and code merged with an identical
+-- function, by LLVM or by the macOS linker, carries the other function's.
+-- The rustc flag is unstable; RUSTC_BOOTSTRAP enables it on a stable
+-- toolchain.
+rustPoolRustflags :: [String]
+rustPoolRustflags = "-Zmerge-functions=disabled" : ["-Clink-arg=-Wl,-no_deduplicate" | SI.os == "darwin"]
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath
@@ -614,7 +633,9 @@ initOwnedIncludePaths :: [FilePath]
 initOwnedIncludePaths =
   [ "morloc.h"
   , "cppmorloc.hpp"
+  , "cppmorloc_api.hpp"
   , "mlc_arrow.hpp"
+  , "mlc_rec.hpp"
   , "morloc_pch.hpp"
   , "morloc_pch.hpp.gch"
   , "nanoarrow"
@@ -813,6 +834,57 @@ strictMode = do
           return . Left $
             "MORLOC_STRICT_CONDA is set but CONDA_PREFIX is not: strict mode "
               <> "requires an active conda/pixi environment."
+
+-- | The prefix P of a managed build (PKG-13): Nothing when @MORLOC_ENV@ is
+-- unset or empty, else the canonical @CONDA_PREFIX@. A managed build whose
+-- prefix is unset, not a directory, or holds a libmorloc (which a run path into
+-- it would load in place of the one the nexus chooses) is an error.
+managedPrefix :: IO (Either String (Maybe FilePath))
+managedPrefix = do
+  mEnv <- lookupEnv "MORLOC_ENV"
+  case mEnv of
+    Just e | not (all isSpace e) -> do
+      mPrefix <- lookupEnv "CONDA_PREFIX"
+      case mPrefix of
+        Just prefix | not (all isSpace prefix) -> do
+          isDir <- doesDirectoryExist prefix
+          if not isDir
+            then return . Left $ "MORLOC_ENV is set but CONDA_PREFIX (" <> prefix <> ") is not a directory, so the environment's packages cannot be found"
+            else do
+              p <- canonicalizePath prefix
+              let lib = p <> "/lib"
+              hasLib <- doesDirectoryExist lib
+              own <- if hasLib then filter ("libmorloc" `DL.isPrefixOf`) <$> listDirectory lib else return []
+              return $ case own of
+                _ | ':' `elem` p -> Left ("the environment prefix " <> p <> " holds ':', so its bin directory cannot be put on PATH")
+                [] -> Right (Just p)
+                f : _ -> Left ("the environment prefix " <> p <> " holds a libmorloc (" <> lib <> "/" <> f <> "), which its run path would load in place of morloc's own")
+        _ -> return . Left $ "MORLOC_ENV is set but CONDA_PREFIX is unset or empty, so the environment's packages cannot be found"
+    _ -> return (Right Nothing)
+
+-- | The flags a native C or C++ build in prefix P adds (PKG-13): P's headers
+-- after morloc's, P's libraries, and P/lib as a run path. On Linux the run
+-- path is DT_RPATH, which a caller's LD_LIBRARY_PATH does not override.
+prefixFlags :: P.Platform -> FilePath -> [T.Text]
+prefixFlags platform p =
+  [ "-isystem", q (p <> "/include")
+  , "-L", q (p <> "/lib")
+  , "-Xlinker", "-rpath", "-Xlinker", q (p <> "/lib")
+  ]
+    ++ case platform of
+      P.Linux -> ["-Xlinker", "--disable-new-dtags"]
+      P.Darwin -> []
+  where
+    q = T.pack . MS.shellQuote
+
+-- | The linker arguments a Rust pool built in prefix P adds (PKG-13), one
+-- argument each, unquoted: cargo passes each to the linker as is.
+prefixRustLinkArgs :: P.Platform -> FilePath -> [T.Text]
+prefixRustLinkArgs platform p =
+  ["-Xlinker", "-rpath", "-Xlinker", T.pack (p <> "/lib")]
+    ++ case platform of
+      P.Linux -> ["-Xlinker", "--disable-new-dtags"]
+      P.Darwin -> []
 
 -- | Is an on/off environment variable on? Unset, empty, @0@, @false@, @no@ and
 -- @off@, in any case, are off.

@@ -1,5 +1,5 @@
 "list int int int"
 "list int int int"
-"list int int int"
-"list int int int"
+"list Dir Dir Dir"
+"list Dir Dir Dir"
 [1,2,3]

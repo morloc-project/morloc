@@ -34,7 +34,8 @@ differ in preference unless neither language is in the order, and two
 sources of one type still tied after rule 4 are an error at build naming
 both. Either
 way the program removes one from scope by importing fewer modules. Definitions
-in morloc that tie are interchangeable (REAL-1), and a fixed one is used.
+in morloc that tie may substitute for each other (REAL-1), and a fixed one
+is used.
 Starting a pool costs nothing.
 
 ### COST-2 A call costs its language's coefficient times its self time
@@ -115,8 +116,8 @@ Replaced by COST-16: no per-language or per-pair costs are stated.
 
 ### COST-15 Only placements that run are compared
 Intent: proposed
-Tests: spec-cost-15-1, spec-cost-15-2
-Code: deviates (../compiler/issues/realization.md)
+Tests: spec-cost-15-1, spec-cost-15-2, spec-cost-15-3, spec-cost-15-4, spec-cost-15-5
+Code: deviates (../compiler/issues/realization.md: conditions 1 and 5)
 
 Whether a program runs never depends on a comparison. Before COST-1
 compares anything, a node's candidate languages are limited to those where:

@@ -1,0 +1,83 @@
+-- IFile bracket accessors emitted inside C++, Python and R pools: each
+-- function's do-block calls a function sourced in that language, so the
+-- walk is pool code rather than nexus evaluation. Covers .[i] with a
+-- literal and a variable index, and .[i].field on a list of records; every
+-- walk bound goes through IndexLike.__to_index__ (the Rust pool case is in
+-- rust-ifile-walk).
+module main (idxCpp, varCpp, fldCpp, idxPy, varPy, fldPy, idxR, varR, fldR)
+
+import root-cpp
+import root-py
+import root-r
+
+record Point where
+  x :: Int
+  y :: Int
+record Cpp => Point = "Point"
+
+source Cpp from "impl.hpp" ("plus" as plusC)
+source Py from "impl.py" ("plus" as plusP)
+source R from "impl.R" ("plus" as plusR)
+plusC :: Int -> Int -> Int
+plusP :: Int -> Int -> Int
+plusR :: Int -> Int -> Int
+
+mkPoint :: Int -> Int -> Point
+mkPoint a b = {x = a, y = b}
+
+idxCpp :: Str -> <IO> Int
+idxCpp path = do
+  @save 0 path [10, 20, 30]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  plusC 0 (.[1] f)
+
+varCpp :: Str -> <IO> Int
+varCpp path = do
+  @save 0 path [10, 20, 30, 40, 50]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  let i = plusC 1 2
+  plusC 0 (.[i] f)
+
+fldCpp :: Str -> <IO> Int
+fldCpp path = do
+  @save 0 path [mkPoint 1 2, mkPoint 3 4]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Point]))
+  plusC 0 (.[1].y f)
+
+idxPy :: Str -> <IO> Int
+idxPy path = do
+  @save 0 path [10, 20, 30]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  plusP 0 (.[1] f)
+
+varPy :: Str -> <IO> Int
+varPy path = do
+  @save 0 path [10, 20, 30, 40, 50]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  let i = plusP 1 2
+  plusP 0 (.[i] f)
+
+fldPy :: Str -> <IO> Int
+fldPy path = do
+  @save 0 path [mkPoint 1 2, mkPoint 3 4]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Point]))
+  plusP 0 (.[1].y f)
+
+idxR :: Str -> <IO> Int
+idxR path = do
+  @save 0 path [10, 20, 30]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  plusR 0 (.[1] f)
+
+varR :: Str -> <IO> Int
+varR path = do
+  @save 0 path [10, 20, 30, 40, 50]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  let i = plusR 1 2
+  plusR 0 (.[i] f)
+
+fldR :: Str -> <IO> Int
+fldR path = do
+  @save 0 path [mkPoint 1 2, mkPoint 3 4]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Point]))
+  plusR 0 (.[1].y f)

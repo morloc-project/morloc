@@ -338,12 +338,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "cfg_aliases"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
-
-[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,17 +761,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "morloc-manifest"
-version = "0.110.1"
+version = "0.112.0"
 dependencies = [
  "morloc-runtime-types",
  "serde",
@@ -786,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-nexus"
-version = "0.110.1"
+version = "0.112.0"
 dependencies = [
  "base64",
  "chrono",
@@ -795,7 +780,6 @@ dependencies = [
  "libc",
  "morloc-manifest",
  "morloc-runtime-types",
- "nix",
  "rmp",
  "serde",
  "serde_json",
@@ -805,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "morloc-runtime"
-version = "0.110.1"
+version = "0.112.0"
 dependencies = [
  "anstream",
  "arrow-array",
@@ -824,7 +808,6 @@ dependencies = [
  "libc",
  "morloc-manifest",
  "morloc-runtime-types",
- "nix",
  "parquet",
  "quote",
  "rmp",
@@ -844,22 +827,10 @@ dependencies = [
  "memchr",
  "serde",
  "serde_json",
+ "simdutf8",
  "thiserror",
  "twox-hash",
  "zstd",
-]
-
-[[package]]
-name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset",
 ]
 
 [[package]]
@@ -1157,6 +1128,12 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "snap"

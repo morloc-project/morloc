@@ -49,7 +49,7 @@ wireShapeTests = testGroup "wireShape"
       wireShape (SerialList (hinted "Vec" "std::vector<$1>") Nothing (SerialReal (hinted "Q" "units::q<double>")))
         @?= WList (WScalar (WFloat 8))
   , testCase "an optional declared list" $
-      wireShape (SerialOptional (fv "?") (SerialList (fv "List") (Just (NatLitF 3)) (SerialString (fv "Str"))))
+      wireShape (SerialOptional (fv "?") (SerialList (fv "List") (Just (NatLitK 3)) (SerialString (fv "Str"))))
         @?= WOptional (WList WStr)
   , testCase "a recursive record" $
       wireShape (tree "Tree") @?= WCompound
@@ -97,10 +97,10 @@ handWritten =
   , SerialList (hinted "Map" "std::map<$1,$2>") Nothing
       (SerialTuple (fv "Tuple2") [SerialString (fv "Str"), SerialInt (fv "Int")])
   , SerialOptional (hinted "Opt" "std::optional<$1>") (SerialReal (hinted "Q" "units::q<double>"))
-  , SerialList (fv "List") (Just (NatLitF 0)) (SerialInt8 (fv "I8"))
-  , SerialList (fv "List") (Just NatVoidF) (SerialUInt8 (fv "U8"))
+  , SerialList (fv "List") (Just (NatLitK 0)) (SerialInt8 (fv "I8"))
+  , SerialList (fv "List") (Just NatVoidK) (SerialUInt8 (fv "U8"))
   , SerialEnum (fv "Ton") [] ["Hell", "Mittelgro\223", "\26085\26412"]
-  , SerialVariant (fv "Shape") []
+  , SerialVariant (fv "Shape") [] False
       [ ("Circle", [SerialReal (fv "Real")])
       , ("Rect\937", [SerialReal (fv "Real"), SerialReal (fv "Real")])
       , ("Empty", []) ]
@@ -154,7 +154,7 @@ gen depth s0 =
     12 -> let (h, s2) = pick (length hints) s1
               (d, s3) = pick 3 s2
               (e, s4) = gen (depth - 1) s3
-              dim = [Nothing, Just (NatLitF 4), Just NatVoidF] !! d
+              dim = [Nothing, Just (NatLitK 4), Just NatVoidK] !! d
           in (SerialList (hints !! h) dim e, s4)
     13 -> let (n, s2) = pick 4 s1
               (es, s3) = gens (n + 1) s2
@@ -165,7 +165,7 @@ gen depth s0 =
     15 -> let (e, s2) = gen (depth - 1) s1 in (SerialOptional (fv "?") e, s2)
     16 -> let (n, s2) = pick 3 s1
               (es, s3) = gens n s2
-          in (SerialVariant (fv "V") [] [("A", es), ("Ctor\252", [])], s3)
+          in (SerialVariant (fv "V") [] False [("A", es), ("Ctor\252", [])], s3)
     _ -> let (h, s2) = pick (length hints) s1 in (SerialFloat64 (hints !! h), s2)
   where
     gens 0 s = ([], s)

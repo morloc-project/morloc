@@ -1,0 +1,61 @@
+-- Spec APP-1: a function given where a parameter of type `Int -> a` is
+-- expected is the same value at `a = Int -> Int`, so applying it to one
+-- number is a partial application, whether the function is sourced or
+-- defined, passed directly, chosen by a condition, or taken from a list.
+-- A source that returns a function (`mkS :: Int -> a`, HOST-2) is called
+-- with one number and its result with the next, however it is reached.
+module main (srcApply, defApply, viaIf, viaList, curriedApply, curriedPick)
+
+import root-r
+
+source R from "lib.R" ("make_adder" as addS, "make_adder1" as mkS)
+
+--' Add two numbers in the foreign language
+addS :: Int -> Int -> Int
+
+--' A function that adds a number, made in the foreign language
+mkS :: Int -> a
+
+--' Add two numbers in morloc
+addD :: Int -> Int -> Int
+addD x y = x + y
+
+apply1 :: (Int -> a) -> a
+apply1 f = f 1
+
+applyTo :: Int -> (Int -> Int) -> Int
+applyTo x g = g x
+
+pickF :: Bool -> (Int -> Int -> Int)
+pickF b
+  ? b = addS
+  : addD
+
+--' A sourced function applied to one number through a generic function
+srcApply :: Int -> Int
+srcApply x = applyTo x (apply1 addS)
+
+--' A defined function applied to one number through a generic function
+defApply :: Int -> Int
+defApply x = applyTo x (apply1 addD)
+
+--' A function chosen by a condition, applied to one number
+viaIf :: Bool -> Int -> Int
+viaIf b x = applyTo x (apply1 (pickF b))
+
+--' A function taken from a list, applied to one number
+viaList :: Int -> Int -> Int
+viaList i x = applyTo x (apply1 (.[i] [addS, addD]))
+
+pickC :: Bool -> (Int -> Int -> Int)
+pickC b
+  ? b = mkS
+  : addD
+
+--' A function made by a source, applied to one number through a generic function
+curriedApply :: Int -> Int
+curriedApply x = applyTo x (apply1 mkS)
+
+--' A source returning a function, chosen by a condition and given two numbers
+curriedPick :: Bool -> Int -> Int
+curriedPick b x = pickC b 1 x

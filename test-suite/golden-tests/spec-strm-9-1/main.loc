@@ -1,0 +1,20 @@
+-- STRM-9: a put that raises fails the @collect even when the producer
+-- swallows the error: a thread whose exception the default excepthook
+-- prints, and a forked child that catches it and exits 0.
+
+module main (inThread, inChild)
+
+import root-py
+
+source Py from "impl.py" ("produce_in_thread" as inThreadP, "produce_in_child" as inChildP)
+
+inThreadP :: ([I64] -> <IO> ()) -> <IO> ()
+inChildP :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' Gather batches, one of which a thread fails to put
+inThread :: <IO> (Collect I64)
+inThread = @collect inThreadP
+
+--' Gather batches, one of which a forked child fails to put
+inChild :: <IO> (Collect I64)
+inChild = @collect inChildP

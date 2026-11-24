@@ -37,6 +37,8 @@ struct StdioSlot {
     // `single_data` marks that the stream ends after that one packet.
     pending_prefix: Option<Vec<u8>>,
     single_data: bool,
+    // stdin: the stream reached its footer, so every later read is its end.
+    ended: bool,
     // stdout in one-shot CLI mode: every `@stdout` open in the run writes to
     // one logical stream. The packet formats write the header once, drop
     // each pool footer, and write one final footer at `finish_stdout`; these
@@ -55,7 +57,7 @@ impl StdioSlot {
     const fn new(fd: i32) -> Self {
         StdioSlot {
             fd, header_done: false, json_open: false, json_any: false,
-            pending_prefix: None, single_data: false,
+            pending_prefix: None, single_data: false, ended: false,
             bytes_out: 0, pending: Vec::new(), entries: Vec::new(),
             diag: None, schema: None,
         }
@@ -126,10 +128,10 @@ static DAEMON_MODE: std::sync::atomic::AtomicBool =
 /// `NexusConfig` at server start. Streamed `@stdout` output is
 /// re-encoded per `format` so it honours `-f` exactly like a returned
 /// value. Compression is not applied here: the pool compresses each
-/// sub-packet at the effective level (its `@write` level, or the nexus
-/// `-z` it reads from the environment), and the packet formats pass the
-/// bytes through so the footer's sub-packet index stays true. stderr is
-/// unaffected (it stays raw stream-packet framing).
+/// sub-packet at the level the nexus records for the format (SLOT-33), and
+/// the packet formats pass the bytes through so the footer's sub-packet
+/// index stays true. stderr is unaffected (it stays raw stream-packet
+/// framing).
 #[derive(Clone, Copy)]
 struct RenderCfg {
     format: OutputFormat,
@@ -154,6 +156,11 @@ pub fn set_output_format(format: OutputFormat) {
     if let Ok(mut g) = RENDER_CFG.lock() {
         g.format = format;
     }
+}
+
+/// The format streamed stdout is written in now.
+pub(crate) fn output_format() -> OutputFormat {
+    render_cfg().format
 }
 
 pub(crate) fn format_name(f: OutputFormat) -> &'static str {
@@ -424,13 +431,17 @@ fn do_adopt_stream(handle: i64) -> Resp {
 /// The custodian's sink for stdout and stderr streams (SLOT-16).
 pub(crate) unsafe extern "C" fn stdio_sink(
     handle: i64,
-    bytes: *const u8,
-    len: u64,
+    iov: *const libc::iovec,
+    iovcnt: usize,
     errmsg: *mut *mut std::ffi::c_char,
 ) -> i32 {
-    // SAFETY: SLOT-16: the custodian passes `len` readable bytes.
-    let bytes = if len == 0 { &[][..] } else { std::slice::from_raw_parts(bytes, len as usize) };
-    match do_write(handle, bytes) {
+    // SAFETY: SLOT-16: the custodian passes `iovcnt` readable parts.
+    let iov = if iovcnt == 0 { &[][..] } else { std::slice::from_raw_parts(iov, iovcnt) };
+    let parts: Vec<&[u8]> = iov
+        .iter()
+        .map(|v| if v.iov_len == 0 { &[][..] } else { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) })
+        .collect();
+    match do_write(handle, crate::stdio_bridge::Frame(&parts)) {
         Resp::Ack | Resp::Ok(..) | Resp::Eof => 0,
         Resp::PipeClosed => 2,
         Resp::Err(m) => {
@@ -576,9 +587,8 @@ fn do_next(slot_id: i64) -> Resp {
             ),
         };
         if header.is_stream() {
-            let meta_len = header.offset as usize;
-            let mut meta = vec![0u8; meta_len];
-            if meta_len > 0 && !read_exact_fd(slot.fd, &mut meta).unwrap_or(false) {
+            let mut meta = Vec::new();
+            if !morloc_runtime_types::net_limits::read_declared(&mut meta, header.offset as u64, |b| read_exact_fd(slot.fd, b)).unwrap_or(false) {
                 return Resp::Err("stdin: EOF inside stream metadata block".into());
             }
             if let Err(e) = check_incoming_schema(&meta, &expected_schema, "stdin stream") {
@@ -594,9 +604,8 @@ fn do_next(slot_id: i64) -> Resp {
             // buffer [header][metadata] and present the whole packet as one
             // batch. A pipe can't be rewound, hence the buffering.
             let meta_len = header.offset as usize;
-            let mut prefix = vec![0u8; 32 + meta_len];
-            prefix[..32].copy_from_slice(&hdr);
-            if meta_len > 0 && !read_exact_fd(slot.fd, &mut prefix[32..]).unwrap_or(false) {
+            let mut prefix = hdr.to_vec();
+            if !morloc_runtime_types::net_limits::read_declared(&mut prefix, meta_len as u64, |b| read_exact_fd(slot.fd, b)).unwrap_or(false) {
                 return Resp::Err("stdin: EOF inside data-packet metadata".into());
             }
             if let Err(e) = check_incoming_schema(&prefix[32..], &expected_schema, "stdin data packet") {
@@ -669,7 +678,7 @@ fn check_incoming_schema(meta: &[u8], expected_schema: &str, what: &str) -> Resu
 /// immediately (jsonl / json array / packet / voidstar -- constant
 /// memory) or, for the table/msgpack formats which cannot be produced
 /// chunk-by-chunk, rejected with an actionable error.
-fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
+fn do_write(slot_id: i64, frame: crate::stdio_bridge::Frame<'_>) -> Resp {
     use crate::stdio_bridge as br;
 
     // Which stdio kind? Read from the SHM registry via the runtime.
@@ -690,7 +699,7 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
     };
     let route = if stdio_kind == STDIO_KIND_STDOUT { stdout_route() } else { StdoutRoute::Direct };
     if route == StdoutRoute::Save {
-        if let Err(e) = stage_write(slot_id, bytes) {
+        if let Err(e) = stage_write(slot_id, frame) {
             return Resp::Err(format!("saving the stdout stream: {}", e));
         }
         if !crate::stage::stdout_on()
@@ -714,20 +723,23 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
                 Err(br::WriteError::Other(e)) => return Resp::Err(format!("stdio write header: {}", e)),
             }
         }
-        return write_resp(unsafe { br::write_bytes_to_fd(slot.fd, bytes) });
+        return write_resp(unsafe { br::write_frame_to_fd(slot.fd, frame) });
+    }
+
+    // SLOT-40: nothing follows the run's final footer.
+    if slot.ended {
+        return Resp::Err("stdout: the run's output has already ended".into());
     }
 
     // stdout: transcode per -f. Classify from the 32-byte header only;
     // the transcoding branches read the full sub-packet lazily so the
     // packet pass-through path stays zero-copy for large streams.
     let cfg = render_cfg();
-    if bytes.len() < 32 {
+    let Some(hdr) = frame.header() else {
         return Resp::Err(format!(
-            "stdio write: blob is {} bytes, smaller than a packet header", bytes.len(),
+            "stdio write: blob is {} bytes, smaller than a packet header", frame.len(),
         ));
-    }
-    let mut hdr = [0u8; 32];
-    hdr.copy_from_slice(&bytes[..32]);
+    };
     let header = match PacketHeader::from_bytes(&hdr) {
         Ok(h) => h,
         Err(e) => return Resp::Err(format!("stdio write header parse: {}", e)),
@@ -746,48 +758,50 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
                     unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
                     slot.header_done = true;
                 }
-                unsafe { br::write_bytes_to_fd(slot.fd, bytes) }?;
+                unsafe { br::write_frame_to_fd(slot.fd, frame) }?;
                 if is_footer {
                     slot.header_done = false;
                 }
                 Ok(())
             }
             // One logical stream per run: the header is written once, data
-            // frames pass through unchanged (the pool already compressed
-            // them), and each pool footer is folded into the single final
+            // frames pass through unchanged (the pool compressed them at
+            // the recorded level), and each pool footer is folded into the single final
             // footer written by `finish_stdout`.
             OutputFormat::Packet | OutputFormat::VoidStar => {
-                write_logical_packet(&mut slot, slot_id, bytes, is_footer, is_data)
+                write_logical_packet(&mut slot, slot_id, frame, is_footer, is_data)
             }
             OutputFormat::Jsonl => {
                 if is_data {
-                    let schema = br::subpacket_value_schema_str(bytes)?;
-                    unsafe { br::emit_subpacket_jsonl(bytes, &schema) }
+                    let bytes = frame.joined();
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    unsafe { br::emit_subpacket_jsonl(&bytes, &schema) }
                 } else {
                     Ok(()) // footer: jsonl has no closing frame
                 }
             }
             OutputFormat::Raw => {
                 if is_data {
-                    let schema = br::subpacket_value_schema_str(bytes)?;
-                    unsafe { br::emit_subpacket_raw(bytes, &schema) }
+                    unsafe { br::emit_subpacket_raw(frame, 32 + header.offset as usize) }
                 } else {
                     Ok(()) // footer: raw has no closing frame
                 }
             }
             OutputFormat::Json => {
                 if is_data {
-                    let schema = br::subpacket_value_schema_str(bytes)?;
-                    let inner = unsafe { br::subpacket_json_inner(bytes, &schema) }?;
+                    let bytes = frame.joined();
+                    let schema = br::subpacket_value_schema_str(&bytes)?;
+                    let inner = unsafe { br::subpacket_json_inner(&bytes, &schema) }?;
                     if !slot.json_open {
                         unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
                         slot.json_open = true;
                     }
+                    let inner = inner.inner();
                     if !inner.is_empty() {
                         if slot.json_any {
                             unsafe { br::write_bytes_to_fd(slot.fd, b",") }?;
                         }
-                        unsafe { br::write_bytes_to_fd(slot.fd, inner.as_bytes()) }?;
+                        unsafe { br::write_bytes_to_fd(slot.fd, inner) }?;
                         slot.json_any = true;
                     }
                     Ok(())
@@ -835,7 +849,7 @@ fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
 fn write_logical_packet(
     slot: &mut StdioSlot,
     slot_id: i64,
-    bytes: &[u8],
+    frame: crate::stdio_bridge::Frame<'_>,
     is_footer: bool,
     is_data: bool,
 ) -> Result<(), crate::stdio_bridge::WriteError> {
@@ -859,11 +873,11 @@ fn write_logical_packet(
         slot.header_done = true;
     }
     if is_footer {
-        fold_pool_footer(slot, bytes).map_err(br::WriteError::Other)
+        fold_pool_footer(slot, &frame.joined()).map_err(br::WriteError::Other)
     } else {
         let offset = slot.bytes_out;
-        unsafe { br::write_bytes_to_fd(slot.fd, bytes) }?;
-        slot.bytes_out += bytes.len() as u64;
+        unsafe { br::write_frame_to_fd(slot.fd, frame) }?;
+        slot.bytes_out += frame.len() as u64;
         if is_data {
             slot.pending.push(offset);
         }
@@ -872,15 +886,12 @@ fn write_logical_packet(
 }
 
 /// Save one frame of the stdout stream to the stage file.
-fn stage_write(slot_id: i64, bytes: &[u8]) -> Result<(), String> {
+fn stage_write(slot_id: i64, frame: crate::stdio_bridge::Frame<'_>) -> Result<(), String> {
     use crate::stdio_bridge as br;
-    let hdr: [u8; 32] = bytes
-        .get(..32)
-        .and_then(|h| h.try_into().ok())
-        .ok_or("frame smaller than a packet header")?;
+    let hdr = frame.header().ok_or("frame smaller than a packet header")?;
     let header = PacketHeader::from_bytes(&hdr).map_err(|e| e.to_string())?;
     let mut slot = STAGE_SLOT.lock().map_err(|e| e.to_string())?;
-    write_logical_packet(&mut slot, slot_id, bytes, header.is_footer(), header.is_data())
+    write_logical_packet(&mut slot, slot_id, frame, header.is_footer(), header.is_data())
         .map_err(|e| match e {
             br::WriteError::BrokenPipe => "the stage file closed".to_string(),
             br::WriteError::Other(m) => m,
@@ -951,23 +962,41 @@ fn merge_diag(a: StreamDiag, b: StreamDiag) -> StreamDiag {
 /// Complete streamed stdout at the end of a one-shot run: write the single
 /// final footer of a packet stream. Must run before anything else the nexus
 /// prints to stdout. A packet stream with frames whose pool footer never
-/// arrived is left without a final footer, which readers treat as an
-/// unclosed stream and recover by scanning.
-pub fn finish_stdout() {
+/// arrived is left without a final footer, which readers refuse (SLOT-29).
+pub fn finish_stdout() -> bool {
+    end_stdout(morloc_runtime_types::packet::FOOTER_STATUS_CLOSED)
+}
+
+/// SLOT-40: end the packet stdout of a run that failed with a final footer
+/// that says so, over the sub-packets whose counts are known.
+pub fn fail_stdout() {
+    end_stdout(morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
+}
+
+/// End the run's stdout stream; false when its footer could not be written.
+/// Frames that arrive later are refused, so none lands after the footer.
+fn end_stdout(status: u8) -> bool {
     use crate::stdio_bridge as br;
     if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
-        return;
+        return true;
     }
     let mut slot = match STDOUT_SLOT.lock() {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let result = match render_cfg().format {
-        OutputFormat::Packet | OutputFormat::VoidStar => finish_logical_packet(&mut slot),
+        OutputFormat::Packet | OutputFormat::VoidStar => finish_logical_packet(&mut slot, status),
         _ => Ok(()),
     };
-    if let Err(br::WriteError::Other(e)) = result {
-        eprintln!("Error: finishing streamed stdout: {}", e);
+    slot.ended = true;
+    match result {
+        Ok(()) => true,
+        Err(br::WriteError::Other(e)) => {
+            eprintln!("Error: finishing streamed stdout: {}", e);
+            false
+        }
+        // The broken pipe sets the run's own status (141).
+        Err(br::WriteError::BrokenPipe) => true,
     }
 }
 
@@ -992,20 +1021,23 @@ pub fn finish_stage() -> Result<(), String> {
     if !slot.pending.is_empty() {
         return Err("the stdout stream was never closed".into());
     }
-    finish_logical_packet(&mut slot).map_err(|e| match e {
+    finish_logical_packet(&mut slot, morloc_runtime_types::packet::FOOTER_STATUS_CLOSED).map_err(|e| match e {
         br::WriteError::BrokenPipe => "the stage file closed".to_string(),
         br::WriteError::Other(m) => m,
     })
 }
 
 /// Write the single final footer of a packet stream whose pool footers
-/// have all been folded in. A stream with frames whose footer never
-/// arrived is left without one, which readers treat as an unclosed stream.
-fn finish_logical_packet(slot: &mut StdioSlot) -> Result<(), crate::stdio_bridge::WriteError> {
+/// have all been folded in, over the sub-packets whose counts are known.
+fn finish_logical_packet(slot: &mut StdioSlot, status: u8) -> Result<(), crate::stdio_bridge::WriteError> {
     use crate::stdio_bridge as br;
-    if !slot.header_done || !slot.pending.is_empty() {
+    if !slot.header_done {
         return Ok(());
     }
+    // SLOT-40: a stream still open at the end of the run did not finish, so
+    // the output says FAILED and the run fails.
+    let unfinished = !slot.pending.is_empty() && status != morloc_runtime_types::packet::FOOTER_STATUS_FAILED;
+    let status = if unfinished { morloc_runtime_types::packet::FOOTER_STATUS_FAILED } else { status };
     let mut diag = slot.diag.unwrap_or_else(StreamDiag::new);
     let tail: Vec<u64> = slot.entries.iter().rev()
         .take(morloc_runtime_types::packet::STREAM_DIAG_TAIL_MAX)
@@ -1014,16 +1046,19 @@ fn finish_logical_packet(slot: &mut StdioSlot) -> Result<(), crate::stdio_bridge
     for (i, off) in tail.iter().rev().enumerate() {
         diag.tail[i] = *off;
     }
-    let footer = morloc_runtime_types::packet::make_final_footer_packet(
-        &diag, &slot.entries,
-        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
-    );
+    let footer = morloc_runtime_types::packet::make_final_footer_packet(&diag, &slot.entries, status);
     slot.header_done = false;
+    slot.pending.clear();
     slot.entries.clear();
     slot.diag = None;
     slot.schema = None;
     slot.bytes_out = 0;
-    unsafe { br::write_bytes_to_fd(slot.fd, &footer) }
+    let footer = footer.map_err(|e| br::WriteError::Other(e.to_string()))?;
+    unsafe { br::write_bytes_to_fd(slot.fd, &footer) }?;
+    if unfinished {
+        return Err(br::WriteError::Other("a stream written to stdout was still open when the run ended".into()));
+    }
+    Ok(())
 }
 
 /// Read one full `MORLOC_DATA_PACKET` sub-packet into a fresh SHM block.
@@ -1052,21 +1087,33 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         .map(Some);
     }
     // A lone data packet's single batch was already emitted -> end of stream.
-    if slot.single_data {
+    if slot.single_data || slot.ended {
         return Ok(None);
     }
 
     // Stream sub-packet: read a fresh header + body.
     let fd = slot.fd;
     let mut hdr = [0u8; 32];
-    if !read_exact_fd(fd, &mut hdr)? {
-        return Ok(None);
+    // SLOT-29: the input ends only at a final footer that does not say FAILED.
+    match read_fill_fd(fd, &mut hdr)? {
+        0 => return Err("stdin: the stream ended without a final footer, so its writer did not finish it".into()),
+        n if n < hdr.len() => return Err("stdin: the stream was cut inside a sub-packet header".into()),
+        _ => {}
     }
     let header = PacketHeader::from_bytes(&hdr)
         .map_err(|e| format!("subpacket header parse: {}", e))?;
-    if !header.is_data() {
-        // Footer or anything else -> treat as end-of-stream.
+    if header.is_footer() {
+        stdin_footer_ends(fd, &hdr, &header)?;
+        slot.ended = true;
         return Ok(None);
+    }
+    // SLOT-29: a stream holds data sub-packets and ends at its footer.
+    if !header.is_data() {
+        slot.ended = true;
+        return Err(format!(
+            "stdin: the stream holds a packet that is neither data nor a footer (command type {})",
+            unsafe { header.command.cmd_type.cmd_type }
+        ));
     }
     reject_unreadable_subpacket(&header)?;
     let rest = (header.offset as u64)
@@ -1079,6 +1126,43 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         )
     }
     .map(Some)
+}
+
+/// SLOT-29: read the footer a stdin stream ended at. A pipe's end is final,
+/// so only a final footer that does not say FAILED ends it cleanly.
+fn stdin_footer_ends(
+    fd: i32,
+    hdr: &[u8; 32],
+    header: &morloc_runtime_types::packet::PacketHeader,
+) -> Result<(), String> {
+    // A footer's metadata is its payload: `length` covers it all (NET-10).
+    let mut footer = hdr.to_vec();
+    if !morloc_runtime_types::net_limits::read_declared(&mut footer, header.length, |b| read_exact_fd(fd, b))? {
+        return Err("stdin: the stream was cut inside its footer".into());
+    }
+    piped_footer_ends(&footer).map_err(|e| format!("stdin: {e}"))
+}
+
+/// SLOT-29: whether the footer a piped stream ended at closes it cleanly:
+/// a final footer that does not say FAILED.
+pub(crate) fn piped_footer_ends(footer: &[u8]) -> Result<(), String> {
+    use morloc_runtime_types::packet as pk;
+    let mut is_final = false;
+    let mut status = pk::FOOTER_STATUS_CLOSED;
+    for (kind, data) in pk::iter_packet_metadata(footer).map_err(|e| format!("footer: {e}"))? {
+        match kind {
+            pk::METADATA_TYPE_FOOTER_FINAL => is_final = true,
+            pk::METADATA_TYPE_FOOTER_STATUS => status = pk::decode_footer_status(data),
+            _ => {}
+        }
+    }
+    if !is_final {
+        return Err("the stream ended at a temporary footer, so its writer did not finish it".into());
+    }
+    if status == pk::FOOTER_STATUS_FAILED {
+        return Err("the stream's writer failed (its final footer says FAILED)".into());
+    }
+    Ok(())
 }
 
 /// Reject a stdin sub-packet the pool decoder can't consume: a non-MESG
@@ -1140,4 +1224,63 @@ fn read_fill_fd(fd: i32, buf: &mut [u8]) -> Result<usize, String> {
 /// whole buffer was filled, `Ok(false)` if EOF was hit first (short read).
 fn read_exact_fd(fd: i32, buf: &mut [u8]) -> Result<bool, String> {
     Ok(read_fill_fd(fd, buf)? == buf.len())
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+    use morloc_runtime_types::packet as pk;
+
+    fn pipe() -> (i32, i32) {
+        let mut p = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        (p[0], p[1])
+    }
+
+    fn drain(fd: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+    }
+
+    // SLOT-40: a stream still open when a run ends is written FAILED and
+    // fails the run, never left without a footer while the run succeeds.
+    #[test]
+    fn a_stdout_stream_still_open_at_the_end_is_failed() {
+        let (r, w) = pipe();
+        let mut slot = StdioSlot::new(w);
+        slot.header_done = true;
+        slot.pending.push(32);
+        let got = finish_logical_packet(&mut slot, pk::FOOTER_STATUS_CLOSED);
+        unsafe { libc::close(w) };
+        assert!(matches!(got, Err(crate::stdio_bridge::WriteError::Other(_))), "the run was not failed");
+        let footer = drain(r);
+        unsafe { libc::close(r) };
+        let status = pk::iter_packet_metadata(&footer)
+            .unwrap()
+            .find(|(k, _)| *k == pk::METADATA_TYPE_FOOTER_STATUS)
+            .map(|(_, d)| pk::decode_footer_status(d));
+        assert_eq!(status, Some(pk::FOOTER_STATUS_FAILED));
+    }
+
+    // SLOT-29: a piped stream holds data sub-packets and ends at its footer;
+    // any other packet is an error, not its end.
+    #[test]
+    fn a_piped_stream_holding_another_packet_is_refused() {
+        let (r, w) = pipe();
+        let ping = pk::PacketHeader::ping().to_bytes();
+        assert_eq!(unsafe { libc::write(w, ping.as_ptr() as *const libc::c_void, ping.len()) }, 32);
+        unsafe { libc::close(w) };
+        let mut slot = StdioSlot::new(r);
+        slot.header_done = true;
+        let got = read_one_subpacket_into_shm(&mut slot);
+        unsafe { libc::close(r) };
+        assert!(matches!(&got, Err(m) if m.contains("neither data nor a footer")), "{got:?}");
+    }
 }

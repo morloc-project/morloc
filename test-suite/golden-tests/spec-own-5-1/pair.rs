@@ -36,14 +36,14 @@ pub fn mk_outer(n: i64) -> Outer {
 
 pub enum Chain {
     End,
-    Link(Box<(i64, Chain)>),
+    Link(i64, Box<Chain>),
 }
 
 impl Clone for Chain {
     fn clone(&self) -> Chain {
         match self {
             Chain::End => Chain::End,
-            Chain::Link(b) => Chain::Link(Box::new((b.0, b.1.clone()))),
+            Chain::Link(v, t) => Chain::Link(*v, t.clone()),
         }
     }
 }
@@ -53,15 +53,15 @@ impl Drop for Chain {
 }
 
 pub fn mk_chain(n: i64) -> Chain {
-    (1..=n).rev().fold(Chain::End, |acc, i| Chain::Link(Box::new((i, acc))))
+    (1..=n).rev().fold(Chain::End, |acc, i| Chain::Link(i, Box::new(acc)))
 }
 
 pub fn chain_len(c: &Chain) -> i64 {
     let mut n = 0;
     let mut c = c;
-    while let Chain::Link(b) = c {
+    while let Chain::Link(_, t) = c {
         n += 1;
-        c = &b.1;
+        c = t;
     }
     n
 }

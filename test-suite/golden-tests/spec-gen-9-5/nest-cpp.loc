@@ -1,0 +1,15 @@
+-- A non-regular recursive record, which refers to itself at a larger
+-- argument, has no finite wire form; the build ends and says so.
+module main (trip)
+
+import root-cpp
+
+record Nest a where
+  val :: a
+  sub :: ?(Nest [a])
+
+source Cpp from "c.hpp" ("same")
+same :: a -> a
+
+trip :: Nest Int -> Nest Int
+trip x = same x

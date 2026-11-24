@@ -26,24 +26,20 @@ module main
 
 import root-py
 
-streamInts :: <IO> ()
-streamInts = do
-  o <- @stdout :: <IO> OStream Int
+streamInts :: <IO> (Collect Int)
+streamInts = @stdout (\o -> do
   @write 0 o [1, 2, 3]
   @flush o
-  @write 0 o [4, 5]
-  @close o
+  @write 0 o [4, 5])
 
 returnInts :: [Int]
 returnInts = [1, 2, 3, 4, 5]
 
-streamStrs :: <IO> ()
-streamStrs = do
-  o <- @stdout :: <IO> OStream Str
+streamStrs :: <IO> (Collect Str)
+streamStrs = @stdout (\o -> do
   @write 0 o ["alpha", "beta"]
   @flush o
-  @write 0 o ["gamma"]
-  @close o
+  @write 0 o ["gamma"])
 
 returnStrs :: [Str]
 returnStrs = ["alpha", "beta", "gamma"]
@@ -51,23 +47,19 @@ returnStrs = ["alpha", "beta", "gamma"]
 -- Elements that themselves contain JSON brackets/commas: stresses the
 -- incremental-array assembly (only the outer list `[` / `]` per
 -- sub-packet is stripped; the tuple's own delimiters must survive).
-streamPairs :: <IO> ()
-streamPairs = do
-  o <- @stdout :: <IO> OStream (Str, Int)
+streamPairs :: <IO> (Collect (Str, Int))
+streamPairs = @stdout (\o -> do
   @write 0 o [("a", 1), ("bb", 2)]
   @flush o
-  @write 0 o [("ccc", 3)]
-  @close o
+  @write 0 o [("ccc", 3)])
 
 returnPairs :: [(Str, Int)]
 returnPairs = [("a", 1), ("bb", 2), ("ccc", 3)]
 
 -- Empty stream: open + close with no @write. Under -f json this must
 -- render as `[]` (one empty array), under -f jsonl as no output.
-streamEmpty :: <IO> ()
-streamEmpty = do
-  o <- @stdout :: <IO> OStream Int
-  @close o
+streamEmpty :: <IO> (Collect Int)
+streamEmpty = @stdout (\o -> do ())
 
 returnEmpty :: [Int]
 returnEmpty = []

@@ -1,0 +1,22 @@
+-- FORK-17: an R child forked inside a sourced call exits when it leaves
+-- that call, by returning or by failing, before more code runs.
+module main (outer, caught)
+
+import root-r
+
+source R from "f.R"
+  ( "fork_val" as forkVal, "note_outer" as noteOuter
+  , "fork_fail" as forkFail, "catching" as catching )
+
+forkVal :: Int -> Int
+noteOuter :: Int -> Int
+forkFail :: Int -> Int
+catching :: (Int -> Int) -> Int -> Int
+
+--' Log a value made by a forking function
+outer :: Int -> Int
+outer x = noteOuter (forkVal x)
+
+--' Call a forking function whose child fails, under a handler
+caught :: Int -> Int
+caught x = catching (\y -> forkFail y) x

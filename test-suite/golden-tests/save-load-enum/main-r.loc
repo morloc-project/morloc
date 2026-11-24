@@ -1,0 +1,19 @@
+--' A single enum value saved records its enum schema, so it loads back
+--'
+--' The value passes through a function of this language, so its pool runs
+--' the save and the load.
+module main (single)
+
+import root-r
+
+data F = Sin | Cos
+
+source R from "idf.R" ("idF")
+
+idF :: F -> F
+
+single :: Str -> <IO> F
+single path = do
+  @save 0 path (idF Cos)
+  Ok x <- @load path :: <IO> (Try Str F)
+  idF x

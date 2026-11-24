@@ -1,0 +1,51 @@
+-- Spec RUST-5: a sourced Rust function's parameter of a concrete type is
+-- T, &T, &str or &[A], and morloc passes an argument to match: given when
+-- this is its last use, lent otherwise, so a by-value parameter copies only
+-- a value the caller still needs. Each export reports a value, then the
+-- clones of a Counted made in the run.
+module main (lastUse, reused, byRef, both, views)
+
+import root-rust
+
+newtype Counted = Int
+type Rust => Counted = "Counted"
+
+instance Packable Int Counted where
+  source Rust from "counted.rs" ("pack_counted" as pack, "unpack_counted" as unpack)
+
+source Rust from "counted.rs"
+  ( "make", "bump_val" as bumpVal, "bump_ref" as bumpRef, "tally", "tally2"
+  , "twice", "view_str" as viewStr, "view_list" as viewList
+  )
+
+make :: Int -> Counted
+bumpVal :: Counted -> Counted
+bumpRef :: Counted -> Counted
+tally :: Counted -> [Int]
+tally2 :: Counted -> Counted -> [Int]
+twice :: Counted -> Counted -> [Int]
+viewStr :: Str -> Int
+viewList :: [Int] -> Int
+
+--' A temporary given to a by-value parameter
+lastUse :: Int -> [Int]
+lastUse n = tally (bumpVal (make n))
+
+--' A value still needed, lent to a by-value parameter
+reused :: Int -> [Int]
+reused n = tally2 (bumpVal c) c where
+  c = make n
+
+--' A by-reference parameter
+byRef :: Int -> [Int]
+byRef n = tally (bumpRef (make n))
+
+--' One value passed to a by-value and a by-reference parameter
+both :: Int -> [Int]
+both n = twice c c where
+  c = make n
+
+--' Str and list views
+views :: Str -> [Int] -> Int
+views s xs = viewStr s + viewList xs
+

@@ -1,0 +1,10 @@
+-- PKG-14: a cpp-deps `import` header that does not resolve is refused
+-- naming the dependency and the header, here in a build outside any
+-- managed environment, where nothing provisions the package.
+module main (one)
+
+import root-cpp
+
+source Cpp from "f.hpp" ("one")
+
+one :: Int -> Int

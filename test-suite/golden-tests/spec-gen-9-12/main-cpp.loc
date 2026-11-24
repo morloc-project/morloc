@@ -1,0 +1,34 @@
+--' A field whose type is an alias is the definition's field (GEN-9)
+--'
+--' A record literal of a record with fields of alias type (scalar, string,
+--' parameterized, record) builds and crosses into a sourced function.
+module main (sumCode, sameCode)
+
+import root-cpp
+
+type Sym = Int
+type Name = Str
+type Box a = [a]
+
+record Pt where
+  x :: Int
+  y :: Int
+
+type P = Pt
+
+record Code where
+  sym :: Sym
+  name :: Name
+  items :: Box Int
+  pt :: P
+
+source Cpp from "code.hpp" ("codeLen" as codeLen, "mkCode" as mkCode)
+
+codeLen :: Code -> Int
+mkCode :: Int -> Code
+
+sumCode :: Int -> Int
+sumCode n = codeLen {sym = n, name = "ab", items = [n, n], pt = {x = 1, y = 2}}
+
+sameCode :: Int -> Bool
+sameCode n = mkCode n == {sym = n, name = "ab", items = [n, n], pt = {x = 1, y = 2}}

@@ -22,6 +22,9 @@ module Morloc.CodeGenerator.HostProvenance
   , sameTermSources
   ) where
 
+import Data.Foldable (toList)
+import Data.Traversable (mapAccumL)
+import Morloc.Data.Zip (zip3Indexed, zipPrefix, zipSame, zipWith3Same, zipWithPrefix, zipWithSame)
 import Control.Monad.State (State, evalStateT, get, gets, lift, modify, put, runState)
 import qualified Data.List as List
 import qualified Data.Set as Set
@@ -30,6 +33,7 @@ import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Frontend.Instances as FI
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
@@ -88,17 +92,22 @@ deep :: Prov -> Origin
 deep (PFun o _ r) = joinO o (deep r)
 deep (PData o ps) = foldr (joinO . deep) o ps
 
-dataKids :: Type -> [Type]
-dataKids (OptionalT t) = [t]
-dataKids (AppT _ ts) = ts
-dataKids (NamT _ _ _ fs) = map snd fs
+-- | The parts of a data type, by position; a kind argument holds no value.
+dataKids :: Type -> [Maybe Type]
+dataKids (OptionalT t) = [Just t]
+dataKids (AppT _ ts) = [case a of TyA t -> Just t; KiA _ -> Nothing | a <- ts]
+dataKids (NamT _ _ _ fs) = map (Just . snd) fs
 dataKids _ = []
+
+-- | The provenance of a part that holds no value.
+noValue :: Prov
+noValue = PData Portable []
 
 -- | Every function at or under a type made at one origin.
 mark :: Origin -> Type -> Prov
 mark o (FunT ins out) = PFun o (length ins) (mark o out)
 mark o (EffectT _ t) = PFun o 0 (mark o t)
-mark o t = PData (if null (dataKids t) && containsFunT t then o else Portable) (map (mark o) (dataKids t))
+mark o t = PData (if null (dataKids t) && containsFunT t then o else Portable) (map (maybe noValue (mark o)) (dataKids t))
 
 portable :: Type -> Prov
 portable = mark Portable
@@ -119,13 +128,13 @@ fit (EffectT _ t) (PFun o 0 r) = PFun o 0 (fit t r)
 fit t (PData o ps)
   | not (isCallable t)
   , length ps == length (dataKids t) =
-      PData o (zipWith fit (dataKids t) ps)
+      PData o (zipWithSame (maybe id fit) (dataKids t) ps)
 fit t p = mark (deep p) t
 
 joinP :: Type -> Prov -> Prov -> Prov
 joinP t p q = case (fit t p, fit t q) of
   (PFun a m x, PFun b n y) | m == n -> PFun (joinO a b) m (joinP (afterCall t m) x y)
-  (PData a xs, PData b ys) | length xs == length ys -> PData (joinO a b) (zipWith3 joinP (dataKids t) xs ys)
+  (PData a xs, PData b ys) | length xs == length ys -> PData (joinO a b) (zipWith3Same (maybe const joinP) (dataKids t) xs ys)
   (p', q') -> mark (joinO (deep p') (deep q')) t
 
 joinsP :: Type -> [Prov] -> Prov
@@ -173,7 +182,7 @@ sourcedResult host sig args = top (resultU <$> sig)
       Just (FunU _ r) -> r
       Just r -> r
       Nothing -> VarU (TV "")
-    bound = Map.fromListWith (<>) (concat (zipWith bindVars params args))
+    bound = Map.fromListWith (<>) (concat (zipWithPrefix bindVars params args))
     captured = joinsO (map held args)
 
     top (Just (VarU v)) t | Just ps <- relayed v = joinsP t ps
@@ -188,7 +197,7 @@ sourcedResult host sig args = top (resultU <$> sig)
           gks = case gu of
             Just g | length (kidsU g) == length ks -> map Just (kidsU g)
             _ -> map (const Nothing) ks
-       in PData (if null ks && containsFunT t then host else Portable) (zipWith madeIn gks ks)
+       in PData (if null ks && containsFunT t then host else Portable) (zipWithSame (\g -> maybe noValue (madeIn g)) gks ks)
 
     relayed v
       | Set.member v foralls = Map.lookup v bound
@@ -201,7 +210,7 @@ sourcedResult host sig args = top (resultU <$> sig)
       _ -> []
     bindVars (EffectU _ u) (PFun _ 0 r) = bindVars u r
     bindVars u (PData _ ps)
-      | length (kidsU u) == length ps = concat (zipWith bindVars (kidsU u) ps)
+      | length (kidsU u) == length ps = concat (zipWithSame bindVars (kidsU u) ps)
     bindVars _ _ = []
 
     effInner (EffectU _ u) = Just u
@@ -250,7 +259,7 @@ emptyFound :: Found
 emptyFound = Found Map.empty Map.empty Map.empty Set.empty Map.empty [] [] [] []
 
 data Ctx = Ctx
-  { cxSig :: Source -> Maybe TypeU
+  { cxSig :: Int -> Maybe TypeU
   , cxTree :: EVar -> Maybe Int
   , cxArity :: Int -> Int
   , cxSummary :: (Int, [Prov]) -> (Prov, [Origin])
@@ -281,15 +290,14 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
   VarS _ (One x) -> do
     i <- analyze cx env dm x
     done (iProv i) (iFree i) [i]
-  ExeS (SrcCall src) -> do
+  ExeS (SrcCall (Idx si src)) -> do
     stray
     -- a source as a value: its first call group runs the source; a call
     -- that stops at a group boundary returns a function the host made
     let p = case srcRsize src of
           (g1 : _) | g1 < arity t -> PFun Portable g1 (mark (hostOf src) (afterCall t g1))
-          _ -> PFun Portable (arity t) (sourcedResult (hostOf src) (cxSig cx src) [] (afterCall t (arity t)))
+          _ -> PFun Portable (arity t) (sourcedResult (hostOf src) (cxSig cx si) [] (afterCall t (arity t)))
     done p Map.empty []
-  ExeS (PatCall _) -> stray >> leaf
   CallS v -> do
     stray
     case cxTree cx v of
@@ -299,13 +307,19 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
         done (PFun Portable (arity t) (fst (cxSummary cx key))) Map.empty []
       Nothing -> leaf
   AppS f xs -> stray >> app f xs
+  PatS _ _ _ papp -> do
+    let args = toList papp
+    stray
+    is <- mapM (analyze cx env Portable) args
+    floats args is
+    done' Portable (fit t (mark (joinsO (map (held . iProv) is)) t)) (frees is) is
   LamS vs b -> do
     let ins = case t of
           FunT ts _ -> ts
           _ -> []
         -- a parameter already in scope was bound by the caller (a mapped
         -- element); binder names are unique within a tree
-        bound = [(v, if dm == Portable then fit it (Map.findWithDefault (portable it) v env) else mark dm it) | (v, it) <- zip vs ins]
+        bound = [(v, if dm == Portable then fit it (Map.findWithDefault (portable it) v env) else mark dm it) | (v, it) <- zipSame vs ins]
         env' = foldr (uncurry Map.insert) env bound
     binders [(v, held p) | (v, p) <- bound]
     i <- analyze cx env' Portable b
@@ -322,23 +336,25 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
     done (PFun (joinsO (Map.elems fv)) (length vs) (iProv i)) fv [i]
   LstS xs -> do
     is <- mapM (analyze cx env dm) xs
-    let elemT = case dataKids t of
-          [et] -> et
-          _ -> t
-    done (fit t (PData Portable [joinsP elemT (map iProv is)])) (frees is) is
+    -- the elements fill the one type argument; a length holds none
+    let elems et = joinsP et (map iProv is)
+        parts = case dataKids t of
+          ks | [_] <- catMaybes ks -> map (maybe noValue elems) ks
+          _ -> [elems t]
+    done (fit t (PData Portable parts)) (frees is) is
   TupS xs -> do
     is <- mapM (analyze cx env dm) xs
     done (fit t (PData Portable (map iProv is))) (frees is) is
   NamS rs -> do
     is <- mapM (analyze cx env dm . snd) rs
-    let byKey = Map.fromList (zip (map fst rs) (map iProv is))
+    let byKey = Map.fromList (zipSame (map fst rs) (map iProv is))
         parts = case t of
           NamT _ _ _ fs -> [Map.findWithDefault (portable ft) k byKey | (k, ft) <- fs]
           _ -> map iProv is
     done (fit t (PData Portable parts)) (frees is) is
   ConS _ _ _ xs -> do
     is <- mapM (analyze cx env dm) xs
-    done (PData (joinsO (map (deep . iProv) is)) (map portable (dataKids t))) (frees is) is
+    done (PData (joinsO (map (deep . iProv) is)) (map (maybe noValue portable) (dataKids t))) (frees is) is
   LetS v a b -> do
     -- a binding a host will call with its own functions is known to be one
     -- only once the body is read, so the binding is read again with that
@@ -428,20 +444,18 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
       | otherwise = modify (\f -> f {fSinks = (gi, o, what) : fSinks f})
 
     app f xs = case sourcedHead f of
-      Just src -> sourcedApp f src xs
+      Just isrc -> sourcedApp f isrc xs
       Nothing -> case calledTree f of
         Just j -> treeApp f j xs
         Nothing -> do
           fi <- analyze cx env Portable f
           is <- mapM (analyze cx env Portable) xs
           floats xs is
-          let (r, through) = case f of
-                AnnoS _ _ (ExeS (PatCall _)) -> (mark (joinsO (map (held . iProv) is)) t, Portable)
-                _ -> applyP (annoType f) (iProv fi) (map iProv is)
+          let (r, through) = applyP (annoType f) (iProv fi) (map iProv is)
           labeled f is r
           done' through (fit t r) (frees (fi : is)) (fi : is)
 
-    sourcedApp f src xs = do
+    sourcedApp f (Idx si src) xs = do
       fi <- analyze cx env Portable f
       let ft = annoType f
           ins = case ft of
@@ -452,13 +466,13 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
             FunT pins _ -> any (\it -> containsFunT it || isCallable it) pins
             _ -> False
           given = Host (srcLang src) (PassedBy src)
-      is <- sequence [analyze cx env (if passes pt then given else Portable) x | (x, pt) <- zip xs (ins <> repeat t)]
+      is <- sequence [analyze cx env (if passes pt then given else Portable) x | (x, pt) <- zipPrefix xs (ins <> repeat t)]
       floats xs is
       let m = arity ft
           k = length xs
           host = hostOf src
           groups = scanl1 (+) (srcRsize src)
-          full = sourcedResult host (cxSig cx src) (map iProv is) (afterCall ft m)
+          full = sourcedResult host (cxSig cx si) (map iProv is) (afterCall ft m)
           (r, through)
             | k < m && k `elem` groups = (mark host (afterCall ft k), Portable)
             | k < m = (PFun (joinsO (map (held . iProv) is)) (m - k) full, Portable)
@@ -474,7 +488,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
       is0 <- mapM (analyze cx env Portable) xs
       let m = cxArity cx j
           pts = cxParamType cx j
-          keyOf is = (j, normalKey pts [fit pt p | (pt, p) <- zip pts (map iProv is <> map portable (drop (length is) pts))])
+          keyOf is = (j, normalKey pts [fit pt p | (pt, p) <- zipPrefix pts (map iProv is <> map portable (drop (length is) pts))])
           (_, demands) = cxSummary cx (keyOf is0)
       is <-
         if all (== Portable) demands
@@ -483,7 +497,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
             -- the arguments were read without the demand the callee puts on them
             found <- gets fDemand
             put before {fDemand = found}
-            sequence [analyze cx env d x | (x, d) <- zip xs (demands <> repeat Portable)]
+            sequence [analyze cx env d x | (x, d) <- zipPrefix xs (demands <> repeat Portable)]
       floats xs is
       let key = keyOf is
           (res, _) = cxSummary cx key
@@ -497,7 +511,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
     -- an argument computed from a host-made function, whose value morloc
     -- made, is bound by a let before the call so that only its value crosses
     floats xs is =
-      let sites = [(ci, k) | (k, x, i) <- zip3 [0 :: Int ..] xs is, floatable x, held (iProv i) == Portable, not (Map.null (iFree i))]
+      let sites = [(ci, k) | (k, x, i) <- zip3Indexed 0 xs is, floatable x, held (iProv i) == Portable, not (Map.null (iFree i))]
        in unless (null sites) $ modify (\f -> f {fFloat = foldr Set.insert (fFloat f) sites})
 
     floatable (AnnoS _ _ x) = case x of
@@ -535,7 +549,7 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
           else done (mark o t) (frees is) is
 
     sourcedHead (AnnoS _ _ x) = case x of
-      ExeS (SrcCall src) -> Just src
+      ExeS (SrcCall isrc) -> Just isrc
       VarS _ (One y) -> sourcedHead y
       LabelS _ y -> sourcedHead y
       CoerceS _ y -> sourcedHead y
@@ -621,8 +635,8 @@ expandDeep scope = go Set.empty
       _ -> descend seen t
     descend seen t = case t of
       FunT as r -> FunT (map (go seen) as) (go seen r)
-      AppT h ks -> AppT h (map (go seen) ks)
-      NamT o v ps fs -> NamT o v (map (go seen) ps) [(k, go seen x) | (k, x) <- fs]
+      AppT h ks -> AppT h (map (fmap (go seen)) ks)
+      NamT o v ps fs -> NamT o v (map (fmap (go seen)) ps) [(k, go seen x) | (k, x) <- fs]
       EffectT es x -> EffectT es (go seen x)
       OptionalT x -> OptionalT (go seen x)
       _ -> t
@@ -634,8 +648,8 @@ expandDeep scope = go Set.empty
     holdsIn seen t = case t of
       FunT _ _ -> True
       EffectT _ _ -> True
-      AppT _ ks -> any (holdsFun seen) ks
-      NamT _ _ ps fs -> any (holdsFun seen) (ps <> map snd fs)
+      AppT _ ks -> any (holdsFun seen) (tyArgs ks)
+      NamT _ _ ps fs -> any (holdsFun seen) (tyArgs ps <> map snd fs)
       OptionalT x -> holdsFun seen x
       _ -> False
     nameOf t = case t of
@@ -658,7 +672,8 @@ planWith view target trees00
           paramTypes j = case Map.lookup j viewRoot of
             Just (AnnoS (Idx _ (FunT ts _)) _ (LamS vs _)) -> take (length vs) ts
             _ -> []
-          rootKeys = [(rootIdx t, map portable (paramTypes (rootIdx t))) | t <- trees0]
+          roots = [((rootIdx t, map portable (paramTypes (rootIdx t))), t) | t <- trees0]
+          rootKeys = map fst roots
       sigs <- signatures trees0
       labels <- MM.gets stateManifoldConfig
       exports <- Set.fromList <$> MM.gets stateExports
@@ -680,7 +695,7 @@ planWith view target trees00
           copied = [key | key <- Set.toList reachable, key `notElem` rootKeys]
       names <- Map.fromList <$> mapM (\key -> (,) key <$> copyName key) copied
       copies <- mapM (\key -> (,) key <$> makeCopy byRoot names key) copied
-      let instances = zip rootKeys trees0 <> copies
+      let instances = roots <> copies
           -- a call of a copy reaches the tree it copies
           copyTree = Map.fromList [(name, j) | ((j, _), name) <- Map.toList names]
           cxCopies = cx {cxTree = \v -> maybe (target v) Just (Map.lookup v copyTree)}
@@ -694,8 +709,8 @@ planWith view target trees00
     rootIdx (AnnoS (Idx i _) _ _) = i
 
     signatures trees0 = do
-      let srcs = [(ci, src) | t <- trees0, AnnoS _ (Idx ci _) (ExeS (SrcCall src)) <- nodes t]
-      pairs <- mapM (\(ci, src) -> fmap ((,) src . etype) <$> sourceSignature (Just ci) src) srcs
+      let srcs = Map.toList (Map.fromList [(si, src) | t <- trees0, AnnoS _ _ (ExeS (SrcCall (Idx si src))) <- nodes t])
+      pairs <- mapM (\(ci, src) -> fmap ((,) ci . etype) <$> sourceSignature (Written ci) src) srcs
       return (Map.fromList (catMaybes pairs))
 
     -- the analysis of one tree given what its parameters hold: what it
@@ -705,9 +720,9 @@ planWith view target trees00
             LamS ws b -> (ws, b)
             _ -> ([], t)
           ret = afterCall ty (length vs)
-          (info, found) = runState (analyze cx (Map.fromList (zip vs pat)) Portable body) emptyFound
+          (info, found) = runState (analyze cx (Map.fromList (zipSame vs pat)) Portable body) emptyFound
           demands = [Map.findWithDefault Portable v (fDemand found) | v <- vs]
-       in (found {fBinders = foldr (\(v, p) -> if held p == Portable then id else Map.insert v (held p)) (fBinders found) (zip vs pat)}, fit ret (iProv info), demands)
+       in (found {fBinders = foldr (\(v, p) -> if held p == Portable then id else Map.insert v (held p)) (fBinders found) (zipSame vs pat)}, fit ret (iProv info), demands)
 
     analyzeKey viewRoot cx (j, pat) = case Map.lookup j viewRoot of
       Just t -> analyzeTree cx pat t
@@ -778,10 +793,8 @@ planWith view target trees00
             AppS f xs -> do
               f' <- go f
               xs' <- mapM go xs
-              let sites = [k | (k', k) <- Set.toList (fFloat found), k' == ci]
-              if null sites
-                then return (AnnoS g c (AppS f' xs'))
-                else floatArgs g cl sites f' xs'
+              floatSites ci g c cl found (AppS f') xs'
+            PatS fg fc ev app -> traverse go app >>= floatSites ci g c cl found (PatS fg fc ev)
             _ -> AnnoS g c <$> mapExprSM go e
       go t
 
@@ -789,9 +802,14 @@ planWith view target trees00
       k <- MM.getCounter
       return (EV (unEVar (displayName v) <> "`h" <> MT.show' k))
 
-    floatArgs g@(Idx gi _) cl sites f xs = do
+    floatSites ci g c cl found mk xs =
+      case [k | (k', k) <- Set.toList (fFloat found), k' == ci] of
+        [] -> return (AnnoS g c (mk xs))
+        sites -> floatArgs g cl sites mk xs
+
+    floatArgs g@(Idx gi _) cl sites mk xs = do
       bound <-
-        mapM
+        traverse
           ( \(k, x@(AnnoS (Idx xi xt) (Idx xci xl) _)) ->
               if k `elem` sites
                 then do
@@ -802,14 +820,14 @@ planWith view target trees00
                   return (AnnoS (Idx ri xt) (Idx rci xl) (LetBndS v), [(v, x)])
                 else return (x, [])
           )
-          (zip [0 :: Int ..] xs)
+          (snd (mapAccumL (\k x -> (k + 1, (k, x))) (0 :: Int) xs))
       ci' <- MM.getCounter
-      let app = AnnoS g (Idx ci' cl) (AppS f (map fst bound))
+      let app = AnnoS g (Idx ci' cl) (mk (fmap fst bound))
           letIn body@(AnnoS (Idx _ bt) _ _) (v, x@(AnnoS _ (Idx _ xl) _)) = do
             li <- newIndex gi
             lci <- MM.getCounter
             return (AnnoS (Idx li bt) (Idx lci xl) (LetS v x body))
-      foldM letIn app (reverse (concatMap snd bound))
+      foldM letIn app (reverse (foldMap snd bound))
 
     -- the limits of one rewritten tree, refusing what cannot be placed
     limitsOf cx exports (_, pat) t = do
@@ -887,7 +905,7 @@ uniqueBinders t = evalStateT (go Map.empty t) Set.empty
       LetBndS v -> return (LetBndS (Map.findWithDefault v v ren))
       LamS vs b -> do
         vs' <- mapM fresh vs
-        LamS vs' <$> go (foldr (uncurry Map.insert) ren (zip vs vs')) b
+        LamS vs' <$> go (foldr (uncurry Map.insert) ren (zipSame vs vs')) b
       LetS v a b -> do
         a' <- go ren a
         v' <- fresh v
@@ -902,22 +920,27 @@ uniqueBinders t = evalStateT (go Map.empty t) Set.empty
       put (Set.insert v' seen)
       return v'
 
--- | The sources of each term a signature declares.
-implementations :: SignatureSet -> [[Source]]
-implementations (Monomorphic t) = [[s | (_, Idx _ s) <- termConcrete t]]
-implementations (Polymorphic _ _ _ ts) = [[s | (_, Idx _ s) <- termConcrete t] | t <- ts]
+-- | The sources of each term: every signed term and every instance's
+-- declaration of a method.
+termSources :: MorlocMonad [[Indexed Source]]
+termSources = do
+  sigs <- GMap.elems <$> MM.gets stateSignatures
+  env <- MM.gets stateInstances
+  return $
+    [map snd (termConcrete t) | Monomorphic t <- sigs]
+      <> [map snd (FI.mtSources t) | t <- FI.allMethodTerms env]
 
 -- | The other sources of the term @src@ implements, in other languages, with
 -- the same call groups (HOST-3).
-sameTermSources :: Source -> MorlocMonad [Source]
-sameTermSources src = do
-  sigs <- GMap.elems <$> MM.gets stateSignatures
+sameTermSources :: Indexed Source -> MorlocMonad [Indexed Source]
+sameTermSources isrc@(Idx _ src) = do
+  terms <- termSources
   return $
-    unique
-      [ s
-      | srcs <- concatMap implementations sigs
-      , src `elem` srcs
-      , s <- srcs
+    List.nubBy (\a b -> val a == val b)
+      [ is
+      | srcs <- terms
+      , isrc `elem` srcs
+      , is@(Idx _ s) <- srcs
       , srcLang s /= srcLang src
       , srcRsize s == srcRsize src
       ]
@@ -927,9 +950,8 @@ sameTermSources src = do
 -- nothing.
 chooseSourceHint :: Source -> MorlocMonad MDoc
 chooseSourceHint src = do
-  sigs <- GMap.elems <$> MM.gets stateSignatures
-  let terms = concatMap implementations sigs
-      others = unique [srcLang s | srcs <- terms, src `elem` srcs, s <- srcs, srcLang s /= srcLang src]
+  terms <- map (map val) <$> termSources
+  let others = unique [srcLang s | srcs <- terms, src `elem` srcs, s <- srcs, srcLang s /= srcLang src]
       name = squotes (pretty (displayName (srcAlias src)))
   return $ case others of
     [] -> mempty

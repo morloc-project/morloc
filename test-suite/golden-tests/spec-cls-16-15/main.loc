@@ -1,0 +1,20 @@
+-- Spec CLS-16: a dimension a slice erased is not matched by the one head that
+-- fixes it; the instance is refused, not run on a value it does not fit.
+module main (run)
+import root-py
+
+record R where
+  x :: Int
+
+newtype Vec (n :: Nat) a = [a]
+type Py => (Vec n a) = "list" a
+instance Packable [a] (Vec n a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+instance SliceableDim Vec where
+  source Py from "h.py" ("h_slice" as __get_slice_dim__)
+
+instance Functor (Vec 3) where
+  source Py from "h.py" ("h_map_three" as map)
+
+run :: Vec 3 R -> [Int]
+run xs = unpack (.[0:2].x xs)

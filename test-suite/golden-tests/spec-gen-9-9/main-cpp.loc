@@ -1,0 +1,29 @@
+-- GEN-9: a generated record with a Nat parameter is generated with the Nat
+-- erased, used at a literal and at a variable; `V 3 Int` and `V 4 Int` are
+-- one native type. The Rust twin is main-rust.loc.
+module main (trip, tripAny, tripArr)
+
+import root-cpp
+
+newtype Arr (n :: Nat) a = List a
+type Cpp => (Arr (n :: Nat) a) = "std::vector<$1>" n a
+
+record V (n :: Nat) a where
+  xs :: [a]
+  tag :: a
+
+record A (n :: Nat) a where
+  xs :: Arr n a
+  tag :: a
+
+source Cpp from "x.hpp" ("same")
+same :: a -> a
+
+trip :: V 3 Int -> V 3 Int
+trip = same
+
+tripAny :: V n Int -> V n Int
+tripAny = same
+
+tripArr :: A 2 Int -> A 2 Int
+tripArr = same

@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 15
+#define MORLOC_ABI_VERSION 16
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -158,7 +158,7 @@ typedef enum {
     MORLOC_TUPLE    = 15,
     MORLOC_MAP      = 16,
     MORLOC_OPTIONAL = 17,
-    MORLOC_INT      = 18, // variable-width integer (Array of uint64_t limbs, two's complement)
+    MORLOC_INT      = 18, // variable-width integer
     MORLOC_TABLE    = 19, // Arrow IPC primitive. Schema columns (if any) are
                           // open constraints on the buffer's actual schema; the
                           // binary layout is fully described by the Arrow
@@ -238,6 +238,7 @@ typedef struct Schema {
     size_t alignment;       // alignment of a slot of this type
     size_t data_alignment;  // alignment of an array's data when this is its element
     bool fixed_width;       // no pointer anywhere below: a value is its own bytes
+    void* converted;        // the runtime's own forms of this schema; opaque
 } Schema;
 
 // Variable-length array in voidstar representation.
@@ -326,7 +327,7 @@ typedef struct __attribute__((packed)) packet_command_data_s {
     uint8_t compression;
     uint8_t encryption;
     uint8_t status;
-    uint8_t generation[2]; // SHM-13: a reference packet's block generation, little endian; 0 = unchecked
+    uint8_t generation[2]; // SHM-13: a reference packet's block generation, little endian; never 0
 } packet_command_data_t;
 
 typedef struct __attribute__((packed)) packet_command_ping_s {
@@ -371,6 +372,17 @@ int64_t morloc_shm_live_bytes(void);
 // compiler's expected version at provisioning time so a mismatched prebuilt
 // binary is refused rather than run.
 uint32_t morloc_abi_version(void);
+
+// LIFE-6: the build id of this libmorloc, a hash of the runtime source.
+uint64_t morloc_build_id(void);
+
+// LIFE-6: called by every pool before anything else reaches libmorloc. An
+// installed binding passes the build id it was compiled against
+// (MORLOC_BINDING_BUILD_ID); code compiled into the program passes 0. On a
+// mismatch with this libmorloc, or between this libmorloc and the nexus's
+// MORLOC_BUILD_ID, the process prints one line and exits 75. Its signature
+// never changes.
+void morloc_require_build(uint64_t binding);
 
 // ========================================================================
 // Log emission for `log: true` labeled manifolds
@@ -572,7 +584,10 @@ typedef enum {
     MORLOC_X_LIST_LEN_TEST, // (list) + a length -> Bool. A list pattern's
                             // length test, answered in the nexus.
     MORLOC_X_EQUAL,         // (a, b) -> Bool: the two values are equal (@eq).
-    MORLOC_X_LESS_EQ        // (a, b) -> Bool: a orders before or with b (@le).
+    MORLOC_X_LESS_EQ,       // (a, b) -> Bool: a orders before or with b (@le).
+    MORLOC_X_COND,          // n (test, value) arms + else -> value (EMIT-5)
+    MORLOC_X_CHAIN,         // n operands -> Bool: && or || over them (EMIT-5)
+    MORLOC_X_LETS           // n lets + body -> value (EMIT-5)
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -717,6 +732,32 @@ typedef struct morloc_ifile_walk_expression_s {
     uint64_t n_args;
 } morloc_ifile_walk_expression_t;
 
+typedef struct morloc_binds_s {
+    char** names;
+    morloc_expression_t** values;
+    uint64_t n;
+} morloc_binds_t;
+
+typedef struct morloc_cond_expression_s {
+    morloc_binds_t** binds;
+    morloc_expression_t** conds;
+    morloc_expression_t** thens;
+    uint64_t n;
+    morloc_expression_t* else_branch;
+} morloc_cond_expression_t;
+
+typedef struct morloc_chain_expression_s {
+    morloc_binds_t** binds;
+    morloc_expression_t** args;
+    uint64_t n;
+    uint8_t is_and;
+} morloc_chain_expression_t;
+
+typedef struct morloc_lets_expression_s {
+    morloc_binds_t* binds;
+    morloc_expression_t* body;
+} morloc_lets_expression_t;
+
 typedef struct morloc_expression_s {
     morloc_expression_type type;
     Schema* schema;
@@ -737,6 +778,9 @@ typedef struct morloc_expression_s {
         morloc_open_expression_t* open_expr;
         morloc_ifile_walk_expression_t* ifile_walk_expr;
         morloc_list_len_test_expression_t* list_len_test_expr;
+        morloc_cond_expression_t* cond_expr;
+        morloc_chain_expression_t* chain_expr;
+        morloc_lets_expression_t* lets_expr;
     } expr;
 } morloc_expression_t;
 
@@ -1044,25 +1088,6 @@ typedef struct daemon_response_s {
     bool result_text;
 } daemon_response_t;
 
-// -- HTTP types --
-
-typedef enum {
-    HTTP_GET,
-    HTTP_POST,
-    HTTP_DELETE,
-    HTTP_OPTIONS,
-    HTTP_HEAD
-} http_method_t;
-
-typedef struct http_request_s {
-    http_method_t method;
-    char path[256];
-    char* body;
-    size_t body_len;
-    char query[256];
-    bool authorized;
-} http_request_t;
-
 // -- Router types --
 
 typedef struct router_program_s {
@@ -1243,6 +1268,26 @@ bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
 uint64_t morloc_fork_generation(void);
 void morloc_exit_if_forked(void);
+// FORK-17
+void mlc_exit_if_forked_since(uint64_t generation);
+void mlc_exit_forked(void);
+
+// -- Parallel helpers (WPOOL, model/runtime/workers.md) -----------------------
+//
+// morloc_par_run runs span(job, i) once for each i in [0, nspans) claimed
+// before a span returns nonzero, on the calling thread and on at most
+// min(workers, nspans) - 1 of the process's helper threads. end(job) runs on
+// a helper after the spans of each pick, before it leaves the job. Returns
+// once no helper is on the job: 0 if every span returned 0, else 1. Neither
+// callback may unwind.
+#define MORLOC_HAS_PAR_POOL 1
+typedef int (*morloc_par_span_fn)(void* job, size_t span);
+typedef void (*morloc_par_end_fn)(void* job);
+int morloc_par_run(size_t nspans, size_t workers, morloc_par_span_fn span, morloc_par_end_fn end, void* job);
+// 0 when MORLOC_PAR_POOL=0 turns the helpers off.
+int morloc_par_pool_enabled(void);
+// WPOOL-11: the CPUs this process may run on, read at most once a second.
+size_t morloc_available_cpus(void);
 size_t total_shm_size(void);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 
@@ -1372,6 +1417,13 @@ uint8_t* morloc_dup_packet(const uint8_t* packet, absptr_t* block_out, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
+// SHM-13: the block a received data packet names by reference, checked; NULL
+// for a packet that names none, and NULL with errmsg set for one that may
+// not be read. The only way a binding resolves a received reference.
+absptr_t mlc_packet_block(const uint8_t* packet, ERRMSG);
+// SHM-13: the block a pool's tracker may release for a packet it has
+// finished with; NULL for a packet that names none or may not be read.
+absptr_t mlc_tracked_block(const uint8_t* packet);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
 // Returns 1 iff `path` names a file whose first 32 bytes parse as a
 // morloc packet header with `cmd_type = STREAM`. 0 otherwise. Used by
@@ -1401,6 +1453,10 @@ char* morloc_first_null_in_value(
     const void* voidstar,
     const Schema* schema,
     morloc_space_t space);
+
+// The offset of the first byte of a Str body that is not valid UTF-8, or -1
+// when it is valid or the check is off (FMT-10).
+int64_t mlc_utf8_check(const uint8_t* bytes, size_t len);
 
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
@@ -1783,6 +1839,16 @@ int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 typedef int32_t (*mlc_next_decode_fn)(void* ctx, const void* data, morloc_space_t space);
 int32_t mlc_next_with(int64_t handle, mlc_next_decode_fn decode, void* ctx, ERRMSG);
 
+// `mlc_ifile_slice_with(handle, bounds, on_begin, decode, ctx)` is the
+// unit-step slice `.[start:stop]` of an IFile (`bounds[0]`, `bounds[1]`)
+// handed to `decode` one piece per sub-packet it spans, in order, after
+// `on_begin` got the slice's length; each piece is an `[a]` decoded as for
+// `mlc_next_with`. Returns as `mlc_next_with`; a failing callback ends the
+// slice (SLOT-25).
+typedef int32_t (*mlc_slice_begin_fn)(void* ctx, uint64_t n);
+int32_t mlc_ifile_slice_with(int64_t handle, const mlc_ifile_walk_arg* bounds,
+    mlc_slice_begin_fn on_begin, mlc_next_decode_fn decode, void* ctx, ERRMSG);
+
 // `mlc_next_frame(handle, eof)` reads the next sub-packet of a file-backed
 // IStream like `mlc_next`, but tells the end of the stream apart from an
 // empty sub-packet: at the end it returns NULL and sets `*eof` to 1.
@@ -1845,6 +1911,50 @@ int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
 void mlc_reclaim_stdio_after_dispatch(void);
 int32_t mlc_write(int64_t level, int64_t handle,
                   const void* payload_voidstar, ERRMSG);
+// SLOT-36: an in-place @write batch. `mlc_write_begin` returns 0 when the
+// batch is open, MLC_WRITE_FALLBACK when it is written with `mlc_write`
+// instead, or the codes of mlc_write. An element is placed with its exact
+// portable size; offsets inside its room are relative to `base` and
+// alignment is taken from `origin`. `reached` is where the previous room's
+// encoding ended. Under the MLC_WRITE_NOWAIT flag, a placement that would
+// wait for queue room places nothing and returns MLC_WRITE_WOULD_BLOCK;
+// the binding then calls `mlc_write_wait` and places again (SLOT-37).
+#define MLC_WRITE_FALLBACK 3
+#define MLC_WRITE_NOWAIT 1
+#define MLC_WRITE_WOULD_BLOCK 4
+typedef struct mlc_room_s {
+    uint8_t* slot;
+    uint8_t* data;
+    uint8_t* end;
+    uint8_t* base;
+    uint8_t* origin;
+} mlc_room_t;
+int32_t mlc_write_begin(int64_t level, int64_t handle, int32_t flags, ERRMSG);
+int32_t mlc_write_place(uint64_t size, const uint8_t* reached, mlc_room_t* room, ERRMSG);
+int32_t mlc_write_place_run(uint64_t k, const uint8_t* reached, uint8_t** slots, uint64_t* placed, ERRMSG);
+int32_t mlc_write_wait(const uint8_t* reached, ERRMSG);
+int32_t mlc_write_commit(const uint8_t* reached, ERRMSG);
+// SLOT-36, SLOT-37: place one leaf element (a Str, or an array of
+// fixed-width numbers) from the n elements at `src`. `*end` is where the
+// room ends: pass it as `reached`. MLC_PLACE_VALID_TEXT says a Str is known
+// UTF-8. MLC_WRITE_NOT_TEXT, with `*bad` the offset of the first bad byte,
+// means the batch was aborted.
+#define MLC_PLACE_VALID_TEXT 2
+#define MLC_WRITE_NOT_TEXT 5
+int32_t mlc_write_place_bytes(const uint8_t* src, uint64_t n, uint32_t flags, const uint8_t* reached,
+                              const uint8_t** end, int64_t* bad, ERRMSG);
+// SLOT-36: place one element that is a list of k leaves, each written from
+// its n elements at `data`, as mlc_write_place_bytes writes one leaf. On
+// MLC_WRITE_NOT_TEXT, `*bad_piece` is the leaf and `*bad` the offset of its
+// first bad byte, and the batch was aborted.
+typedef struct mlc_piece_s {
+    const uint8_t* data;
+    uint64_t n;
+} mlc_piece_t;
+int32_t mlc_write_place_pieces(const mlc_piece_t* pieces, uint64_t k, uint32_t flags, const uint8_t* reached,
+                               const uint8_t** end, int64_t* bad_piece, int64_t* bad, ERRMSG);
+void mlc_write_abort(void);
+bool mlc_write_open(void);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);
 int32_t mlc_concat(const char* const* paths, size_t n_paths,
                    const char* dest, ERRMSG);
@@ -1870,45 +1980,67 @@ char* mlc_tmpfile(ERRMSG);
 int32_t mlc_unlink_tmp(const char* path, ERRMSG);
 
 // ------------------------------------------------------------------------
-// Fold accumulators (the `@fold` stream-handler form)
-//
-// A folding handler turns a stream into one value. The sink cannot return
-// anything, so the running accumulator lives behind one of these handles
-// between batches.
-//
-// A cell holds one accumulator per thread that folds into it: a producer
-// may drive its sink from several threads, and the read-modify-write
-// around a morloc `step` cannot be made atomic from the runtime, since
-// applying `step` means running user code in a pool. Each thread therefore
-// folds without contention and the handler's `combine` merges the slots at
-// the end.
-//
-// Every value a cell is given is copied, and every value it hands back is
-// a fresh single block the caller releases with one shfree.
+// The fork side (model/runtime/side.md): an in-pool accumulator's record,
+// through which a forked child's batches reach it. Each returns -1 (or
+// NULL) on error.
 
-// Create a cell seeded with `init`. Returns a handle, or -1 on error.
-int64_t mlc_cell_new(const Schema* schema, const void* init, ERRMSG);
+// A new gather entry holding `native`, the container mlc_side_with_native
+// gives its function.
+int64_t mlc_side_new(void* native, ERRMSG);
 
-// This thread's accumulator; the seed if it has not folded yet.
-void* mlc_cell_get(int64_t handle, const Schema* schema, ERRMSG);
+// 1 when a gather's put holds its batch natively, 0 when it goes to the
+// side file. A put that then finds the side route reports it.
+int32_t mlc_side_route(int64_t id, ERRMSG);
 
-// Replace this thread's accumulator. Returns 0 on success.
-int32_t mlc_cell_put(int64_t handle, const Schema* schema,
-                     const void* value, ERRMSG);
+// 1 after `f(native, arg)` ran under the entry lock (SIDE-5), 0 when the
+// batch goes to the side file instead. A fold's entry puts natively in its
+// owner in every state but taken (FOLD-1). `is_fold` names the fold in an
+// error that finds no entry.
+int32_t mlc_side_with_native(int64_t id, int32_t is_fold,
+                             void (*f)(void* native, void* arg), void* arg, ERRMSG);
 
-// How many accumulators the final merge must fold. Never zero: an
-// untouched cell answers with its seed, which is what an empty stream
-// folds to.
-int64_t mlc_cell_count(int64_t handle, ERRMSG);
+// Write a batch to the side file. Returns 0 on success. A NULL schema (a
+// batch with no wire form) poisons the file, so the take fails, and fails.
+int32_t mlc_side_put(int64_t id, const Schema* schema, const void* value, ERRMSG);
 
-// Accumulator `index`, for the merge. Returns NULL on error.
-void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
-                    ERRMSG);
+// End the entry in its owner; a reader over the side batches, in order.
+void* mlc_side_take(int64_t id, ERRMSG);
 
-// Release a cell and every accumulator in it. Returns 0 on success. A cell
-// still live when its dispatch ends is swept, so a handler that raises
-// before its merge cannot leak one.
-int32_t mlc_cell_free(int64_t handle, ERRMSG);
+// The next side batch as a fresh SHM value, or NULL with *eof set.
+void* mlc_side_next(void* reader, const Schema* schema, int32_t* eof, ERRMSG);
+
+void mlc_side_reader_free(void* reader);
+
+// End an entry without reading it.
+void mlc_side_drop(int64_t id);
+
+// Native fold slots (model/runtime/fold.md). Values are the binding's own
+// pointers; the runtime never reads them.
+
+// A fold entry; `fresh(ctx)` makes a slot's first value (FOLD-6) under the
+// entry lock.
+int64_t mlc_fold_new(void* ctx, void* (*fresh)(void* ctx), ERRMSG);
+
+// FOLD-1 phase one: 1 with this thread's value checked out (*fresh set when
+// `fresh` just made it), 0 when the batch goes to the side file.
+int32_t mlc_fold_checkout(int64_t id, void** value, int32_t* fresh, ERRMSG);
+
+// FOLD-1 phase three. Returns 0 once stored; on error the caller keeps
+// `value`.
+int32_t mlc_fold_store(int64_t id, void* value, ERRMSG);
+
+// FOLD-4: this thread's checked-out step failed.
+void mlc_fold_failed(int64_t id);
+// SIDE-12: a put into a gather, fold or stream handle raised.
+void mlc_sink_failed(int64_t h);
+
+// FOLD-2..4: seal and end the fold. *values (free with free()) holds every
+// stored value, the caller's to release, even on error. Returns the reader
+// over the side batches, or NULL on error.
+void* mlc_fold_take(int64_t id, void*** values, size_t* n, ERRMSG);
+
+// End a fold unread; its stored values as for mlc_fold_take.
+void mlc_fold_drop(int64_t id, void*** values, size_t* n);
 
 // ========================================================================
 // Section 25: Function declarations -- Slurm

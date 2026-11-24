@@ -59,8 +59,6 @@ record TwoOpts where
   --' @default []
   right :: Vector n Int
 
-record Py => TwoOpts = "dict"
-
 --' Length of the left vector
 opts :: TwoOpts -> Int
 opts o = optsLen o
@@ -73,8 +71,6 @@ record Entry (n :: Nat) where
   a :: Vector n Int
   --' Tag
   b :: Int
-
-record Py => Entry n = "dict"
 
 --' Length of a vector the entries share
 deep :: [Entry n] -> Vector n Int -> Int

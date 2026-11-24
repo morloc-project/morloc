@@ -17,7 +17,6 @@ import root-rust
 record Box where
   tag :: Str
   items :: [Int]
-record Rust => Box = "struct"
 
 source Rust from "own.rs"
   ( "rt_len" as strLen

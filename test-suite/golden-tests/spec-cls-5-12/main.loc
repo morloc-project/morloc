@@ -1,0 +1,18 @@
+-- Spec CLS-5: a head that matches a value's type but whose context fails is
+-- reported as that, naming what is unmet.
+module main (run)
+import root-py
+
+class Tag a where
+  tag :: a -> Str
+
+newtype S a = [a]
+type Py => (S a) = "tuple" a
+instance Tag a => Packable [a] (S a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+
+source Py from "h.py" ("h_size" as size2)
+size2 :: S Int -> Int
+
+run :: S Int -> Int
+run xs = size2 xs

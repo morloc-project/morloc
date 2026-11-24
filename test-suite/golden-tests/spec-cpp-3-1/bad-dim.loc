@@ -1,0 +1,15 @@
+-- A pointer behind a type with an erased length is still not a value.
+module main (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-dim.hpp" ("mkH", "useH")
+
+newtype H (n :: Nat) = Int
+type Cpp => H (n :: Nat) = "Handle" n
+mkH :: Int -> H n
+useH :: H n -> Int
+
+bad :: Int -> Int
+bad k = useH (mkH k)

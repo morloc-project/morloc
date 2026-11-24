@@ -21,6 +21,7 @@ from the shapes below]
   (n-1)`) becomes `PolyLet i call (PolyLetVar i)`, which the lowering treats
   as a leaf. Code fix: treat that shape as a tail `call`; RECUR-2 should
   define tail position to include it.
-- The `effectfulLoop`/`returnEager` gate in addLoopWraps never fires (both
-  RecCallP construction sites strip EffectT, Express.hs ~658, ~2032); every
-  effectful shape tried loops correctly. Delete the gate and its comment.
+- The `effectfulLoop`/`returnEager` gate in addLoopWraps: [read, one probe,
+  2026-11-02] it does fire for a nullary recursive `<IO>` value (the
+  CallS-as-value fallback in Express.hs keeps EffectT); delete it only
+  after a nullary recursive `<IO>` test is in the suite.

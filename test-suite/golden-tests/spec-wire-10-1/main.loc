@@ -1,0 +1,26 @@
+-- Spec WIRE-10: an enum tag read from outside the program is checked
+-- against its type's constructors, whichever language reads it. A list
+-- packet whose last tag is 4 (DNA has four constructors, tags 0-3) is
+-- refused, naming the tag, rather than dropped (R) or carried on as a
+-- value no arm matches.
+module main (listComp, rListComp, cppListComp, rustListComp)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+data DNA = A | C | G | T
+
+data Cpp  => DNA = "DNA"
+data Rust => DNA = "DNA"
+
+source Py   from "dna.py"  ("complement_all" as listComp)
+source Cpp  from "dna.hpp" ("complement_all" as cppListComp)
+source R    from "dna.R"   ("complement_all" as rListComp)
+source Rust from "dna.rs"  ("complement_all" as rustListComp)
+
+listComp     :: [DNA] -> [DNA]
+rListComp    :: [DNA] -> [DNA]
+cppListComp  :: [DNA] -> [DNA]
+rustListComp :: [DNA] -> [DNA]

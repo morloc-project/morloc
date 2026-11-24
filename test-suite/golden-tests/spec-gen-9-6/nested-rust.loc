@@ -1,0 +1,16 @@
+-- GEN-9: a recursive parameterized record used at an argument holding
+-- itself is generated at that argument (`Container<Container<int>>`).
+module main (nest, innerVal)
+
+import root-rust
+
+record Container a where
+  val :: a
+  sub :: ?(Container a)
+
+source Rust from "nested.rs" ("same", "innerVal")
+same :: a -> a
+innerVal :: Container (Container Int) -> Int
+
+nest :: Container (Container Int) -> Container (Container Int)
+nest x = same x

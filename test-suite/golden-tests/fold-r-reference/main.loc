@@ -1,0 +1,43 @@
+-- An R fold whose accumulator is an environment, which R passes by
+-- reference: step adds each batch into it in place. Each slot, and the
+-- replay of forked children's batches, starts from its own copy of init
+-- (FOLD-6), so neither touches the other nor the module-level init.
+--
+-- twoSites: two @collect sites put 1+2+3 each into one fold: 12, init 0.
+-- forked: the parent puts 1 and a forked child puts 2 (the side file,
+-- replayed at take): 3, init 0.
+
+module main (twoSites, forked)
+
+import root-r
+
+newtype Counter = Real
+type R => Counter = "environment"
+
+instance Packable Real Counter where
+  source R from "impl.R" ("pack_counter" as pack, "unpack_counter" as unpack)
+
+source R from "impl.R"
+  ( "produce" as produceR, "produce_fork" as forkR, "zero" as zeroR
+  , "count_into" as countIntoR, "merge" as mergeR, "show_counter" as showR )
+
+produceR :: ([I64] -> <IO> ()) -> <IO> ()
+forkR :: ([I64] -> <IO> ()) -> <IO> ()
+zeroR :: Counter
+countIntoR :: Counter -> [I64] -> Counter
+mergeR :: Counter -> Counter -> Counter
+
+--' The count and the init's count, shown by R
+showR :: Counter -> Str
+
+--' Fold two sites in one run
+--' @render --n=showR @fold=countIntoR @init=zeroR @combine=mergeR
+twoSites :: <IO> (Collect I64)
+twoSites = @collect (\k -> do
+  _ <- produceR k
+  produceR k)
+
+--' Fold a parent's and a forked child's batches
+--' @render --n=showR @fold=countIntoR @init=zeroR @combine=mergeR
+forked :: <IO> (Collect I64)
+forked = @collect forkR

@@ -21,13 +21,11 @@ type Py => Real = "float"
 record PairBR where
   flag :: Bool
   value :: Real
-record Py => PairBR = "dict"
 
 record TripleBIR where
   flag :: Bool
   count :: Int
   value :: Real
-record Py => TripleBIR = "dict"
 
 makePair :: Bool -> Real -> PairBR
 getPairFlag :: PairBR -> Bool

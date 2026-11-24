@@ -9,6 +9,13 @@ run_command: []
 serial_type: "uint8_t*"
 # String maps to Rust `String` (UTF-8, length-prefixed, interior NULs allowed).
 allow_string_null: true
+# Record kinds the compiler generates definitions for (GEN-2). A record with
+# no form of its own in this language takes the default kind.
+generated_types:
+  records:
+    default: struct
+    kinds:
+      struct: { form: struct, legacy: [struct] }
 # A sourced symbol is a Rust path identifier (allowing ::).
 ldNamePattern: "[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*"
 ldOperatorPattern: "[-!%&*+./<=>^|~]+"

@@ -1,0 +1,27 @@
+-- The same recursive type kept inside one pool needs no recursive packer
+-- and builds.
+module main (leafSum)
+
+import root-py
+
+newtype Lbl = Int
+type Py => Lbl = "Lbl"
+
+instance Packable Int Lbl where
+  source Py from "tree.py"
+   ( "pack_lbl" as pack
+   , "unpack_lbl" as unpack
+   )
+
+record Tree where
+  label :: Lbl
+  children :: [Tree]
+
+source Py from "tree.py" ("sum_tree" as sumTree, "pack_lbl" as mkLbl)
+
+sumTree :: Tree -> Int
+mkLbl :: Int -> Lbl
+
+--' Sum a one-node tree built and read in Python
+leafSum :: Int -> Int
+leafSum k = sumTree {label = mkLbl k, children = []}

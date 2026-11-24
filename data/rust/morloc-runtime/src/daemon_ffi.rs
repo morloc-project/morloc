@@ -1075,12 +1075,13 @@ pub(crate) unsafe fn parse_request(
 // -- Response parsing (serde_json) --------------------------------------------
 
 #[derive(serde::Deserialize)]
-struct JsonResponse {
+struct JsonResponse<'a> {
     id: Option<String>,
     status: Option<String>,
     /// The value as text: it is user data of any depth and width, and
     /// passes through untouched.
-    result: Option<Box<serde_json::value::RawValue>>,
+    #[serde(borrow)]
+    result: Option<&'a serde_json::value::RawValue>,
     error: Option<String>,
     /// Media (`@mime`) return: base64 content + media type (see
     /// daemon_serialize_response). Reconstructed onto result_bytes/mime.
@@ -1089,29 +1090,6 @@ struct JsonResponse {
     action: Option<String>,
     text: Option<bool>,
     class: Option<String>,
-}
-
-/// The response as written to the socket. The member order is the wire
-/// order.
-#[derive(serde::Serialize)]
-struct WireResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    class: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result_b64: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mime: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Box<serde_json::value::RawValue>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
 }
 
 pub(crate) unsafe fn daemon_parse_response(
@@ -1198,9 +1176,8 @@ pub(crate) unsafe fn daemon_parse_response(
             let c = CString::new(msg).unwrap_or_default();
             (*resp).error = libc::strdup(c.as_ptr());
         }
-    } else if let Some(result) = &parsed.result {
-        let c = CString::new(result.get()).unwrap_or_default();
-        (*resp).result_json = libc::strdup(c.as_ptr());
+    } else if let Some(result) = parsed.result {
+        (*resp).result_json = strdup_bytes(result.get().as_bytes());
     }
 
     if let Some(error) = &parsed.error {
@@ -1267,57 +1244,157 @@ pub(crate) unsafe fn daemon_free_response(resp: *mut DaemonResponse) {
     libc::free(resp as *mut c_void);
 }
 
-// -- Response serialization (serde_json) --------------------------------------
+// -- Response serialization ---------------------------------------------------
+
+/// The text of a JSON value with the whitespace around it dropped, or why
+/// it is not one.
+fn json_value_text(bytes: &[u8]) -> Result<&str, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        format!(
+            "the result is not UTF-8 (byte {} of {} is not), so it cannot be sent as JSON",
+            e.valid_up_to(),
+            bytes.len()
+        )
+    })?;
+    serde_json::from_str::<&serde_json::value::RawValue>(text)
+        .map(|raw| raw.get())
+        .map_err(|e| format!("the result is not valid JSON ({e}), so it cannot be sent"))
+}
+
+/// A reply envelope as three runs of bytes: `head`, the result text the
+/// response holds, and `tail`. The member order is the wire order: id,
+/// status, class, action, result_b64, mime, text, result, error.
+pub(crate) struct Envelope<'a> {
+    head: Vec<u8>,
+    result: &'a [u8],
+    tail: &'static [u8],
+    pub(crate) success: bool,
+    pub(crate) kind: i32,
+}
+
+impl<'a> Envelope<'a> {
+    pub(crate) fn len(&self) -> usize {
+        self.head.len() + self.result.len() + self.tail.len()
+    }
+
+    pub(crate) fn parts(&self) -> [&[u8]; 3] {
+        [&self.head, self.result, self.tail]
+    }
+}
+
+struct Members(Vec<u8>);
+
+impl Members {
+    fn key(&mut self, key: &str) {
+        self.0.push(if self.0.is_empty() { b'{' } else { b',' });
+        let _ = serde_json::to_writer(&mut self.0, key);
+        self.0.push(b':');
+    }
+
+    fn string(&mut self, key: &str, value: &str) {
+        self.key(key);
+        let _ = serde_json::to_writer(&mut self.0, value);
+    }
+}
+
+unsafe fn lossy<'a>(p: *const c_char) -> Option<std::borrow::Cow<'a, str>> {
+    (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy())
+}
+
+/// The envelope of `response`, borrowing its result text.
+pub(crate) unsafe fn envelope<'a>(response: *const DaemonResponse) -> Envelope<'a> {
+    let r = &*response;
+    let media = r.success && !r.mime.is_null() && !r.result_bytes.is_null();
+    let checked: Result<Option<&'a str>, String> = if r.success && !media && !r.result_json.is_null() {
+        json_value_text(CStr::from_ptr(r.result_json).to_bytes()).map(Some)
+    } else {
+        Ok(None)
+    };
+    let (success, kind, result, error) = match checked {
+        Ok(result) => (r.success, r.error_kind, result, None),
+        Err(why) => (false, DAEMON_ERROR_INTERNAL, None, Some(why)),
+    };
+    let mut head = Members(Vec::with_capacity(96));
+    if let Some(id) = lossy(r.id) {
+        head.string("id", &id);
+    }
+    head.string("status", if success { "ok" } else { "error" });
+    if !success {
+        head.string("class", morloc_runtime_types::daemon_error::class_name(kind));
+    }
+    if let Some(action) = lossy(r.action) {
+        head.string("action", &action);
+    }
+    if media && success {
+        use base64::Engine;
+        let bytes = std::slice::from_raw_parts(r.result_bytes, r.result_len);
+        head.string("result_b64", &base64::engine::general_purpose::STANDARD.encode(bytes));
+        if let Some(mime) = lossy(r.mime) {
+            head.string("mime", &mime);
+        }
+        if r.result_text {
+            head.key("text");
+            head.0.extend_from_slice(b"true");
+        }
+    }
+    let result = match result {
+        Some(text) => {
+            head.key("result");
+            text.as_bytes()
+        }
+        None => &[],
+    };
+    if !success {
+        match error {
+            Some(why) => head.string("error", &why),
+            None => {
+                if let Some(e) = lossy(r.error) {
+                    head.string("error", &e);
+                }
+            }
+        }
+    }
+    Envelope { head: head.0, result, tail: b"}", success, kind }
+}
 
 pub(crate) unsafe fn serialize_response(
     response: *mut DaemonResponse,
     out_len: *mut usize,
 ) -> *mut c_char {
-    use serde_json::value::RawValue;
-    let owned = |p: *const c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
-    let mut wire = WireResponse {
-        id: owned((*response).id),
-        status: if (*response).success { "ok" } else { "error" },
-        class: (!(*response).success)
-            .then(|| morloc_runtime_types::daemon_error::class_name((*response).error_kind)),
-        action: owned((*response).action),
-        result_b64: None,
-        mime: None,
-        text: None,
-        result: None,
-        error: None,
-    };
-
-    // A media-typed (`@mime`) return carries raw bytes + a media type instead of
-    // a JSON value. Convey them across the socket wire as base64 + mime so the
-    // JSON envelope stays valid (the receiver reconstructs result_bytes/mime);
-    // reuse this for the front-end forward, which renders the media itself.
-    if (*response).success && !(*response).mime.is_null() && !(*response).result_bytes.is_null() {
-        use base64::Engine;
-        let bytes = std::slice::from_raw_parts((*response).result_bytes, (*response).result_len);
-        wire.result_b64 = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
-        wire.mime = owned((*response).mime);
-        wire.text = (*response).result_text.then_some(true);
-    } else if (*response).success && !(*response).result_json.is_null() {
-        // The value goes out as the text it is; text that is not JSON is
-        // carried as a JSON string.
-        let raw = CStr::from_ptr((*response).result_json).to_string_lossy();
-        wire.result = match serde_json::from_str::<&RawValue>(&raw) {
-            Ok(_) => RawValue::from_string(raw.into_owned()).ok(),
-            Err(_) => serde_json::to_string(raw.as_ref()).ok().and_then(|s| RawValue::from_string(s).ok()),
-        };
+    let env = envelope(response);
+    let len = env.len();
+    let buf = libc::malloc(len + 1) as *mut u8;
+    if buf.is_null() {
+        return ptr::null_mut();
     }
-
-    if !(*response).success {
-        wire.error = owned((*response).error);
+    let mut at = 0;
+    for part in env.parts() {
+        ptr::copy_nonoverlapping(part.as_ptr(), buf.add(at), part.len());
+        at += part.len();
     }
-
-    let json_str = serde_json::to_string(&wire).unwrap_or_else(|_| "{}".into());
+    *buf.add(len) = 0;
     if !out_len.is_null() {
-        *out_len = json_str.len();
+        *out_len = len;
     }
-    let c = CString::new(json_str).unwrap_or_default();
-    libc::strdup(c.as_ptr())
+    buf as *mut c_char
+}
+
+unsafe fn write_http_envelope(fd: i32, resp: *mut DaemonResponse) {
+    let env = envelope(resp);
+    let status = daemon_error_kind_to_http_status(env.kind, env.success);
+    let [head, result, tail] = env.parts();
+    let extra: &CStr = if status == 503 { c"Retry-After: 1\r\n" } else { c"" };
+    crate::http_ffi::write_response_parts(fd, status, "application/json", &[head, result, tail, b"\n"], extra);
+}
+
+unsafe fn write_lp_envelope(fd: i32, resp: *mut DaemonResponse, errmsg: *mut *mut c_char) -> bool {
+    let env = envelope(resp);
+    if env.len() > u32::MAX as usize {
+        // NET-10
+        write_lp_error(fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(env.len()));
+        return true;
+    }
+    write_lp_parts(fd, &env.parts(), errmsg)
 }
 
 // -- Discovery ----------------------------------------------------------------
@@ -1656,14 +1733,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     };
 
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
-        let mut out = String::from_utf8_lossy(&stdout_buf).into_owned();
-        // Trim trailing newlines
-        while out.ends_with('\n') || out.ends_with('\r') {
-            out.pop();
-        }
-        (*resp).success = true;
-        let c = CString::new(out).unwrap_or_default();
-        (*resp).result_json = libc::strdup(c.as_ptr());
+        set_command_output(resp, subcmd, &stdout_buf);
     } else {
         (*resp).success = false;
         // Classify by exit cause. SIGXCPU means the child blew the
@@ -1686,6 +1756,55 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     }
 
     resp
+}
+
+unsafe fn set_command_output(resp: *mut DaemonResponse, subcmd: &str, stdout_buf: &[u8]) {
+    let mut end = stdout_buf.len();
+    while end > 0 && matches!(stdout_buf[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    match command_result(subcmd, &stdout_buf[..end]) {
+        Ok(json) => {
+            (*resp).success = true;
+            (*resp).result_json = strdup_bytes(json.as_bytes());
+        }
+        Err(why) => {
+            (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_FAILED;
+            (*resp).error = strdup_bytes(why.as_bytes());
+        }
+    }
+}
+
+fn command_result(subcmd: &str, out: &[u8]) -> Result<String, String> {
+    let text = std::str::from_utf8(out).map_err(|e| {
+        format!(
+            "`morloc {subcmd}` printed {} bytes that are not UTF-8 (byte {} is not), \
+             so its result cannot be sent as JSON",
+            out.len(),
+            e.valid_up_to()
+        )
+    })?;
+    if let Some(at) = text.find('\0') {
+        return Err(format!(
+            "`morloc {subcmd}` printed a NUL byte (byte {at} of {}), so its result cannot be sent as JSON",
+            out.len()
+        ));
+    }
+    Ok(match serde_json::from_str::<&serde_json::value::RawValue>(text) {
+        Ok(raw) => raw.get().to_string(),
+        Err(_) => serde_json::to_string(text).map_err(|e| e.to_string())?,
+    })
+}
+
+unsafe fn strdup_bytes(b: &[u8]) -> *mut c_char {
+    let p = libc::malloc(b.len() + 1) as *mut u8;
+    if p.is_null() {
+        std::alloc::handle_alloc_error(std::alloc::Layout::array::<u8>(b.len() + 1).unwrap_or(std::alloc::Layout::new::<u8>()));
+    }
+    ptr::copy_nonoverlapping(b.as_ptr(), p, b.len());
+    *p.add(b.len()) = 0;
+    p as *mut c_char
 }
 
 fn classify_failed_command(status: libc::c_int, subcmd: &str, stdout_buf: &[u8], stderr_buf: &[u8]) -> (String, i32) {
@@ -1958,23 +2077,15 @@ impl Drop for ReplyRef {
 /// # Safety
 /// `packet` must be a well-formed morloc packet.
 unsafe fn reply_reference(packet: *const u8) -> ReplyRef {
-    use crate::packet::{PacketHeader, PACKET_SOURCE_RPTR};
-    use crate::shm::RelPtr;
-    let none = ReplyRef(ptr::null_mut());
-    if packet.is_null() {
-        return none;
-    }
-    let header = packet as *const PacketHeader;
-    if (*header).command.data.source != PACKET_SOURCE_RPTR {
-        return none;
-    }
-    let payload_start = 32 + (*header).offset as usize;
-    if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
-        return none;
-    }
-    let relptr = *(packet.add(payload_start) as *const RelPtr);
     // SHM-3: the pool took this reference for the daemon before the reply left.
-    crate::shm::rel2abs(relptr).map_or(none, ReplyRef)
+    match crate::packet_ffi::packet_rptr_block(packet) {
+        Ok(Some(block)) => ReplyRef(block),
+        Ok(None) => ReplyRef(ptr::null_mut()),
+        Err(e) => {
+            eprintln!("morloc: the daemon could not take the reference a reply carries: {e}");
+            ReplyRef(ptr::null_mut())
+        }
+    }
 }
 
 // -- Dispatch -----------------------------------------------------------------
@@ -2845,39 +2956,27 @@ unsafe fn write_lp_message(
     len: usize,
     errmsg: *mut *mut c_char,
 ) -> bool {
+    let body: &[u8] = if len == 0 { &[] } else { std::slice::from_raw_parts(data as *const u8, len) };
+    write_lp_parts(fd, &[body], errmsg)
+}
+
+unsafe fn write_lp_parts(fd: i32, parts: &[&[u8]], errmsg: *mut *mut c_char) -> bool {
     clear_errmsg(errmsg);
+    let len: usize = parts.iter().map(|p| p.len()).sum();
     // NET-10
     if len > u32::MAX as usize {
         set_errmsg(errmsg, &MorlocError::Other(format!("a {len}-byte message exceeds the socket protocol's 4 GiB frame")));
         return false;
     }
     note_reply_started();
-
-    let len_buf: [u8; 4] = [
-        ((len >> 24) & 0xFF) as u8,
-        ((len >> 16) & 0xFF) as u8,
-        ((len >> 8) & 0xFF) as u8,
-        (len & 0xFF) as u8,
-    ];
-
-    // send_all retries on EAGAIN (non-blocking client fd on macOS) rather than
-    // treating a full send buffer as a fatal error mid-message.
-    if !crate::ipc_ffi::send_all(fd, len_buf.as_ptr(), 4) {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to write message length prefix".into()),
-        );
+    let len_buf = (len as u32).to_be_bytes();
+    let mut iov: Vec<libc::iovec> = Vec::with_capacity(parts.len() + 1);
+    iov.push(libc::iovec { iov_base: len_buf.as_ptr() as *mut c_void, iov_len: 4 });
+    iov.extend(parts.iter().map(|p| libc::iovec { iov_base: p.as_ptr() as *mut c_void, iov_len: p.len() }));
+    if crate::ipc_ffi::send_parts(fd, &mut iov).is_err() {
+        set_errmsg(errmsg, &MorlocError::Other("Failed to write message".into()));
         return false;
     }
-
-    if !crate::ipc_ffi::send_all(fd, data as *const u8, len) {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to write message body".into()),
-        );
-        return false;
-    }
-
     true
 }
 
@@ -3034,15 +3133,7 @@ unsafe fn handle_lp_connection(
         // NET-10
         write_lp_error(client_fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(len));
     } else {
-        let mut resp_len: usize = 0;
-        let resp_json = serialize_response(resp, &mut resp_len);
-        if resp_len > u32::MAX as usize {
-            // NET-10
-            write_lp_error(client_fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(resp_len));
-        } else {
-            write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
-        }
-        libc::free(resp_json as *mut c_void);
+        write_lp_envelope(client_fd, resp, &mut write_err);
     }
     if !write_err.is_null() {
         let err_str = CStr::from_ptr(write_err).to_string_lossy();
@@ -3062,49 +3153,37 @@ unsafe fn handle_http_connection(
     shm_basename: *const c_char,
 ) {
     use crate::http_ffi::http_parse_request;
-    use crate::http_ffi::http_free_request;
     use crate::http_ffi::http_to_daemon_request;
 
-    let mut errmsg: *mut c_char = ptr::null_mut();
-    let mut too_large = false;
-    let http_req = http_parse_request(client_fd, &mut errmsg, &mut too_large);
-    if !errmsg.is_null() {
-        let (status, body) = if too_large {
+    REPLY_WITHOUT_BODY.with(|r| r.set(false));
+    let mut http_req = match http_parse_request(client_fd) {
+        Ok(r) => r,
+        Err(refusal) => {
             // NET-10
-            let why = CStr::from_ptr(errmsg).to_string_lossy();
-            (
-                morloc_runtime_types::daemon_error::http_status(DAEMON_ERROR_LIMIT, false),
-                morloc_runtime_types::daemon_error::error_body(DAEMON_ERROR_LIMIT, &why),
-            )
-        } else {
-            (400, "{\"status\":\"error\",\"class\":\"bad-request\",\"error\":\"Bad request\"}".to_string())
-        };
-        crate::http_ffi::write_response(
-            client_fd,
-            status,
-            c"application/json".as_ptr(),
-            body.as_ptr() as *const c_char,
-            body.len(),
-        );
-        libc::free(errmsg as *mut c_void);
-        if too_large {
+            let kind = if refusal.too_large { DAEMON_ERROR_LIMIT } else { DAEMON_ERROR_BAD_REQUEST };
+            let body = morloc_runtime_types::daemon_error::error_body(kind, &refusal.why);
+            crate::http_ffi::write_response(
+                client_fd,
+                morloc_runtime_types::daemon_error::http_status(kind, false),
+                c"application/json".as_ptr(),
+                body.as_ptr() as *const c_char,
+                body.len(),
+            );
             linger_close(client_fd);
-        } else {
-            libc::close(client_fd);
+            return;
         }
-        return;
-    }
+    };
+    let mut errmsg: *mut c_char = ptr::null_mut();
 
-    let head = (*http_req).method == HttpMethod::Head;
+    let head = http_req.method == HttpMethod::Head;
     REPLY_WITHOUT_BODY.with(|r| r.set(head));
     if head {
-        (*http_req).method = HttpMethod::Get;
+        http_req.method = HttpMethod::Get;
     }
     // NET-1: the liveness probe needs no token.
-    let is_probe = (*http_req).method == HttpMethod::Get
-        && CStr::from_ptr((*http_req).path.as_ptr()).to_bytes()
-            == morloc_runtime_types::bearer::LIVENESS_PATH.as_bytes();
-    if is_probe && !(*http_req).authorized {
+    let is_probe = http_req.method == HttpMethod::Get
+        && http_req.path == morloc_runtime_types::bearer::LIVENESS_PATH;
+    if is_probe && !http_req.authorized {
         let body = morloc_runtime_types::bearer::LIVENESS_BODY;
         crate::http_ffi::write_response(
             client_fd,
@@ -3113,7 +3192,6 @@ unsafe fn handle_http_connection(
             body.as_ptr() as *const c_char,
             body.len(),
         );
-        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
@@ -3122,7 +3200,7 @@ unsafe fn handle_http_connection(
     // reaching daemon_dispatch (which would otherwise process them
     // through the Health pipeline -- including the recovery gate).
     // NET-1
-    if (*http_req).method != HttpMethod::Options && !(*http_req).authorized {
+    if http_req.method != HttpMethod::Options && !http_req.authorized {
         let body = b"{\"status\":\"error\",\"class\":\"unauthorized\",\"error\":\"unauthorized\"}";
         crate::http_ffi::write_response_ex(
             client_fd,
@@ -3132,12 +3210,11 @@ unsafe fn handle_http_connection(
             body.len(),
             c"WWW-Authenticate: Bearer\r\n".as_ptr(),
         );
-        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
 
-    if (*http_req).method == HttpMethod::Options {
+    if http_req.method == HttpMethod::Options {
         let ct = b"application/json\0";
         crate::http_ffi::write_response(
             client_fd,
@@ -3146,12 +3223,11 @@ unsafe fn handle_http_connection(
             ptr::null(),
             0,
         );
-        http_free_request(http_req);
         libc::close(client_fd);
         return;
     }
 
-    if let Some(method) = crate::http_ffi::eval_route(http_req) {
+    if let Some(method) = crate::http_ffi::eval_route(&http_req) {
         if let Some((kind, msg)) = eval_refusal(method, Transport::Http) {
             let body = morloc_runtime_types::daemon_error::error_body(kind, msg);
             crate::http_ffi::write_response(
@@ -3161,23 +3237,23 @@ unsafe fn handle_http_connection(
                 body.as_ptr() as *const c_char,
                 body.len(),
             );
-            http_free_request(http_req);
             libc::close(client_fd);
             return;
         }
     }
     let mut route_kind: i32 = DAEMON_ERROR_BAD_REQUEST;
-    let req = http_to_daemon_request(http_req, &mut errmsg, &mut route_kind);
-    if !errmsg.is_null() {
-        // Build the error body from the actual errmsg so unknown-endpoint
-        // and missing-field cases get distinguishable messages, and use
-        // the kind that http_to_daemon_request returned so 404 vs 400
-        // routes correctly.
-        let err_str = CStr::from_ptr(errmsg).to_string_lossy();
+    let req = http_to_daemon_request(&http_req, &mut errmsg, &mut route_kind);
+    drop(http_req);
+    if req.is_null() {
+        let err_str = if errmsg.is_null() {
+            "the request could not be routed".to_string()
+        } else {
+            CStr::from_ptr(errmsg).to_string_lossy().into_owned()
+        };
         let body = format!(
             "{{\"status\":\"error\",\"class\":\"{}\",\"error\":{}}}\n",
             morloc_runtime_types::daemon_error::class_name(route_kind),
-            serde_json::Value::String(err_str.into_owned())
+            serde_json::Value::String(err_str)
         );
         let body_c = CString::new(body.as_str()).unwrap_or_default();
         let status = daemon_error_kind_to_http_status(route_kind, false);
@@ -3189,12 +3265,10 @@ unsafe fn handle_http_connection(
             body_c.as_ptr(),
             body.len(),
         );
-        http_free_request(http_req);
         libc::free(errmsg as *mut c_void);
         libc::close(client_fd);
         return;
     }
-    http_free_request(http_req);
 
     // For the duration of this dispatch, enable HTTP `?render=` resolution and
     // the raw-media response form: a return whose type carries a `@mime` comes
@@ -3204,57 +3278,19 @@ unsafe fn handle_http_connection(
     let resp = dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
 
-    let status = daemon_error_kind_to_http_status(
-        (*resp).error_kind, (*resp).success,
-    );
-
     if (*resp).success && !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
         // Media-typed return (`@mime`): send the raw content bytes with the
         // declared Content-Type instead of the JSON envelope, so an HTTP client
         // gets a real image/PDF/... it can save. Errors still go out as JSON.
         crate::http_ffi::write_response(
             client_fd,
-            status,
+            daemon_error_kind_to_http_status((*resp).error_kind, true),
             (*resp).mime,
             (*resp).result_bytes as *const c_char,
             (*resp).result_len,
         );
     } else {
-        let mut resp_len: usize = 0;
-        let resp_json = serialize_response(resp, &mut resp_len);
-
-        // Append newline for terminal-friendly output
-        let resp_body = libc::malloc(resp_len + 2) as *mut u8;
-        ptr::copy_nonoverlapping(resp_json as *const u8, resp_body, resp_len);
-        *resp_body.add(resp_len) = b'\n';
-        *resp_body.add(resp_len + 1) = 0;
-
-        let ct = b"application/json\0";
-        // 503 carries Retry-After: 1 so HTTP clients with automatic-retry
-        // middleware (curl --retry, axios-retry, etc.) back off appropriately
-        // during the brief pool-crash recovery window.
-        if status == 503 {
-            let extra = b"Retry-After: 1\r\n\0";
-            crate::http_ffi::write_response_ex(
-                client_fd,
-                status,
-                ct.as_ptr() as *const c_char,
-                resp_body as *const c_char,
-                resp_len + 1,
-                extra.as_ptr() as *const c_char,
-            );
-        } else {
-            crate::http_ffi::write_response(
-                client_fd,
-                status,
-                ct.as_ptr() as *const c_char,
-                resp_body as *const c_char,
-                resp_len + 1,
-            );
-        }
-
-        libc::free(resp_body as *mut c_void);
-        libc::free(resp_json as *mut c_void);
+        write_http_envelope(client_fd, resp);
     }
 
     daemon_free_request(req);
@@ -4783,5 +4819,306 @@ mod reply_tests {
         }
         assert_eq!((held, left), (2, 1));
         assert!(!recorded);
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    unsafe fn c_bytes(b: &[u8]) -> *mut c_char {
+        let p = libc::malloc(b.len() + 1) as *mut u8;
+        ptr::copy_nonoverlapping(b.as_ptr(), p, b.len());
+        *p.add(b.len()) = 0;
+        p as *mut c_char
+    }
+
+    unsafe fn response(
+        success: bool,
+        kind: i32,
+        id: Option<&str>,
+        action: Option<&str>,
+        result: Option<&[u8]>,
+        error: Option<&str>,
+    ) -> *mut DaemonResponse {
+        let r = libc::calloc(1, std::mem::size_of::<DaemonResponse>()) as *mut DaemonResponse;
+        (*r).success = success;
+        (*r).error_kind = kind;
+        (*r).id = id.map_or(ptr::null_mut(), |s| c_bytes(s.as_bytes()));
+        (*r).action = action.map_or(ptr::null_mut(), |s| c_bytes(s.as_bytes()));
+        (*r).result_json = result.map_or(ptr::null_mut(), |b| c_bytes(b));
+        (*r).error = error.map_or(ptr::null_mut(), |s| c_bytes(s.as_bytes()));
+        r
+    }
+
+    unsafe fn serialized(r: *mut DaemonResponse) -> Vec<u8> {
+        let mut len = 0usize;
+        let p = serialize_response(r, &mut len);
+        let out = CStr::from_ptr(p).to_bytes().to_vec();
+        assert_eq!(out.len(), len);
+        libc::free(p as *mut c_void);
+        out
+    }
+
+    fn ok_of(result: &str) -> Vec<u8> {
+        format!("{{\"status\":\"ok\",\"result\":{result}}}").into_bytes()
+    }
+
+    fn check(r: *mut DaemonResponse, want: &[u8]) {
+        unsafe {
+            let got = serialized(r);
+            assert_eq!(String::from_utf8_lossy(&got), String::from_utf8_lossy(want));
+            daemon_free_response(r);
+        }
+    }
+
+    #[test]
+    fn a_scalar_result_keeps_its_bytes() {
+        let r = unsafe { response(true, 0, Some("7"), None, Some(b"42"), None) };
+        check(r, b"{\"id\":\"7\",\"status\":\"ok\",\"result\":42}");
+    }
+
+    #[test]
+    fn a_string_result_keeps_its_escapes() {
+        let text = "\"a\\\"b\\\\c\\/d\\n\\u0001\u{e9}\"";
+        let r = unsafe { response(true, 0, None, None, Some(text.as_bytes()), None) };
+        check(r, &ok_of(text));
+    }
+
+    #[test]
+    fn whitespace_around_a_result_is_dropped() {
+        let r = unsafe { response(true, 0, None, None, Some(b" [1, 2] \n"), None) };
+        check(r, &ok_of("[1, 2]"));
+    }
+
+    #[test]
+    fn a_large_array_result_keeps_its_bytes() {
+        let items: Vec<String> = (0..200_000).map(|i| format!("{}", i as f64 * 1.000123 + 0.5)).collect();
+        let text = format!("[{}]", items.join(","));
+        let r = unsafe { response(true, 0, None, None, Some(text.as_bytes()), None) };
+        check(r, &ok_of(&text));
+    }
+
+    #[test]
+    fn a_record_result_follows_its_action() {
+        let text = "{\"name\":\"x\",\"n\":[1,2.5e-3,18446744073709551617],\"r\":{\"a\":null,\"b\":true}}";
+        let r = unsafe { response(true, 0, Some("r1"), Some("json"), Some(text.as_bytes()), None) };
+        check(r, format!("{{\"id\":\"r1\",\"status\":\"ok\",\"action\":\"json\",\"result\":{text}}}").as_bytes());
+    }
+
+    #[test]
+    fn an_error_names_its_class_and_escapes_its_message() {
+        let r = unsafe {
+            response(false, DAEMON_ERROR_NOT_FOUND, Some("q\"1"), None, Some(b"1"),
+                     Some("no \"such\" command\n\ttab \u{1} \u{e9}"))
+        };
+        check(r, "{\"id\":\"q\\\"1\",\"status\":\"error\",\"class\":\"not-found\",\
+                  \"error\":\"no \\\"such\\\" command\\n\\ttab \\u0001 \u{e9}\"}".as_bytes());
+    }
+
+    #[test]
+    fn a_media_result_is_base64_with_its_type() {
+        unsafe {
+            let r = response(true, 0, Some("m"), Some("png"), None, None);
+            let bytes: &[u8] = b"\x89PNG\x00\xff";
+            (*r).result_bytes = libc::malloc(bytes.len()) as *mut u8;
+            ptr::copy_nonoverlapping(bytes.as_ptr(), (*r).result_bytes, bytes.len());
+            (*r).result_len = bytes.len();
+            (*r).mime = c_bytes(b"text/plain; charset=\"utf-8\"");
+            (*r).result_text = true;
+            check(r, b"{\"id\":\"m\",\"status\":\"ok\",\"action\":\"png\",\"result_b64\":\"iVBORwD/\",\
+                       \"mime\":\"text/plain; charset=\\\"utf-8\\\"\",\"text\":true}");
+        }
+    }
+
+    #[test]
+    fn a_success_without_a_result_has_no_result_member() {
+        let r = unsafe { response(true, 0, None, None, None, None) };
+        check(r, b"{\"status\":\"ok\"}");
+    }
+
+    #[test]
+    fn a_deep_result_is_carried_whole() {
+        let text = format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000));
+        let r = unsafe { response(true, 0, None, None, Some(text.as_bytes()), None) };
+        check(r, &ok_of(&text));
+    }
+
+    #[test]
+    fn a_result_that_is_not_json_is_a_failure() {
+        unsafe {
+            let r = response(true, 0, Some("1"), None, Some(b"Int -> Int"), None);
+            let got = String::from_utf8(serialized(r)).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+            assert_eq!(v["status"], "error", "{got}");
+            assert!(v["error"].as_str().unwrap().contains("not valid JSON"), "{got}");
+            assert!(v.get("result").is_none(), "{got}");
+            daemon_free_response(r);
+        }
+    }
+
+    #[test]
+    fn a_result_that_is_not_utf8_is_a_failure() {
+        unsafe {
+            let r = response(true, 0, None, None, Some(b"\"a\xffb\""), None);
+            let got = String::from_utf8(serialized(r)).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+            assert_eq!(v["status"], "error", "{got}");
+            assert!(v["error"].as_str().unwrap().contains("UTF-8"), "{got}");
+            daemon_free_response(r);
+        }
+    }
+
+    unsafe fn command_output(stdout: &[u8]) -> *mut DaemonResponse {
+        let r = libc::calloc(1, std::mem::size_of::<DaemonResponse>()) as *mut DaemonResponse;
+        set_command_output(r, "eval", stdout);
+        r
+    }
+
+    unsafe fn result_text(r: *mut DaemonResponse) -> Option<String> {
+        (!(*r).result_json.is_null()).then(|| CStr::from_ptr((*r).result_json).to_str().unwrap().to_string())
+    }
+
+    unsafe fn error_text(r: *mut DaemonResponse) -> String {
+        CStr::from_ptr((*r).error).to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn command_output_with_a_nul_byte_is_a_failure() {
+        unsafe {
+            let r = command_output(b"[\"a\0b\"]\n");
+            assert!(!(*r).success);
+            assert_eq!(result_text(r), None);
+            assert!(error_text(r).contains("NUL"), "{}", error_text(r));
+            daemon_free_response(r);
+        }
+    }
+
+    #[test]
+    fn command_output_that_is_not_utf8_is_a_failure() {
+        unsafe {
+            let r = command_output(b"\"caf\xe9\"\n");
+            assert!(!(*r).success);
+            assert_eq!(result_text(r), None);
+            assert!(error_text(r).contains("UTF-8"), "{}", error_text(r));
+            daemon_free_response(r);
+        }
+    }
+
+    #[test]
+    fn command_output_that_is_json_is_kept() {
+        unsafe {
+            let r = command_output(b"{\"a\": [1, 2]}\r\n\n");
+            assert!((*r).success);
+            assert_eq!(result_text(r).as_deref(), Some("{\"a\": [1, 2]}"));
+            daemon_free_response(r);
+        }
+    }
+
+    #[test]
+    fn command_output_that_is_text_becomes_a_json_string() {
+        unsafe {
+            let r = command_output(b"Int -> \"Str\"\n");
+            assert!((*r).success);
+            assert_eq!(result_text(r).as_deref(), Some("\"Int -> \\\"Str\\\"\""));
+            daemon_free_response(r);
+        }
+    }
+
+    fn socket_pair() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        assert_eq!(
+            unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+            0
+        );
+        (fds[0], fds[1])
+    }
+
+    fn read_to_end(fd: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+            if n <= 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+    }
+
+    fn http_bytes(write: impl FnOnce(i32) + Send + 'static) -> Vec<u8> {
+        let (a, b) = socket_pair();
+        let t = std::thread::spawn(move || {
+            write(a);
+            unsafe { libc::close(a) };
+        });
+        let out = read_to_end(b);
+        t.join().unwrap();
+        unsafe { libc::close(b) };
+        out
+    }
+
+    #[test]
+    fn an_http_reply_is_the_envelope_and_a_newline() {
+        let text: String = format!("[{}]", (0..50_000).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        for (success, kind) in [(true, 0), (false, DAEMON_ERROR_RECOVERING), (false, DAEMON_ERROR_TIMEOUT)] {
+            let text = text.clone();
+            let want = {
+                let text = text.clone();
+                http_bytes(move |fd| unsafe {
+                    let r = response(success, kind, Some("h"), None, Some(text.as_bytes()), Some("busy"));
+                    let mut body = serialized(r);
+                    body.push(b'\n');
+                    let status = daemon_error_kind_to_http_status(kind, success);
+                    if status == 503 {
+                        crate::http_ffi::write_response_ex(fd, status, c"application/json".as_ptr(),
+                            body.as_ptr() as *const c_char, body.len(), c"Retry-After: 1\r\n".as_ptr());
+                    } else {
+                        crate::http_ffi::write_response(fd, status, c"application/json".as_ptr(),
+                            body.as_ptr() as *const c_char, body.len());
+                    }
+                    daemon_free_response(r);
+                })
+            };
+            let got = http_bytes(move |fd| unsafe {
+                let r = response(success, kind, Some("h"), None, Some(text.as_bytes()), Some("busy"));
+                write_http_envelope(fd, r);
+                daemon_free_response(r);
+            });
+            assert_eq!(String::from_utf8_lossy(&got), String::from_utf8_lossy(&want));
+        }
+    }
+
+    #[test]
+    fn a_socket_reply_is_the_envelope_in_one_frame() {
+        let text: String = format!("[{}]", (0..50_000).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        let (a, b) = socket_pair();
+        let want = unsafe {
+            let r = response(true, 0, Some("s"), Some("json"), Some(text.as_bytes()), None);
+            let want = serialized(r);
+            let t = {
+                let r = r as usize;
+                std::thread::spawn(move || {
+                    let mut err: *mut c_char = ptr::null_mut();
+                    let ok = write_lp_envelope(a, r as *mut DaemonResponse, &mut err);
+                    assert!(ok && err.is_null());
+                })
+            };
+            let mut len = 0usize;
+            let mut err: *mut c_char = ptr::null_mut();
+            let msg = read_lp_message(b, false, &mut len, &mut err, &mut false);
+            t.join().unwrap();
+            assert!(err.is_null());
+            let got = std::slice::from_raw_parts(msg as *const u8, len).to_vec();
+            libc::free(msg as *mut c_void);
+            daemon_free_response(r);
+            assert_eq!(got, want);
+            want
+        };
+        assert!(!want.is_empty());
+        unsafe {
+            libc::close(a);
+            libc::close(b);
+        }
     }
 }

@@ -555,6 +555,19 @@ pub(crate) unsafe fn try_load_stream_packet_file(
     let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
 
     match rs.serial_type {
+        // The saved output of a stage is read here, as the program's own
+        // (FMT-10), since the pool would read the file it names as data
+        // from outside.
+        SerialType::Array if crate::origin::names_stage_file(path) => {
+            let arr = crate::stream::shared_load_stream_file_as_array(&path_str, Some(&rs))?;
+            let mut inner_err: *mut c_char = ptr::null_mut();
+            let pkt = argument_packet(arr as *mut c_void, schema, &mut inner_err);
+            if pkt.is_null() {
+                let _ = shm::shfree(arr);
+                return Err(wrap_errmsg_with(inner_err, &path_str));
+            }
+            Ok(Some(pkt))
+        }
         SerialType::Array => {
             // Small indirection packet: payload = path bytes.
             let pkt = crate::packet_ffi::make_data_indirection_packet(path, schema);
@@ -725,7 +738,8 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     let read = pread_exact(fd, landing.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
     read?;
-    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?))
+    let origin = crate::origin::of_stat(&sb);
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, origin)?))
 }
 
 /// Read exactly `len` bytes of `fd` at `offset` into `dst`.
@@ -917,7 +931,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?;
+    let origin = crate::origin::of_stat(&sb);
+    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, origin)?;
     crate::morloc_trace!("[fastpath] relocation took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
@@ -934,6 +949,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
     data_size: usize,
     schema: *const CSchema,
     path_hint: &str,
+    origin: crate::origin::Origin,
 ) -> Result<Option<*mut c_void>, MorlocError> {
     if data.is_null() || data_size < 32 {
         return Ok(None);
@@ -982,7 +998,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint, crate::origin::Origin::Outside)?;
+    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint, origin)?;
     Ok(Some(landed as *mut c_void))
 }
 
@@ -1007,9 +1023,21 @@ pub(crate) unsafe fn read_voidstar_binary_with_hint(
     vol_idx_hint: u16,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
+    read_voidstar_binary_from(blob, blob_size, schema, vol_idx_hint, crate::origin::Origin::Outside, errmsg)
+}
+
+/// [`read_voidstar_binary_with_hint`] for a payload of `origin`.
+unsafe fn read_voidstar_binary_from(
+    blob: *const u8,
+    blob_size: usize,
+    schema: *const CSchema,
+    vol_idx_hint: u16,
+    origin: crate::origin::Origin,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
     clear_errmsg(errmsg);
     let blob = std::slice::from_raw_parts(blob, blob_size);
-    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside) {
+    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint, origin) {
         Ok(base) => base as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -1178,7 +1206,7 @@ fn assemble_row_json(
         SerialType::Map => {
             if row_schema.keys.len() != field_jsons.len() {
                 return Err(MorlocError::Other(format!(
-                    "form: list table fallback: record schema has {} keys but row produced {} values",
+                    "form: list: a record has {} fields but its row gave {} values",
                     row_schema.keys.len(),
                     field_jsons.len(),
                 )));
@@ -1196,120 +1224,214 @@ fn assemble_row_json(
             Ok(format!("{{{}}}", parts.join(",")))
         }
         other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(MorlocError::Other(format!(
-            "form: list table fallback: row schema must be tuple or record; got {:?}",
+            "form: list: a row is a tuple or a record; got {:?}",
             other
         ))),
     }
 }
 
-/// Per-line whitespace-delimited split for the table fallback. Each
-/// line is split via Rust's `split_whitespace` (one or more characters
-/// from `[\s] \ [\n]`, since lines have already been split on `\n`).
-/// Empty cells cannot be expressed; column count mismatches surface as
-/// an error.
-fn split_whitespace_rows(
-    lines: &[&str],
-    row_schema: &crate::schema::Schema,
-) -> Result<Vec<String>, MorlocError> {
-    let arity = row_schema.parameters.len();
-    if arity == 0 {
-        return Err(MorlocError::Other(
-            "form: list whitespace fallback: row element type has arity 0".into(),
-        ));
-    }
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    for (line_no, line) in lines.iter().enumerate() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() != arity {
-            return Err(MorlocError::Other(format!(
-                "form: list whitespace fallback: line {} has {} whitespace-separated columns; expected {}",
-                line_no + 1,
-                fields.len(),
-                arity,
-            )));
-        }
-        let json_fields: Vec<String> = fields
-            .iter()
-            .zip(row_schema.parameters.iter())
-            .map(|(f, s)| format_field_as_json(f, s.serial_type))
-            .collect();
-        out.push(assemble_row_json(&json_fields, row_schema)?);
-    }
-    Ok(out)
+/// Whether `text` is exactly one JSON value, with nothing after it.
+fn single_json_value(text: &str) -> Result<(), String> {
+    use serde::Deserialize;
+    let mut de = serde_json::Deserializer::from_str(text);
+    serde::de::IgnoredAny::deserialize(&mut de).map_err(|e| e.to_string())?;
+    de.end().map_err(|e| e.to_string())
 }
 
-/// Parse the input bytes as a headerless delimited table whose row
-/// schema is `row_schema` (either a Tuple or a record / Map).
-///
-/// `@form list` is headerless; a table with column names is a `Table`.
-fn parse_delimited_rows(
-    bytes: &[u8],
-    delimiter: u8,
-    row_schema: &crate::schema::Schema,
-) -> Result<Vec<String>, MorlocError> {
-    use arrow_array::{Array, RecordBatch, StringArray};
-    use arrow_csv::ReaderBuilder;
-    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-    use std::io::Cursor;
-
-    let arity = row_schema.parameters.len();
-    if arity == 0 {
-        return Err(MorlocError::Other(
-            "form: list table fallback: row schema has arity 0".into(),
-        ));
+/// A floating-point element, or an optional one.
+fn is_float_schema(s: &crate::schema::Schema) -> bool {
+    use crate::schema::SerialType;
+    match s.serial_type {
+        SerialType::Float32 | SerialType::Float64 => true,
+        SerialType::Optional => s.parameters.first().is_some_and(is_float_schema),
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
     }
+}
 
-    let fields: Vec<Field> = (0..arity)
-        .map(|i| Field::new(format!("col{}", i), DataType::Utf8, true))
-        .collect();
-    let arrow_schema = std::sync::Arc::new(ArrowSchema::new(fields));
+/// The JSON for one element or cell of `@form list` input, read by its
+/// schema: text for a string-like value, the loader's spelling of `nan`,
+/// `inf` and `-inf` for a floating-point one, and otherwise exactly one
+/// JSON value, so that text never crosses into the next element or field.
+fn cell_json(text: &str, s: &crate::schema::Schema) -> Result<String, String> {
+    use crate::schema::SerialType;
+    match s.serial_type {
+        SerialType::String | SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            Ok(format_field_as_json(text, s.serial_type))
+        }
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => {
+            let t = text.trim();
+            if is_float_schema(s) && crate::delimited::nonfinite(t).is_some() {
+                return Ok(format!("\"{}\"", t));
+            }
+            single_json_value(text)?;
+            Ok(text.to_string())
+        }
+    }
+}
 
-    let reader = ReaderBuilder::new(arrow_schema.clone())
-        .with_header(false)
-        .with_delimiter(delimiter)
-        .build(Cursor::new(bytes))
-        .map_err(|e| {
+/// Why a cell or line was refused: the type it should be, where a cell can
+/// spell one, or that it is not one value.
+fn not_one_value(text: &str, s: &crate::schema::Schema) -> String {
+    match crate::delimited::ColType::from_schema(s) {
+        Some(ct) => format!("`{}` is not of type {}", text, ct.name()),
+        None => format!("`{}` is not one value", text),
+    }
+}
+
+/// How the rows of a tuple or record `@form list` are split.
+#[derive(Clone, Copy)]
+enum RowDelim {
+    Char(u8),
+    Whitespace,
+}
+
+/// The delimiter of every row, chosen once from the first row: TAB, then
+/// comma, then whitespace, the first that splits it into one cell per
+/// field. A later row is read with the same delimiter whatever it holds.
+fn choose_row_delimiter(
+    first: &str,
+    line: usize,
+    row: &crate::schema::Schema,
+) -> Result<RowDelim, MorlocError> {
+    let arity = row.parameters.len();
+    let count = |d: u8| -> usize {
+        crate::delimited::Tokenizer::new(first.as_bytes(), 0, 1, d)
+            .next_record()
+            .ok()
+            .flatten()
+            .map_or(0, |r| r.cells.len())
+    };
+    let (tabs, commas, words) = (count(b'\t'), count(b','), first.split_whitespace().count());
+    if tabs == arity {
+        Ok(RowDelim::Char(b'\t'))
+    } else if commas == arity {
+        Ok(RowDelim::Char(b','))
+    } else if words == arity {
+        Ok(RowDelim::Whitespace)
+    } else {
+        Err(MorlocError::Other(format!(
+            "form: list: line {}: {} by TAB, {} by comma, {} by whitespace, but a row has {} {}",
+            line,
+            crate::delimited::count_cells(tabs),
+            crate::delimited::count_cells(commas),
+            crate::delimited::count_cells(words),
+            arity,
+            field_list(row),
+        )))
+    }
+}
+
+/// The fields of a row, for a message: `fields (a, b)` or `elements`.
+fn field_list(row: &crate::schema::Schema) -> String {
+    if row.keys.is_empty() {
+        if row.parameters.len() == 1 { "element".into() } else { "elements".into() }
+    } else {
+        let names: Vec<&str> = row.keys.iter().map(|k| k.as_str()).collect();
+        format!("{} ({})", if names.len() == 1 { "field" } else { "fields" }, names.join(", "))
+    }
+}
+
+/// A field of a row, for a message.
+fn field_name(row: &crate::schema::Schema, i: usize) -> String {
+    match row.keys.get(i) {
+        Some(k) => format!("field `{}`", k),
+        None => format!("element {}", i + 1),
+    }
+}
+
+/// The JSON of one row from its cells, each read by its field's schema.
+fn row_json(cells: &[&str], line: usize, row: &crate::schema::Schema) -> Result<String, MorlocError> {
+    let arity = row.parameters.len();
+    if cells.len() != arity {
+        return Err(MorlocError::Other(format!(
+            "form: list: line {}: {}, but a row has {} {}",
+            line,
+            crate::delimited::count_cells(cells.len()),
+            arity,
+            field_list(row),
+        )));
+    }
+    let mut fields = Vec::with_capacity(arity);
+    for (i, (cell, s)) in cells.iter().zip(row.parameters.iter()).enumerate() {
+        let j = cell_json(cell, s).map_err(|_| {
             MorlocError::Other(format!(
-                "form: list table fallback: failed to open CSV/TSV reader: {}",
-                e
+                "form: list: line {}, {}: {}",
+                line,
+                field_name(row, i),
+                not_one_value(cell, s)
             ))
         })?;
+        fields.push(j);
+    }
+    assemble_row_json(&fields, row)
+}
 
-    let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        MorlocError::Other(format!(
-            "form: list table fallback: failed to read delimited rows: {}",
-            e
-        ))
-    })?;
-
-    let mut out: Vec<String> = Vec::new();
-    for batch in batches {
-        if batch.num_columns() != arity {
-            return Err(MorlocError::Other(format!(
-                "form: list table fallback: batch has {} columns; expected {}",
-                batch.num_columns(),
-                arity
-            )));
+/// The elements of inline `@form list` input, each with the line it
+/// starts on. Each line is one element. For a tuple or record element, a
+/// first line that is not a JSON value makes the input delimited rows,
+/// split by the delimiter its first row decides.
+fn inline_list_parts(
+    lines: &[&str],
+    text: &str,
+    elem: &crate::schema::Schema,
+    au1: bool,
+    rows: bool,
+) -> Result<Vec<(usize, String)>, (usize, MorlocError)> {
+    let first = lines.iter().position(|l| !l.trim().is_empty());
+    let json_lines = !rows
+        || first.map_or(true, |i| {
+            let t = lines[i].trim_start();
+            (t.starts_with('{') || t.starts_with('[')) && single_json_value(t).is_ok()
+        });
+    let mut out = Vec::with_capacity(lines.len());
+    if json_lines {
+        for (i, line) in lines.iter().enumerate() {
+            let v = if au1 && !line.trim_start().starts_with('[') {
+                let bytes: Vec<String> = line.as_bytes().iter().map(|b| b.to_string()).collect();
+                format!("[{}]", bytes.join(","))
+            } else {
+                cell_json(line, elem).map_err(|_| {
+                    (i + 1, MorlocError::Other(format!("form: list: line {}: {}", i + 1, not_one_value(line, elem))))
+                })?
+            };
+            out.push((i + 1, v));
         }
-        let cols: Vec<&StringArray> = batch
-            .columns()
-            .iter()
-            .map(|c| {
-                c.as_any().downcast_ref::<StringArray>().expect(
-                    "ReaderBuilder produced non-Utf8 array despite all-Utf8 schema",
-                )
-            })
-            .collect();
-        for row in 0..batch.num_rows() {
-            let mut row_fields: Vec<String> = Vec::with_capacity(arity);
-            for (col_idx, col) in cols.iter().enumerate() {
-                let raw = if col.is_null(row) { "" } else { col.value(row) };
-                row_fields.push(format_field_as_json(
-                    raw,
-                    row_schema.parameters[col_idx].serial_type,
-                ));
+        return Ok(out);
+    }
+    let first = match first {
+        Some(i) => i,
+        None => return Ok(out),
+    };
+    match choose_row_delimiter(lines[first], first + 1, elem).map_err(|e| (first + 1, e))? {
+        RowDelim::Whitespace => {
+            for (i, line) in lines.iter().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let cells: Vec<&str> = line.split_whitespace().collect();
+                out.push((i + 1, row_json(&cells, i + 1, elem).map_err(|e| (i + 1, e))?));
             }
-            out.push(assemble_row_json(&row_fields, row_schema)?);
+        }
+        RowDelim::Char(d) => {
+            let mut tok = crate::delimited::Tokenizer::new(text.as_bytes(), 0, 1, d);
+            loop {
+                let at = tok.line();
+                let rec = match tok.next_record().map_err(|e| (at, MorlocError::Other(format!("form: list: {}", e))))? {
+                    Some(r) => r,
+                    None => break,
+                };
+                // a blank line holds no row, under every delimiter
+                if rec.cells.len() == 1
+                    && !rec.cells[0].quoted
+                    && String::from_utf8_lossy(&rec.cells[0].text).trim().is_empty()
+                {
+                    continue;
+                }
+                let texts: Vec<std::borrow::Cow<str>> =
+                    rec.cells.iter().map(|c| String::from_utf8_lossy(&c.text)).collect();
+                let cells: Vec<&str> = texts.iter().map(|c| c.as_ref()).collect();
+                out.push((rec.line, row_json(&cells, rec.line, elem).map_err(|e| (rec.line, e))?));
+            }
         }
     }
     Ok(out)
@@ -1339,10 +1461,11 @@ pub(crate) unsafe fn try_list(
 /// `list_cfg.form` then decides how the resolved bytes are interpreted
 /// (auto-classified, packet only, bytes hybrid, or bytes-only).
 ///
-/// When the element type is a tuple, the JSON path is tried first.
-/// If that fails, the lines are reparsed via TAB, comma, and finally
-/// whitespace; whichever yields rows whose rebuilt JSON parses cleanly
-/// wins.
+/// Inline input is one element per line, each exactly one value. A tuple
+/// or record element may instead be given as delimited rows: TAB, comma or
+/// whitespace, decided once from the first row and never by which reading
+/// typechecks. An error names the line, and the field where a cell is at
+/// fault.
 unsafe fn try_list_with_config(
     data: *mut u8,
     data_size: usize,
@@ -1386,15 +1509,12 @@ unsafe fn try_list_with_config(
         return ptr::null_mut();
     }
     let elem_serial = rs.parameters[0].serial_type;
-    // The TAB/comma/whitespace fallback only makes sense when each
-    // line is the literal value being interpreted (the default
-    // inline source). For Auto/File per-element sources, each line is
-    // a path/inline-value reference that has already been resolved to
-    // a JSON-encoded element, so a row-table interpretation of the
-    // raw text would be misleading.
+    // Delimited rows are read only when each line is the value itself
+    // (the inline source); a line that names a file or a value resolved
+    // elsewhere is one element.
     let tabular_row_eligible =
         matches!(elem_serial, SerialType::Tuple | SerialType::Map);
-    let tuple_fallback_available =
+    let rows_allowed =
         tabular_row_eligible && list_cfg.source == ListElemSource::Inline;
 
     let slice = if data.is_null() {
@@ -1455,27 +1575,23 @@ unsafe fn try_list_with_config(
         && !rs.parameters[0].parameters.is_empty()
         && rs.parameters[0].parameters[0].serial_type == SerialType::Uint8;
 
-    let parts: Vec<String> = if list_cfg.source == ListElemSource::Inline {
-        let mut p: Vec<String> = Vec::with_capacity(lines.len());
-        for line in &lines {
-            let v = if is_au1_element && !line.trim_start().starts_with('[') {
-                let bytes_str: Vec<String> =
-                    line.as_bytes().iter().map(|b| b.to_string()).collect();
-                format!("[{}]", bytes_str.join(","))
-            } else {
-                match elem_serial {
-                    SerialType::String | SerialType::IFile
-        | SerialType::OStream | SerialType::IStream =>
-                        format_field_as_json(line, elem_serial),
-                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => line.to_string(),
-                }
-            };
-            p.push(v);
+    let parts: Vec<(usize, String)> = if list_cfg.source == ListElemSource::Inline {
+        match inline_list_parts(&lines, text, &rs.parameters[0], is_au1_element, rows_allowed) {
+            Ok(p) => p,
+            Err((line, e)) => {
+                let first = lines.iter().position(|l| !l.trim().is_empty()).map(|i| i + 1);
+                let e = if rows_allowed && first == Some(line) {
+                    augment_with_header_hint(e, &lines, &rs.parameters[0])
+                } else {
+                    e
+                };
+                set_errmsg(errmsg, &e);
+                return ptr::null_mut();
+            }
         }
-        p
     } else {
         let elem_c_schema = CSchema::from_rust(&rs.parameters[0]);
-        let mut p: Vec<String> = Vec::with_capacity(lines.len());
+        let mut p: Vec<(usize, String)> = Vec::with_capacity(lines.len());
         let mut elem_err: Option<MorlocError> = None;
         for (line_no, line) in lines.iter().enumerate() {
             let line_c = match std::ffi::CString::new(line.as_bytes()) {
@@ -1549,7 +1665,7 @@ unsafe fn try_list_with_config(
                 voidstar as crate::shm::AbsPtr,
                 &rs.parameters[0],
             ) {
-                Ok(js) => p.push(js),
+                Ok(js) => p.push((line_no + 1, js)),
                 Err(e) => {
                     elem_err = Some(MorlocError::Other(format!(
                         "form: list: element {}: voidstar->json failed: {}",
@@ -1568,7 +1684,8 @@ unsafe fn try_list_with_config(
         p
     };
 
-    let json_array = format!("[{}]", parts.join(","));
+    let joined: Vec<&str> = parts.iter().map(|(_, j)| j.as_str()).collect();
+    let json_array = format!("[{}]", joined.join(","));
 
     let json_c = match std::ffi::CString::new(json_array) {
         Ok(c) => c,
@@ -1594,71 +1711,58 @@ unsafe fn try_list_with_config(
     if err.is_null() {
         return result as *mut c_void;
     }
-    if !tuple_fallback_available {
+    if list_cfg.source != ListElemSource::Inline {
         *errmsg = err;
         return ptr::null_mut();
     }
-
-    // Retry the lines as a headerless table split by TAB, comma, then
-    // whitespace; the first split whose rows parse wins.
+    // Name the first element the loader refuses.
+    let whole = CStr::from_ptr(err).to_string_lossy().into_owned();
     libc::free(err as *mut c_void);
-
-    let row_schema = &rs.parameters[0];
-    let mut last_err: Option<MorlocError> = None;
-
-    enum Delim {
-        Csv(u8),
-        Whitespace,
-    }
-    let attempts: [Delim; 3] = [Delim::Csv(b'\t'), Delim::Csv(b','), Delim::Whitespace];
-
-    for delim in &attempts {
-        let row_jsons = match delim {
-            Delim::Csv(d) => parse_delimited_rows(text.as_bytes(), *d, row_schema),
-            Delim::Whitespace => split_whitespace_rows(&lines, row_schema),
-        };
-        let rows = match row_jsons {
-            Ok(v) => v,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
+    let located = first_refused_element(&parts, &rs.parameters[0]);
+    let e = match located {
+        Some((line, msg)) => {
+            let e = MorlocError::Other(format!("form: list: line {}: {}", line, msg));
+            let first = lines.iter().position(|l| !l.trim().is_empty()).map(|i| i + 1);
+            if rows_allowed && first == Some(line) {
+                augment_with_header_hint(e, &lines, &rs.parameters[0])
+            } else {
+                e
             }
-        };
-        let outer = format!("[{}]", rows.join(","));
-        let outer_c = match std::ffi::CString::new(outer) {
-            Ok(c) => c,
-            Err(_) => {
-                last_err = Some(MorlocError::Other(
-                    "form: list table fallback: rebuilt JSON contains an interior NUL byte".into(),
-                ));
-                continue;
-            }
-        };
-        let mut err_n: *mut c_char = ptr::null_mut();
-        let result_n = read_json_with_schema(
-            ptr::null_mut(),
-            outer_c.as_ptr() as *mut c_char,
-            schema,
-            &mut err_n,
-        );
-        drop(outer_c);
-        if err_n.is_null() {
-            return result_n as *mut c_void;
         }
-        let msg = CStr::from_ptr(err_n).to_string_lossy().into_owned();
-        libc::free(err_n as *mut c_void);
-        last_err = Some(MorlocError::Other(msg));
-    }
-
-    let final_err = last_err.unwrap_or_else(|| {
-        MorlocError::Other(
-            "form: list: no delimiter (tab, comma, whitespace) matched the expected row schema".into(),
-        )
-    });
-    // A first line of column names is a common mistake; add a hint.
-    let hinted = augment_with_header_hint(final_err, &lines, row_schema);
-    set_errmsg(errmsg, &hinted);
+        None => MorlocError::Other(whole),
+    };
+    set_errmsg(errmsg, &e);
     ptr::null_mut()
+}
+
+/// The first element the loader refuses on its own, and its message.
+unsafe fn first_refused_element(
+    parts: &[(usize, String)],
+    elem: &crate::schema::Schema,
+) -> Option<(usize, String)> {
+    use crate::json_ffi::read_json_with_schema;
+    let elem_c = CSchema::from_rust(elem);
+    let mut found = None;
+    for (line, json) in parts {
+        let c = match std::ffi::CString::new(json.as_str()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = read_json_with_schema(ptr::null_mut(), c.as_ptr() as *mut c_char, elem_c, &mut err);
+        if err.is_null() {
+            if !v.is_null() {
+                let _ = crate::shm::shfree(v as crate::shm::AbsPtr);
+            }
+            continue;
+        }
+        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+        libc::free(err as *mut c_void);
+        found = Some((*line, msg));
+        break;
+    }
+    CSchema::free(elem_c);
+    found
 }
 
 /// If the first line's cells look like column names (non-numeric
@@ -1681,29 +1785,24 @@ fn augment_with_header_hint(
     if arity < 2 {
         return err;
     }
-    // Try the same delimiters as `parse_delimited_rows` /
-    // `split_whitespace_rows`; use the first split whose cell count
-    // matches the expected row arity.
-    let by_tab: Vec<&str> = first.split('\t').collect();
-    let by_comma: Vec<&str> = first.split(',').collect();
-    let by_ws: Vec<&str> = first.split_whitespace().collect();
-    let cells: &[&str] = if by_tab.len() == arity {
-        &by_tab
-    } else if by_comma.len() == arity {
-        &by_comma
-    } else if by_ws.len() == arity {
-        &by_ws
-    } else {
-        return err;
+    // the cells the reader takes the first row to hold
+    let owned: Vec<String> = match choose_row_delimiter(first, 1, row_schema) {
+        Ok(RowDelim::Whitespace) => first.split_whitespace().map(String::from).collect(),
+        Ok(RowDelim::Char(d)) => match crate::delimited::Tokenizer::new(first.as_bytes(), 0, 1, d).next_record() {
+            Ok(Some(r)) => r.cells.iter().map(|c| String::from_utf8_lossy(&c.text).into_owned()).collect(),
+            _ => return err,
+        },
+        Err(_) => return err,
     };
-    let looks_like_header = cells
+    let looks_like_header = owned
         .iter()
         .zip(row_schema.parameters.iter())
         .any(|(cell, col)| {
             let cell_trim = cell.trim();
             let is_name = !cell_trim.is_empty()
                 && cell_trim.chars().next().map_or(false, |c| c.is_ascii_alphabetic())
-                && cell_trim.chars().all(|c| !c.is_ascii_digit());
+                && cell_trim.chars().all(|c| !c.is_ascii_digit())
+                && !(is_float_schema(col) && crate::delimited::nonfinite(cell_trim).is_some());
             is_numeric_serial(&col.serial_type) && is_name
         });
     if !looks_like_header {
@@ -1992,12 +2091,25 @@ unsafe fn reason_or_unreadable(err: *mut c_char, path: *const c_char) -> MorlocE
 
 /// Load a morloc data file's bytes as a value of `schema`: a compressed
 /// packet is decompressed, then the format is chosen by extension or
-/// content magic.
+/// content magic. The bytes are data from outside.
 pub(crate) unsafe fn load_morloc_data_file(
+    path: *const c_char,
+    data: *mut u8,
+    data_size: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    load_morloc_data_file_from(path, data, data_size, schema, crate::origin::Origin::Outside, errmsg)
+}
+
+/// [`load_morloc_data_file`] for bytes of `origin`, which the caller knows
+/// from the descriptor it read them from (FMT-10); `path` only names them.
+unsafe fn load_morloc_data_file_from(
     path: *const c_char,
     mut data: *mut u8,
     mut data_size: usize,
     schema: *const CSchema,
+    origin: crate::origin::Origin,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
     clear_errmsg(errmsg);
@@ -2023,7 +2135,7 @@ pub(crate) unsafe fn load_morloc_data_file(
     };
 
     if !data.is_null() && data_size >= 32 {
-        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema, &path_str) {
+        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema, &path_str, origin) {
             Ok(Some(voidstar)) => {
                 libc::free(data as *mut c_void);
                 return voidstar;
@@ -2332,8 +2444,8 @@ pub(crate) unsafe fn load_morloc_data_file(
                     let packet_slice = std::slice::from_raw_parts(data, data_size);
                     let hint = packet::read_vol_index_from_meta(packet_slice)
                         .ok().flatten().unwrap_or(0);
-                    let result = read_voidstar_binary_with_hint(
-                        payload, length, schema, hint, &mut err,
+                    let result = read_voidstar_binary_from(
+                        payload, length, schema, hint, origin, &mut err,
                     );
                     libc::free(data as *mut c_void);
                     if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
@@ -2560,6 +2672,10 @@ unsafe fn parse_cli_data_argument_classified(
         ArgSource::File => format!("file '{}'", CStr::from_ptr(effective).to_string_lossy()),
         ArgSource::Inline => unreachable!("fd is non-null"),
     };
+    let origin = match classified.kind {
+        ArgSource::File => crate::origin::of_descriptor(libc::fileno(fd)),
+        ArgSource::Stdin | ArgSource::Inline => crate::origin::Origin::Outside,
+    };
     let mut data_size: usize = 0;
     let data = read_binary_fd(fd, &mut data_size, &mut err);
     libc::fclose(fd);
@@ -2571,7 +2687,7 @@ unsafe fn parse_cli_data_argument_classified(
 
     // Every packet format, decompression included, goes through the one
     // file loader; it takes ownership of `data`.
-    dest = load_morloc_data_file(effective, data, data_size, schema, &mut err) as *mut u8;
+    dest = load_morloc_data_file_from(effective, data, data_size, schema, origin, &mut err) as *mut u8;
     if !err.is_null() {
         wrap_and_set_errmsg(err, &source_label, errmsg);
         return ptr::null_mut();
@@ -3190,14 +3306,12 @@ unsafe fn packet_of(
             return ptr::null_mut();
         }
     };
-    let arrow = !schema.is_null() && {
-        let rs = CSchema::to_rust(schema);
-        crate::arrow_ffi::is_arrow_table_schema(&rs)
-    };
-    if arrow {
-        crate::packet_ffi::make_arrow_data_packet(relptr, schema)
+    let rs = crate::packet_ffi::rust_schema(schema);
+    let meta = crate::packet_ffi::schema_text(schema);
+    if !schema.is_null() && crate::arrow_ffi::is_arrow_table_schema(&rs) {
+        crate::packet_ffi::rptr_packet_or_errmsg(relptr, meta, morloc_runtime_types::packet::PACKET_FORMAT_ARROW, errmsg)
     } else {
-        crate::packet_ffi::make_data_packet_with(voidstar, relptr, schema, whole, errmsg)
+        crate::packet_ffi::make_data_packet_with_rs(voidstar, relptr, schema, &rs, meta, whole, errmsg)
     }
 }
 
@@ -4211,4 +4325,118 @@ mod c_abi {
         super::parse_cli_data_argument_group_shaped(dest, arg, schema, source_codes, form_codes, list_config_jsons, n_fields, errmsg)
     }
 
+
+}
+
+#[cfg(test)]
+mod list_form_tests {
+    use super::*;
+
+    /// `@form list` of inline text under a schema, as JSON or the error.
+    unsafe fn read_list(schema: &str, input: &str) -> Result<String, String> {
+        let rs = crate::schema::parse_schema(schema).unwrap();
+        let cs = CSchema::from_rust(&rs);
+        let buf = libc::malloc(input.len().max(1)) as *mut u8;
+        std::ptr::copy_nonoverlapping(input.as_ptr(), buf, input.len());
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = try_list(buf, input.len(), cs, &mut err);
+        let out = if v.is_null() {
+            let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            Err(m)
+        } else {
+            Ok(crate::json::voidstar_to_json_string(v as shm::AbsPtr, &rs).unwrap())
+        };
+        CSchema::free(cs);
+        out
+    }
+
+    fn refused_at(r: Result<String, String>, parts: &[&str]) {
+        match r {
+            Ok(v) => panic!("expected an error, got {v}"),
+            Err(e) => {
+                for p in parts {
+                    assert!(e.contains(p), "error lacks {p:?}: {e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_line_is_one_element() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        unsafe {
+            assert_eq!(read_list("ai8", "1\n2\n").unwrap(), "[1,2]");
+            refused_at(read_list("ai8", "1,2\n3\n"), &["line 1"]);
+            refused_at(read_list("at2i8i8", "[1,2],[3,4]\n"), &["line 1"]);
+            refused_at(read_list("am21ni81ss", "{\"n\":1,\"s\":\"a\"},{\"n\":2,\"s\":\"b\"}\n"), &["line 1"]);
+        }
+    }
+
+    #[test]
+    fn a_list_row_is_split_by_the_delimiter_of_the_first_row() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        unsafe {
+            // TAB gives the first row its two fields, so `5,6` is the cell for `n`
+            refused_at(read_list("am21ni81ss", "5,6\thello\n7,8\tworld\n"), &["line 1", "field `n`", "5,6"]);
+            // comma gives two cells, so whitespace is never tried
+            refused_at(read_list("am25labels1vf8", "p,q 5\n"), &["line 1", "field `v`"]);
+            assert_eq!(
+                read_list("am21ni81ss", "1,a\n\n2,b\n").unwrap(),
+                "[{\"n\":1,\"s\":\"a\"},{\"n\":2,\"s\":\"b\"}]"
+            );
+            refused_at(read_list("am21ni81ss", "1\ta\n2\n"), &["line 2"]);
+        }
+    }
+
+    #[test]
+    fn a_list_reads_non_finite_floats() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        unsafe {
+            assert!(read_list("af8", "nan\ninf\n-inf\n").is_ok());
+            assert!(read_list("am21xi81y?f8", "1\tnan\n2\t3.5\n").is_ok());
+        }
+    }
+
+    #[test]
+    fn a_list_header_hint_is_for_a_first_row_of_names() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        unsafe {
+            refused_at(read_list("am21ni81ss", "n\ts\n1\ta\n"), &["line 1", "column-name header"]);
+            match read_list("am21ni81ss", "1\ta\nx\tb\n") {
+                Err(e) => assert!(e.contains("line 2") && !e.contains("column-name header"), "{e}"),
+                Ok(v) => panic!("expected an error, got {v}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_row_may_open_with_a_bracket() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        unsafe {
+            assert_eq!(read_list("at2si8", "[draft] intro\t5\n").unwrap(), "[[\"[draft] intro\",5]]");
+            assert_eq!(read_list("am21ni81ss", " \n1,a\n2,b\n").unwrap(), "[{\"n\":1,\"s\":\"a\"},{\"n\":2,\"s\":\"b\"}]");
+        }
+    }
+
+    #[test]
+    fn a_list_header_hint_is_not_given_for_values() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        unsafe {
+            match read_list("am24names1wf8", "a,inf\nb,zz\n") {
+                Err(e) => assert!(e.contains("line 2") && e.contains("of type Real") && !e.contains("column-name header"), "{e}"),
+                Ok(v) => panic!("expected an error, got {v}"),
+            }
+            match read_list("am31ss1wf82okb", "a,nan,maybe\n") {
+                Err(e) => assert!(e.contains("field `ok`") && !e.contains("column-name header"), "{e}"),
+                Ok(v) => panic!("expected an error, got {v}"),
+            }
+        }
+    }
 }

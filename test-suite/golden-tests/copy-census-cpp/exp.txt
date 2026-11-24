@@ -21,31 +21,31 @@
 --- tupleArg ---
 [200,0]
 --- listPat ---
-[1101,4]
+[1101,0]
 --- listRet ---
-[100,5]
+[100,0]
 --- listLit ---
-[2,4]
+[2,0]
 --- listRecords ---
-[2003,4]
+[2003,0]
 --- listLoop ---
-[1200,6]
+[1200,0]
 --- listStep ---
-[110,4]
+[110,0]
 --- twiceRead ---
 [200,0]
 --- twiceLet ---
 [200,0]
 --- twiceKeep ---
-[200,1]
+[200,0]
 --- useAndKeep ---
-[200,1]
+[200,0]
 --- twoSteps ---
 [200,0]
 --- partsBorrowed ---
-[5050,1]
+[5050,0]
 --- partsFresh ---
-[5055,1]
+[5055,0]
 --- setter ---
 [1002,0]
 --- setterFn ---
@@ -69,7 +69,7 @@
 --- closureDo ---
 [200,0]
 --- papRead ---
-[306,1]
+[306,0]
 --- papHof ---
 [203,0]
 --- letOnce ---
@@ -77,13 +77,13 @@
 --- letKeep ---
 [100,0]
 --- letSource ---
-[100,1]
+[100,0]
 --- matchCond ---
-[100,1]
+[100,0]
 --- matchCondFresh ---
 [100,0]
 --- matchRec ---
-[100,2]
+[100,0]
 --- matchUnwrap ---
 [100,0]
 --- matchTry ---
@@ -91,36 +91,46 @@
 --- throughTwo ---
 [100,0]
 --- throughLoop ---
-[100,1]
+[100,0]
 --- loopFresh ---
 [1,0]
 --- loopGrow ---
 [1,0]
 --- loopCarried ---
-[300,1]
+[300,0]
 --- loopField ---
-[300,1]
+[300,0]
 --- loopTuple ---
-[300,1]
+[300,0]
 --- tupleStep ---
-[4,100]
+[4,0]
 --- loopLet ---
 [5051,0]
 --- loopLetTwice ---
 [5051,0]
 --- loopLetAlias ---
-[5051,100]
+[5051,0]
 --- nonTail ---
-[5050,100]
+[5050,0]
 --- guardLoop ---
 [9803,0]
 --- guardKeep ---
-[100,1]
+[100,0]
 --- mixedLoop ---
 [323207,0]
 --- matchedTwice ---
 [200,0]
 --- twoLets ---
-[200,1]
+[200,0]
 --- aliasKeep ---
-[102,1]
+[102,0]
+--- tryLet ---
+[1,0]
+--- tryCapture ---
+[101,0]
+--- doTwice ---
+[2,0]
+--- doLoop ---
+[100,0]
+--- swapSlots ---
+[2001,0]

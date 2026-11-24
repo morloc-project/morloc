@@ -1,20 +1,5 @@
 # Declared environment dependencies
 
-- **A declared tool is found through whatever PATH the program inherits.**
-  [read] Gap: no spec item says where a pool finds the executables of a
-  module's `tool-deps`. Pools inherit the nexus's environment unchanged
-  (morloc-nexus/src/process.rs, the spawn copies `vars_os()`), so a
-  program built in an environment and started from a shell without the
-  environment's bin dir on PATH runs whatever `STAR` comes first, or fails
-  when it reaches the call. `mim run`, serve and frozen images put the
-  environment's bin first. Interpreters have the same exposure (python3 from
-  PATH). Design open: the nexus could prepend the bin dir of the
-  environment a program was built in, or check the declared tools at
-  startup as `validate_pools` checks interpreters; a startup check needs
-  the executable names, which the conda package name does not give (star ->
-  STAR, trim-galore -> trim_galore), so `tool-deps` would need an optional
-  list of executables.
-
 - **Unknown package.yaml keys are ignored.** [read] Gap: no spec item for
   package.yaml validation. `FromJSON PackageMeta`
   (library/Morloc/Namespace/State.hs) reads only the keys it knows, so a
@@ -66,3 +51,83 @@
   file, but `buildOne` (library/Morloc/CodeGenerator/Guest/Futhark.hs)
   compiles only the emitted C, so the kernels may never be built or linked.
   Needs a reproduction.
+
+The items below moved from mim's issue list (morloc-manager
+model/issues/LIST.md), checked against the code 2026-11-04 [read].
+
+- **`morloc install owner/name` may parse as core module `owner`.**
+  `moduleInstallParser` (library/Morloc/Module.hs:1354) has no `eof`;
+  with no source prefix `parseModname Nothing` (:1402) parses a core
+  module and drops `/name`, on the classic path (:822) and in
+  `extractModuleName` (:765). Registry installs try
+  `tryParseRegistryModule` first (:816). Unreproduced.
+- **The default config file is never read.** `--config` defaults to ""
+  (executable/UI.hs:551), which Subcommands.hs:131 turns into
+  `loadMorlocConfig Nothing`, loading no file (Config.hs:118-121). So
+  `registry`, `lang_overrides` and `plane` are unreachable without
+  `--config`. The default is named `$MORLOC_HOME/config` (Config.hs:49).
+  See the manual item in spec-and-docs.md.
+- **`installed_hash` records the requested pin.** Module.hs:1111-1113 takes
+  the snapshot, else the pin, else Nothing; the fetched HEAD is never read.
+- **Registry installs and `install --build` disagree on the path.** Install
+  writes `plane/<owner>/<name>` (Module.hs:818); `--build` looks in
+  `plane/<name>` (Subcommands.hs:232).
+- **envspec `modules` is first-wins, the resolver closer-wins.**
+  `dedupFst` in EnvSpec.hs:200 (defined :265) versus `addPin`
+  (Module.hs:128).
+- **An empty `MORLOC_HOME`/`MORLOC_STATE` is unset to Haskell, set to the
+  nexus.** Config.hs:86, :147, :256 treat empty as unset; morloc-nexus
+  main.rs:39 and :51 do not (main.rs:413 does for `MORLOC_STATE`).
+- **`install` writes wrappers and completions under `$MORLOC_HOME`.**
+  Install.hs:70 (`bin`) and :108 (`completions`), and the uninstall side
+  (Subcommands.hs:1290, :1319), use `configHome`, not the state root.
+- **A plugin language's lang.yaml that fails to parse is dropped
+  silently, and its record kinds are never read.** [read, 2026-11-15]
+  Gap in GEN-2 (a malformed descriptor is refused naming the file and
+  key). Frontend/API.hs buildLangMap' `scanLangDir` returns Nothing on
+  any parse error, so every `source Plug ...` then fails "unknown
+  language"; plugin languages get no registry entry, so their
+  `generated_types` are ignored (Frontend/API.hs psTypeKinds and
+  Restructure.hs withDefaultKinds read the built-in registry only).
+- **A build outside a managed environment checks only C++ headers and tool
+  executables.** [reproduced, 2026-11-19] Gap: outside a managed environment
+  nothing provisions declared dependencies (by design), and PKG-14/PKG-16
+  check cpp-deps `import` headers and tool-deps `bin` names, but `py-deps`
+  and `r-deps` are not checked, so a missing one fails at pool load (`No
+  module named 'pydantic'` on the CI runners). Design open: check imports at
+  build, or at pool start, naming the dependency.
+- **A system g++ in a managed environment cannot link against the prefix.**
+  [reproduced, 2026-11-19] With strict mode off and `CXX=/usr/bin/g++`, a
+  pool with `cpp-deps: {htslib: {libs: [hts]}}` compiles against P/include
+  but fails to link: the system driver runs the environment's `ld` from
+  PATH, which links conda's sysroot libpthread/libdl (`undefined reference to
+  ... @GLIBC_PRIVATE`). Mixing a host compiler with the environment's
+  libraries is outside PKG-13; mim's strict mode refuses such a compiler.
+  Design open: refuse a host compiler in any managed build, or document it.
+
+- **The manual still documents the removed `dependencies` field.** [read,
+  2026-11-19] lang-cpp.asc and ecosystem.asc describe `dependencies` (two
+  different ways); PKG-12 removed it in favour of cpp-deps `libs`, and the
+  manual has no `libs`, tool-deps `bin` or PKG-13/17 behaviour yet. Also
+  arch-eco-modules.asc, lang-parameters.asc, deploy-dependencies.asc:70,
+  interface-install.asc:214.
+
+- **The Python binding build discards the environment's CFLAGS.**
+  [read, 2026-11-19] data/lang/py/init.sh exports
+  `CFLAGS="$SANITIZE_FLAGS"`, empty unless sanitizing, so the activation's
+  CFLAGS (`-isystem $CONDA_PREFIX/include`, ...) never reach setuptools.
+  Impact unknown: setup.py names its include dirs itself.
+
+- **The python version window is never checked against the binding.**
+  [reproduced, 2026-11-19] Gap: no spec item says how the runtime window in
+  data/lang/py/requirements.yaml is verified. LangSupportTests asserts only
+  the ceiling string; nothing builds pymorloc.c at the window's ends. The
+  window was wrong when written: `<3.14` admitted 3.13, which also failed
+  (`_PyLong_AsByteArray` gained an argument in 3.13; compile 627b58b74's
+  pymorloc.c against conda python-3.13.15 headers), and it stayed stale
+  after 4662b83b7 fixed that. The ceiling is now `<3.15`; 3.14.7 compiles
+  and links with every Py symbol resolved, but no program has run on 3.14
+  (no cp314 numpy offline). pymorloc.c uses private API that can change
+  again: `_PyLong_AsByteArray`, `_PyLong_FromByteArray`, `_PyLong_NumBits`,
+  `_PyObject_GetDictPtr`; public replacements exist since 3.13
+  (`PyLong_AsNativeBytes`, `PyLong_FromNativeBytes`).

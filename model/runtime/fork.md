@@ -91,7 +91,7 @@ forking thread holds any. Model: `ForkLocks_misordered.bug` and
 
 ### FORK-8 A reset lock is never the parent's in the child
 Status: implemented
-Checked by: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one, a_fork_from_a_thread_holding_a_reset_lock_aborts, a_forked_child_never_resolves_its_parents_cell, tla:ResetPublish, tla:ResetPublish_store.bug, tla:ResetPublish_no_generation.bug, tla:ResetPublish_free_observed.bug, golden:futhark-basic
+Checked by: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one, a_fork_from_a_thread_holding_a_reset_lock_aborts, tla:ResetPublish, tla:ResetPublish_store.bug, tla:ResetPublish_no_generation.bug, tla:ResetPublish_free_observed.bug, golden:futhark-basic
 
 A reset lock and its state are replaced on first use in a new fork
 generation; the parent's copy is forgotten, never released or waited on.
@@ -104,7 +104,6 @@ too. Model: `tla/ResetPublish.tla`
 (`ResetPublish` passes; the `store`, `no_generation` and `free_observed`
 variants fail). Tests: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one,
 a_fork_from_a_thread_holding_a_reset_lock_aborts,
-a_forked_child_never_resolves_its_parents_cell,
 a_forked_child_leaves_its_parents_spooled_inputs,
 a_forked_child_leaves_its_parents_temp_files. A fresh
 value that depends on the parent's state is seeded from it: the temp
@@ -145,7 +144,10 @@ The environment is written only while a process has one thread: the
 nexus at startup, a run published by a single-threaded process, and a
 test's forked child through `set_test_env`, which bypasses the lock
 (`the_environment_is_written_only_by_its_checked_writers`), so no child can
-inherit its lock held.
+inherit its lock held. A C++ pool is never single-threaded once it serves
+(its workers, and its parallel helpers, which persist after its first
+parallel call, WPOOL-9), so it writes no environment; reads such as
+`MORLOC_THREADS` on any of its threads race no writer.
 
 Missing: no fork handler holds the standard output or error locks, so a
 child forked while another thread prints inherits them locked. CPython's
@@ -194,8 +196,8 @@ its lease until that process is gone. Models: `tla/ViewFork.tla`,
 Status: implemented
 Checked by: a_child_forked_by_a_dispatch_helper_thread_keeps_its_temps, a_helper_temp_goes_once_the_dispatches_running_at_its_making_end, the_temp_directory_of_a_process_that_is_gone_is_removed, a_process_in_another_pid_namespace_leaves_live_temp_directories_alone, a_dispatch_in_a_forked_child_keeps_the_temps_of_the_dispatch_it_forked_inside, tla:TempEpoch, tla:TempEpoch_child, tla:TempEpoch_zero_rule.bug, tla:TempEpoch_no_phantom.bug
 
-A dispatch removes the temp files it made when it ends. A temp file or
-fold cell made on a thread no dispatch owns (a helper thread user code
+A dispatch removes the temp files it made when it ends. A temp file
+made on a thread no dispatch owns (a helper thread user code
 started) belongs to every dispatch running when it was made: it records the
 next dispatch id, and goes at the first dispatch end after which no older
 dispatch is still running. It is never kept waiting for the process to have
@@ -226,26 +228,47 @@ tick) is kept until that process is gone. Model: `tla/TempEpoch.tla`.
 
 ### FORK-12 A forked child never returns into the dispatch loop
 Status: implemented
-Checked by: a_child_forked_during_a_dispatch_exits_instead_of_replying, a_child_forked_by_user_code_never_returns_from_the_dispatch, golden:fork-inside-call, tla:DispatchFork, tla:DispatchFork_unguarded.bug, tla:DispatchFork_by_pid.bug, tla:DispatchFork_reply_only.bug
+Checked by: a_child_forked_during_a_dispatch_exits_instead_of_replying, a_child_forked_by_user_code_never_returns_from_the_dispatch, golden:fork-inside-call, golden:spec-strm-8-8, tla:DispatchFork, tla:DispatchFork_unguarded.bug, tla:DispatchFork_by_pid.bug, tla:DispatchFork_reply_only.bug
 
-A child forked from user code during a dispatch shares the parent's
-connection and worker state; returning from the user function would send a
-second reply, or run the worker's cleanup on the parent's state, and
-continue as an uncounted worker taking the parent's scheduler locks. The
-fork generation is recorded when a request is read, and a process whose
-generation differs exits as soon as user code returns in it, however it
-returns: the shared dispatch checks right after the call, the Python pool
-on every path out of the call, and every reply on the request's connection
-checks again. A child made without the fork handler (FORK-14) is outside
-this item. Model: `tla/DispatchFork.tla`.
+A child forked from user code during a call shares the parent's
+connection, worker state and the generated code around the call:
+returning would run the rest of the generated function (a bracket's close,
+a fold's replay, a later effect), send a second reply, or run the worker's
+cleanup on the parent's state and continue as an uncounted worker taking
+the parent's scheduler locks. FORK-17 stops the child earlier.
+The fork generation is also recorded when a request is read;
+the shared dispatch checks right after the call, the Python pool on every
+path out of the call, and every reply on the request's connection checks
+again. A child made without the fork handler (FORK-14) is outside this
+item. Model: `tla/DispatchFork.tla`.
+
+### FORK-17 A forked child exits when it leaves the call of user code it was forked inside
+Status: implemented
+Checked by: golden:fork-in-nested-call, golden:parallel-span-threads, golden:spec-strm-8-8, tla:StdioBracket, tla:StdioBracket_no_call_check.bug
+
+A child forked inside a call of user code exits as soon as it leaves the
+call, by returning or by failing, before
+any more generated or runtime code runs; calls it makes itself end
+normally. Python adds nothing to calls: a fork handler in the child finds
+the user frame that generated or runtime code called and exits when that
+frame returns, yields or unwinds; the handler runs in every child where
+Python may run, since CPython runs it from PyOS_AfterFork_Child, which C
+code that forks must call first. C++, Rust and R check at every call of
+user code (a sourced function, a function value, a packer, a fold's step or
+combine, a producer, a replay callback): the call records a count its own
+fork handler moves, and a process whose count differs when the call ends
+exits there, before the result reaches an enclosing call or a failure
+reaches a handler. A C++ call whose result is a reference is copied as it returns (CPP-2). An
+operator the language applies is not a call and is not checked.
+Model: `tla/StdioBracket.tla` (`StdioBracket_no_call_check.bug` runs the
+bracket's close in the child).
 
 ### FORK-13 A cached process identity is refreshed in a forked child
 Status: implemented
-Checked by: a_forked_child_logs_its_own_pid, a_forked_child_never_resolves_its_parents_cell
+Checked by: a_forked_child_logs_its_own_pid
 
 A value derived from the process id and cached on first use would name the
-parent in a child that inherits it. Logging reads the pid when it writes,
-and fold cells draw a new tag in the child, never equal to the parent's.
+parent in a child that inherits it. Logging reads the pid when it writes.
 
 ### FORK-14 State inherited across fork is owned by fork generation, never by pid
 Status: implemented

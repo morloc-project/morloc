@@ -1,0 +1,101 @@
+--- cpp tDiff 5 ---
+4
+--- cpp tSwap 5 ---
+-4
+--- cpp tOnce 4 ---
+[8,1]
+--- cpp tFail 3 ---
+failed
+--- cpp tGuard 5 ---
+5
+--- cpp tGuard 1 ---
+3
+--- cpp tWild 2 ---
+1
+--- cpp tNested 0 ---
+0
+--- cpp tNested 3 ---
+1
+--- cpp tShadow 3 ---
+37
+--- cpp tTwo 3 ---
+15
+--- cpp tIO 4 ---
+[8,2]
+--- cpp tTry 3 ---
+-1
+--- cpp tTryOk 3 ---
+4
+--- cpp tLabel 3 ---
+4
+1
+--- cpp tFrame 3 ---
+1
+--- rust tDiff 5 ---
+4
+--- rust tSwap 5 ---
+-4
+--- rust tOnce 4 ---
+[8,1]
+--- rust tFail 3 ---
+failed
+--- rust tGuard 5 ---
+5
+--- rust tGuard 1 ---
+3
+--- rust tWild 2 ---
+1
+--- rust tNested 0 ---
+0
+--- rust tNested 3 ---
+1
+--- rust tShadow 3 ---
+37
+--- rust tTwo 3 ---
+15
+--- rust tIO 4 ---
+[8,2]
+--- rust tTry 3 ---
+-1
+--- rust tTryOk 3 ---
+4
+--- rust tLabel 3 ---
+4
+1
+--- rust tFrame 3 ---
+1
+--- py tDiff 5 ---
+4
+--- py tSwap 5 ---
+-4
+--- py tOnce 4 ---
+[8,1]
+--- py tFail 3 ---
+failed
+--- py tGuard 5 ---
+5
+--- py tGuard 1 ---
+3
+--- py tWild 2 ---
+1
+--- py tNested 0 ---
+0
+--- py tNested 3 ---
+1
+--- py tShadow 3 ---
+37
+--- py tTwo 3 ---
+15
+--- py tIO 4 ---
+[8,2]
+--- py tTry 3 ---
+-1
+--- py tTryOk 3 ---
+4
+--- py tLabel 3 ---
+4
+1
+--- py tFrame 3 ---
+1
+--- cross tCross 3 ---
+[4,0]

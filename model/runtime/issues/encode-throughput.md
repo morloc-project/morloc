@@ -157,3 +157,11 @@ C++ consumer, against a plain Rust reader.
 - None for 1 and 2: read pairs are still stored as morloc stream files, and
   the benchmarks in lib/biolib/{bio,biotrim,bioseqqc}/bench record the cost
   (bench/history.tsv) so a fix shows up as a measured change.
+- **A Rust write of a packed element clones the borrowed batch first.**
+  [read, 2026-11-20] Performance gap. Taking a native batch apart into its
+  wire form (Imperative.hs NativeToWireN lowering, `adaptOwnedElem`) binds
+  `let h = batch.clone();` before the walk, which consumes its input. For a
+  `Clone` element type that copies the whole batch per write; for a
+  non-`Clone` one it clones only the reference and walks the borrow, which
+  shows the copy is not needed. Seen in golden stream-packed-element's Rust
+  sink (`pools/rust/src/main.rs`).

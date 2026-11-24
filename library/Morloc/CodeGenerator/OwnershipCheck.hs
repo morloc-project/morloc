@@ -19,11 +19,13 @@ module Morloc.CodeGenerator.OwnershipCheck
   , checkNative
   ) where
 
+import Data.Foldable (toList)
+import Morloc.Data.Zip (indexed)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), aliasChain, rnodeChildren)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), namesIn, rnodeChildren)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..))
 
@@ -36,16 +38,24 @@ data St = St
   -- ^ locals moved whole, which only a reference into them still sees
   , stHeld :: Set.Set Int
   -- ^ locals a @do@ block bound by a let reads (OWN-3)
+  , stFields :: Map.Map Int (Set.Set Part)
+  -- ^ roots with constructor fields taken out of their arm, or fields
+  -- taken out of a tuple or record, and which: another may still be read
+  -- (CPP-6, OWN-5)
   }
   deriving (Eq)
 
+-- | A field a projection reads of its root: a constructor field of an arm,
+-- or the key of a tuple or record getter.
+type Part = Either Int [Either Int Text]
+
 -- | Either of two states, or both.
 joinSt :: St -> St -> St
-joinSt a b = St (stTaken a <> stTaken b) (stCaptured a <> stCaptured b) (stMoved a <> stMoved b) (stHeld a <> stHeld b)
+joinSt a b = St (stTaken a <> stTaken b) (stCaptured a <> stCaptured b) (stMoved a <> stMoved b) (stHeld a <> stHeld b) (Map.unionWith (<>) (stFields a) (stFields b))
 
 -- | A state without the given locals, which are bound again.
 forget :: Set.Set Int -> St -> St
-forget vs st = St (stTaken st `Set.difference` vs) (stCaptured st `Set.difference` vs) (stMoved st `Set.difference` vs) (stHeld st `Set.difference` vs)
+forget vs st = St (stTaken st `Set.difference` vs) (stCaptured st `Set.difference` vs) (stMoved st `Set.difference` vs) (stHeld st `Set.difference` vs) (Map.withoutKeys (stFields st) vs)
 
 
 -- | What evaluating a node did: the state once it is done; the values it
@@ -73,10 +83,15 @@ data Env = Env
   -- ^ the lets whose last read in a keeping position moves them
   , envBorrow :: Map.Map Int Int
   -- ^ the locals that are references, to what they refer into
+  , envAlso :: Map.Map Int [Int]
+  -- ^ the lent lets that may refer into more than one local, to the locals
+  -- besides the one in 'envAlias' and 'envBorrow' (OWN-10)
   , envByValue :: Int -> Set.Set Int
   -- ^ the argument positions a native manifold takes by value (OWN-7)
   , envMovedBuilds :: Set.Set (Int, Int)
   -- ^ the (manifold, local) pairs moved into a manifold as it is built
+  , envField :: Map.Map Int Part
+  -- ^ the locals bound to a field of their root, and which
   }
 
 -- | The violations in a top-level manifold's tree, where the lets and
@@ -84,14 +99,14 @@ data Env = Env
 -- native manifold @m@ takes the arguments at @byValue m@ by value.
 checkManifold :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> (Int -> Set.Set Int) -> Set.Set (Int, Int) -> SerialManifold -> [Text]
 checkManifold mode tagOk moves byValue built (SerialManifold m _ _ _ e) =
-  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty byValue built) start e))
+  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty Map.empty byValue built Map.empty) start e))
 
 -- | The violations in a native expression evaluated from scratch.
 checkNative :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> NativeExpr -> [Text]
-checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty (const Set.empty) Set.empty) start e)
+checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty Map.empty (const Set.empty) Set.empty Map.empty) start e)
 
 start :: St
-start = St Set.empty Set.empty Set.empty Set.empty
+start = St Set.empty Set.empty Set.empty Set.empty Map.empty
 
 num :: Int -> Text
 num = T.pack . show
@@ -150,16 +165,44 @@ both st a b =
 rootOf :: Env -> Int -> Int
 rootOf env i = maybe i (rootOf env) (Map.lookup i (envAlias env))
 
-readVar :: Env -> St -> Int -> Eval
-readVar env s i = (refRead env s i) {rReads = Set.fromList (i : aliasChain (envAlias env) i), rViol = taken <> rViol (refRead env s i)}
+-- | The values a local refers into, nearest first, stopping at a cycle.
+aliasChain :: Map.Map Int Int -> Int -> [Int]
+aliasChain aliases a = follow (Set.singleton a) (Map.lookup a aliases)
   where
-    taken = ["n" <> num i <> " is read after the payload of n" <> num v <> " was taken" | v <- take 1 [v | v <- i : aliasChain (envAlias env) i, Set.member v (stTaken s)]]
+    follow seen (Just t) | not (Set.member t seen) = t : follow (Set.insert t seen) (Map.lookup t aliases)
+    follow _ _ = []
+
+-- | Every value a local may refer into through @aliases@ and 'envAlso'.
+reach :: Env -> Map.Map Int Int -> Int -> [Int]
+reach env aliases a = go (Set.singleton a) (next a)
+  where
+    next k = maybe [] pure (Map.lookup k aliases) <> Map.findWithDefault [] k (envAlso env)
+    go _ [] = []
+    go seen (t : ts)
+      | Set.member t seen = go seen ts
+      | otherwise = t : go (Set.insert t seen) (next t <> ts)
+
+readVar :: Env -> St -> Int -> Eval
+readVar env s i = (refRead env s i) {rReads = Set.fromList every, rViol = taken <> rViol (refRead env s i)}
+  where
+    chain = i : aliasChain (envAlias env) i
+    every = i : reach env (envAlias env) i
+    taken =
+      take 1 $
+        ["n" <> num i <> " is read after the payload of n" <> num v <> " was taken" | v <- every, Set.member v (stTaken s)]
+          <> ["n" <> num i <> " is read after a field of n" <> num i <> " was taken" | Map.member i (stFields s)]
+          <> [ "n" <> num i <> " is read after a field of n" <> num v <> " was taken"
+             | (l, v) <- zip chain (drop 1 chain)
+             , Just fs <- [Map.lookup v (stFields s)]
+             , maybe True (`Set.member` fs) (Map.lookup l (envField env))
+             ]
+          <> ["n" <> num i <> " is read after a field of n" <> num v <> " was taken" | v <- every, v `notElem` chain, Map.member v (stFields s)]
 
 -- | A read that sees only what a reference sees: whether the local, or what
 -- it refers into, was moved.
 refRead :: Env -> St -> Int -> Eval
 refRead env s i =
-  let chain = i : aliasChain (envBorrow env) i
+  let chain = i : reach env (envBorrow env) i
    in (done s)
         { rRefReads = Set.fromList chain
         , rViol = ["n" <> num i <> " is read after n" <> num v <> " was moved" | v <- take 1 [v | v <- chain, Set.member v (stMoved s)]]
@@ -179,21 +222,27 @@ keepPart env s x = case x of
 -- | The variable at the base of a projection, without following aliases.
 projectionBase :: NativeExpr -> Maybe Int
 projectionBase e = case e of
+  NativeLetN i r b -> case projectionBase b of
+    Just j | j == i -> projectionBase r
+    x -> x
   LetVarN _ i _ -> Just i
   BndVarN _ i _ -> Just i
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionBase x
   IntrinsicN _ IntrListElem _ (x : _) -> projectionBase x
-  AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> projectionBase x
+  PatN _ (PatGet _ [] (NativeArgExpr x)) -> projectionBase x
   _ -> Nothing
 
 -- | The variable a projection reads from, through aliases.
 projectionRoot :: Env -> NativeExpr -> Maybe Int
 projectionRoot env e = case e of
+  NativeLetN i r b -> case projectionBase b of
+    Just j | j == i -> projectionRoot env r
+    _ -> projectionRoot env b
   LetVarN _ i _ -> Just (rootOf env i)
   BndVarN _ i _ -> Just (rootOf env i)
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionRoot env x
   IntrinsicN _ IntrListElem _ (x : _) -> projectionRoot env x
-  AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> projectionRoot env x
+  PatN _ (PatGet _ [] (NativeArgExpr x)) -> projectionRoot env x
   _ -> Nothing
 
 -- | A native let: its right-hand side, then its body with the binding in
@@ -205,26 +254,48 @@ projectionRoot env e = case e of
 bindLet :: Env -> St -> Int -> NativeExpr -> (Env -> St -> (Eval, a)) -> (Eval, a)
 bindLet env s i rhs body =
   let rebound = forget (Set.singleton i) t
-      unaliased = env {envAlias = Map.delete i (envAlias env), envBorrow = Map.delete i (envBorrow env)}
+      unaliased = env {envAlias = Map.delete i (envAlias env), envBorrow = Map.delete i (envBorrow env), envAlso = Map.delete i (envAlso env)}
       (b, x) = case (envMode env i rhs, projectionRoot env rhs) of
         (LetTake, Just root) ->
-          let problems =
-                ["the payload of n" <> num root <> " is taken twice" | Set.member root (stTaken t)]
+          let fields = Map.findWithDefault Set.empty root (stFields t)
+              problems =
+                ["the payload of n" <> num root <> " is taken twice" | Set.member root (stTaken t) || maybe False (`Set.member` fields) field]
                   <> ["the payload of n" <> num root <> " is taken after a body that may run later captured it" | Set.member root (stCaptured t)]
-              (b', x') = body unaliased rebound {stTaken = Set.insert root (stTaken rebound)}
+              -- a constructor field leaves the arm's other fields readable (CPP-6)
+              after = case field of
+                Just f -> rebound {stFields = Map.insertWith (<>) root (Set.singleton f) (stFields rebound)}
+                Nothing -> rebound {stTaken = Set.insert root (stTaken rebound)}
+              (b', x') = body unaliased after
            in (b' {rTakes = Set.insert root (rTakes b'), rViol = problems <> rViol b'}, x')
+        -- OWN-8: a call's result the let reads in place may be lent from
+        -- the local the call is given
+        (LetLent as, _) | (a : others) <- Set.toList as ->
+          body env {envAlias = Map.insert i (rootOf env a) (envAlias env), envBorrow = Map.insert i a (envBorrow env), envAlso = Map.insert i others (envAlso env), envField = Map.delete i (envField env)} rebound
         (LetBorrow, Just root)
           | Just base <- projectionBase rhs ->
-              body env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.insert i base (envBorrow env)} rebound
+              body (fielded env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.insert i base (envBorrow env)}) rebound
         _ | Just j <- movedIn -> case Map.lookup j (envAlias env) of
           Just root -> body unaliased {envAlias = Map.insert i root (envAlias env)} rebound
           Nothing -> body unaliased rebound
-        (_, Just root) -> body env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.delete i (envBorrow env)} rebound
+        (_, Just root) -> body (fielded env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.delete i (envBorrow env)}) rebound
         _ -> body unaliased rebound
    in (rhsR `andThen` const (b {rBound = Set.insert i (rBound b)}), x)
   where
+    -- the field of its root the right-hand side reads, through nested
+    -- constructor fields
+    field = case rhs of
+      IntrinsicN _ IntrCtorField _ _ -> Left <$> ctorField rhs
+      _ -> Right <$> getterField rhs
+    ctorField (IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _))
+      | isVar v = Just (fromIntegral f)
+      | otherwise = ctorField v
+    ctorField _ = Nothing
+    isVar (LetVarN {}) = True
+    isVar (BndVarN {}) = True
+    isVar _ = False
+    fielded e = e {envField = maybe (Map.delete i (envField e)) (\f -> Map.insert i f (envField e)) field}
     rhsR = keepValue env s rhs
-    t = (rSt rhsR) {stHeld = stHeld (rSt rhsR) <> Set.fromList [v | j <- Set.toList (heldBy rhs), v <- j : aliasChain (envAlias env) j]}
+    t = (rSt rhsR) {stHeld = stHeld (rSt rhsR) <> Set.fromList [v | j <- Set.toList (heldBy rhs), v <- j : reach env (envAlias env) j]}
     -- the local the right-hand side ends in, when it was moved there
     movedIn = case valueOf rhs of
       LetVarN _ j _ | Set.member j (rMoves rhsR) -> Just j
@@ -247,24 +318,22 @@ heldBy e = case e of
   CoerceN _ _ x -> heldBy x
   _ -> Set.empty
 
--- | Every native local named under an expression, the context arguments of
--- the manifolds under it included.
-namesIn :: NativeExpr -> Set.Set Int
-namesIn = go . RN
-  where
-    go n = here n <> foldMap go (rnodeChildren n)
-    here n = case n of
-      RN (LetVarN _ j _) -> Set.singleton j
-      RN (BndVarN _ j _) -> Set.singleton j
-      RNM (NativeManifold _ _ form _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
-      RSM (SerialManifold _ _ form _ _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
-      _ -> Set.empty
 
 -- | A let's right-hand side: the value it ends in is kept (OWN-2).
 keepValue :: Env -> St -> NativeExpr -> Eval
 keepValue env s e = case e of
   NativeLetN j rhs body -> bindLet_ env s j rhs (\env' s' -> keepValue env' s' body)
   _ -> keepPart env s e
+
+-- | The one field a getter of a variable reads.
+getterField :: NativeExpr -> Maybe [Either Int Text]
+getterField (PatN _ (PatGet sel [] (NativeArgExpr v)))
+  | isVar v, not (selectorHasBracket sel), [k] <- ungroup sel = Just k
+  where
+    isVar (LetVarN {}) = True
+    isVar (BndVarN {}) = True
+    isVar _ = False
+getterField _ = Nothing
 
 -- | 'bindLet' for a body with nothing to report but its result.
 bindLet_ :: Env -> St -> Int -> NativeExpr -> (Env -> St -> Eval) -> Eval
@@ -280,18 +349,39 @@ walkN env s e = case e of
     walkN env s c `andThen` \s' -> eitherArm (walkN env s' a) (walkN env s' b)
   IntrinsicN _ IntrTagTest _ (LetVarN _ i _ : rest)
     | envTagAfterTake env -> step s ((\s' -> refRead env s' i) : map (\x s' -> walkN env s' x) rest)
-  AppExeN _ (RecCallP mid _) args -> step s [arg j a | (j, a) <- zip [0 ..] args]
+  -- another field of an arm a field was taken from (CPP-6)
+  IntrinsicN _ IntrCtorField _ (v : _ : IntN _ f : _)
+    | Just i <- varOf v
+    , Just fs <- Map.lookup (rootOf env i) (stFields s)
+    , Set.notMember (Left (fromIntegral f)) fs ->
+        refRead env s i
+    where
+      varOf (LetVarN _ j _) = Just j
+      varOf (BndVarN _ j _) = Just j
+      varOf _ = Nothing
+  -- another field of a tuple or record a field was taken from (OWN-5)
+  PatN _ (PatGet _ [] (NativeArgExpr v))
+    | Just k <- getterField e
+    , Just i <- varOf v
+    , Just fs <- Map.lookup (rootOf env i) (stFields s)
+    , Set.notMember (Right k) fs ->
+        refRead env s i
+    where
+      varOf (LetVarN _ j _) = Just j
+      varOf (BndVarN _ j _) = Just j
+      varOf _ = Nothing
+  AppExeN _ (RecCallP mid _) args -> step s [arg j a | (j, a) <- indexed args]
     where
       arg j (NativeArgExpr x) | Set.member j (envByValue env mid) = \s' -> keepPart env s' x
       arg _ a = \s' -> walkArg env s' a
   -- a setter keeps its receiver
-  AppExeN _ (PatCallP (PatternStruct sel)) (NativeArgExpr recv : vals@(_ : _))
-    | not (selectorHasBracket sel) ->
-    step s ((\s' -> keepPart env s' recv) : map (\a s' -> walkArg env s' a) vals)
+  PatN _ (PatSet _ (NativeArgExpr recv) vals) ->
+    step s ((\s' -> keepPart env s' recv) : map (\a s' -> walkArg env s' a) (toList vals))
+  PatN _ app -> step s (map (\a s' -> walkArg env s' a) (toList app))
   AppExeN _ _ args -> step s (map (\a s' -> walkArg env s' a) args)
   ReturnN x -> walkN env s x
   DeserializeN _ _ x -> walkS env s x
-  ListN _ _ xs -> parts xs
+  ListN _ _ xs -> keeps xs
   TupleN _ xs -> keeps xs
   RecordN _ _ _ kvs -> keeps (map snd kvs)
   VariantN _ _ _ xs -> keeps xs
@@ -335,11 +425,11 @@ walkArg env s (NativeArgManifold nm) = nativeFrame env s nm
 
 nativeFrame :: Env -> St -> NativeManifold -> Eval
 nativeFrame env s (NativeManifold m _ form body) =
-  frame env s m form (rViol (walkN env {envAlias = Map.empty, envBorrow = Map.empty} start body))
+  frame env s m form (rViol (walkN env {envAlias = Map.empty, envBorrow = Map.empty, envAlso = Map.empty} start body))
 
 serialFrame :: Env -> St -> SerialManifold -> Eval
 serialFrame env s (SerialManifold m _ form _ body) =
-  frame env s m form (rViol (walkS env {envAlias = Map.empty, envBorrow = Map.empty} start body))
+  frame env s m form (rViol (walkS env {envAlias = Map.empty, envBorrow = Map.empty, envAlso = Map.empty} start body))
 
 -- | A nested manifold: building it reads its context arguments here, and its
 -- body is a frame of its own. One that is not called on the spot is a value
@@ -371,7 +461,7 @@ region r =
   let outside = (rTakes r <> rMoves r) `Set.difference` rBound r
       st = rSt r
    in r
-        { rSt = St (stTaken st `Set.difference` rTakes r) (stCaptured st <> (rReads r `Set.difference` rBound r)) (stMoved st `Set.difference` rMoves r) (stHeld st)
+        { rSt = St (stTaken st `Set.difference` rTakes r) (stCaptured st <> (rReads r `Set.difference` rBound r)) (stMoved st `Set.difference` rMoves r) (stHeld st) (Map.withoutKeys (stFields st) (rTakes r))
         , rTakes = Set.empty
         , rMoves = Set.empty
         , rViol = rViol r <> ["n" <> num v <> " is taken or moved in a body that may run more than once" | v <- Set.toList outside]
@@ -420,5 +510,5 @@ loop env entry ids body base = go entry
          in (rs `andThen` const rk, bk)
       LoopBase x -> (base env' s x, start)
       LoopContinue xs ->
-        let r = step s (map (\x s' -> keepPart env' s' x) xs)
+        let r = step s (map (\(_, x) s' -> keepPart env' s' x) xs)
          in (r, forget (Set.fromList ids) (rSt r))

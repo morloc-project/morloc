@@ -91,6 +91,22 @@ all:
 	./nexus capStaged 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- capStagedKeep ---" >> obs.txt
 	./nexus capStagedKeep 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- tryLet ---" >> obs.txt
+	./nexus tryLet 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- doTwice ---" >> obs.txt
+	./nexus doTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- letAlias ---" >> obs.txt
+	./nexus letAlias 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- fieldsKept ---" >> obs.txt
+	./nexus fieldsKept 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- fieldsNested ---" >> obs.txt
+	./nexus fieldsNested 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- stagedLevels ---" >> obs.txt
+	./nexus stagedLevels 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- stagedPap ---" >> obs.txt
+	./nexus stagedPap 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- mapUnpack ---" >> obs.txt
+	./nexus mapUnpack 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

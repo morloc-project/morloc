@@ -15,11 +15,15 @@ import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (discoverGoldenTests)
 import GoldenShard (Shard (..), lookupShard)
 import GoldenShardTests (goldenShardTests)
+import InstanceResolveTests (instanceResolveTests)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
+import PackageTests (packageTests)
+import NativeDepsTests (nativeDepsTests)
 import PatternChainTests (patternChainTests)
 import ArgsBoundTests (argsBoundTests)
+import IndexAllocationTests (indexAllocationTests)
 import LangRegistryCostTests (langRegistryCostTests)
 import PropertyTests (propertyTests)
 import UsefulnessTests (usefulnessTests)
@@ -32,6 +36,8 @@ import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
+import GenDefsTests (genDefsTests)
+import NominalTests (nominalTests)
 import ValueArgsTests (valueArgsTests, kindOfTests)
 import ManifoldNameTests (manifoldNameTests)
 import SystemConfigTests (systemConfigTests)
@@ -43,6 +49,7 @@ import VersionConstraintTests (versionConstraintTests)
 unitTests :: [TestTree]
 unitTests =
   [ specTests
+  , instanceResolveTests
   , unitTypeTests
   , lastReadTests
   , ownershipCheckTests
@@ -113,23 +120,29 @@ unitTests =
   , evalSandboxTests
   , typeRenderParenTests
   , sourceNameTests
+  , tupleNameTests
   , suspensionLawTests
   , datafileTests
   , morlocDepsTests
   , versionConstraintTests
   , sizeParseTests
   , variantMergeTests
+  , genDefsTests
+  , nominalTests
   , valueArgsTests
   , kindOfTests
   , natDecideTests
   , manifoldNameTests
   , patternChainTests
   , argsBoundTests
+  , indexAllocationTests
   , langRegistryCostTests
   , irrefutablePatternLexerTests
   , refutablePatternTests
   , rustPoolBuildTests
   , lockFileTests
+  , packageTests
+  , nativeDepsTests
   , effectBoundaryTests
   , schemaHintTests
   , systemConfigTests

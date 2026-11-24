@@ -69,3 +69,12 @@ serialize unless a `Packable` instance gives it a wire form.
   refuses a boundary that carries a free variable whose type cannot cross
   (COST-11 asks for placements code generation can build; REAL-3).
   Repro files: /work/plans/realization-cost-model/repro2.
+- **A C++ closure capturing a C++-only opaque value, passed to a Python
+  higher-order function, fails with "Cannot find constructor".** [reproduced
+  2026-11-02] The internal message points at the capture. Same class as the
+  Rust capture entry in runtime/issues/rust-closures-threads.md, which is
+  not Rust-specific.
+- **`expressContainer` decides remoteness by language alone.** [read,
+  2026-11-02, no witness] Express.hs `expressContainer` uses `parentLang /=
+  lang` and always ForeignCall, where every other site uses
+  `decideRemoteness` (co-location).

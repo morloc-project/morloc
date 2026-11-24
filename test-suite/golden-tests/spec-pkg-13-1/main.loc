@@ -1,0 +1,13 @@
+-- PKG-12, PKG-13: a C++ pool built in a managed environment finds a
+-- cpp-deps package's header in P/include and its `libs` in P/lib, and runs
+-- through a DT_RPATH (macOS: LC_RPATH) on P/lib, with whatever compiler
+-- builds it. P is a fake prefix built here; the hook `true` provisions
+-- nothing. A managed build whose prefix is missing, or holds a libmorloc,
+-- is refused.
+module main (answer)
+
+import root-cpp
+
+source Cpp from "f.hpp" ("answer")
+
+answer :: Int -> Int

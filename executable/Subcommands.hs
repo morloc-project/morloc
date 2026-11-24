@@ -21,6 +21,7 @@ import qualified Data.Aeson.Types as JSONT
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -35,6 +36,8 @@ import Morloc.CodeGenerator.Emit (TranslateFn)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
 import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
+import Morloc.CodeGenerator.Pools.CAbi.Members.Rust (rustStandaloneLib)
+import Morloc.CodeGenerator.Grammars.Common (poolPrivateNoteName, typesDependenciesName)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
@@ -51,6 +54,7 @@ import qualified Morloc.Frontend.API as F
 import Morloc.Module (OverwriteProtocol (..), findMainLocFile)
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
@@ -79,8 +83,6 @@ import System.IO.Temp (createTempDirectory)
 import qualified System.Process as SP
 import UI
 
-decodePackageMeta :: BL.ByteString -> Maybe PackageMeta
-decodePackageMeta = JSON.decode
 
 -- | Route each language to its member's emitter. The per-language dispatch now
 -- lives in the CAbi pool's member registry.
@@ -106,6 +108,8 @@ runMorloc args = do
     (CmdLangSupport g) -> cmdLangSupport g
     (CmdEnvspec g) -> cmdEnvspec g verbose config buildConfig
     (CmdVersions g) -> cmdVersions g
+    (CmdLibrary g) -> cmdLibrary g config buildConfig
+    (CmdTypes g) -> cmdTypes g config buildConfig
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -125,6 +129,8 @@ getConfig (CmdNew _) = getConfig' "" False
 getConfig (CmdLangSupport _) = getConfig' "" False
 getConfig (CmdEnvspec g) = getConfig' (envspecConfig g) (envspecVanilla g)
 getConfig (CmdVersions _) = getConfig' "" False
+getConfig (CmdLibrary _) = getConfig' "" False
+getConfig (CmdTypes g) = getConfig' (typesConfig g) (typesVanilla g)
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -145,6 +151,8 @@ getVerbosity (CmdConfig _) = 0
 getVerbosity (CmdLangSupport _) = 0
 getVerbosity (CmdEnvspec _) = 0
 getVerbosity (CmdVersions _) = 0
+getVerbosity (CmdLibrary _) = 0
+getVerbosity (CmdTypes g) = typesVerbose g
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -152,84 +160,59 @@ readScript _ filename = do
   code <- MT.readFile filename
   return (Just filename, Code code)
 
--- | Typecheck callback for module installation
-typecheckModuleFn :: FilePath -> MorlocMonad [(T.Text, T.Text)]
-typecheckModuleFn mainFile = do
-  code <- liftIO $ MT.readFile mainFile
-  -- Save current state, run typecheck in a clean sub-state
-  savedState <- MM.get
-  result <-
-    MM.recoverRejected
-      ( do
-          xs <- M.typecheckFrontend (Just mainFile) (Code code)
-          st <- MM.get
-          return
-            [ (render (pretty v), render (prettyTypeU t))
-            | AnnoS (Idx i t) _ _ <- xs
-            , Just v <- [Map.lookup i (stateName st)]
-            ]
-      )
-      (return [])
-  -- Restore state so module typechecking doesn't pollute the parent state
-  MM.put savedState
-  return result
-
 -- | Install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdInstall args verbosity conf buildConfig = do
-  userSources <- Map.fromList <$> mapM (\modstr -> do
-    name <- Mod.extractModuleName modstr
-    return (name, modstr)) moduleTexts
+  dirsRef <- newIORef []
   let cmdInstall' = do
         -- Load the env's module-pin snapshot so explicit installs honor it
         -- (and enforce env coherence) exactly as build-time auto-install does.
         snapshot <- Mod.loadSnapshot
         MM.modify (\s -> s {stateSnapshot = snapshot})
+        requested <- mapM (\modstr -> do
+          mid <- Mod.installStringModule modstr
+          req <- either (MM.throwRejected . pretty) return (Mod.parseInstallString modstr)
+          return (mid, req)) moduleTexts
+        let userRequests = Map.fromList [(Mod.moduleKey mid, req) | (mid, req) <- requested]
+        liftIO $ writeIORef dirsRef [(Mod.midName mid, Mod.moduleInstallDir conf mid) | (mid, _) <- requested]
         mapM
           ( \modstr ->
               Mod.installModule
                 (installForce args)
                 (installUseSSH args)
-                libpath
-                (Config.configPlaneCore conf)
                 mayTypecheck
-                userSources
-                Set.empty
-                Map.empty   -- empty resolver state at the install root
-                0           -- depth = 0 at the install root
-                Mod.ExplicitInstall
+                userRequests
                 modstr
           )
           moduleTexts
   passed <- MM.runMorlocMonad Nothing verbosity conf buildConfig cmdInstall' >>= MM.writeMorlocReturn
+  installed <- readIORef dirsRef
   built <-
     if passed && installBuild args
-      then buildInstalledModules args verbosity conf buildConfig moduleTexts libpath
+      then buildInstalledModules args verbosity conf buildConfig installed
       else return passed
   if built && installForce args == ForceOverwrite
     then rebuildStalePrograms (installNoRebuild args) (Config.exeDir conf)
     else return built
   where
-    libpath = Config.configLibrary conf </> Config.configPlane conf
     moduleTexts = map MT.pack (installModuleStrings args)
 
     mayTypecheck =
       if installNoTypecheck args
         then Nothing
-        else Just typecheckModuleFn
+        else Just M.typecheckModule
 
 -- | Build and install executables for installed modules
 buildInstalledModules ::
-  InstallCommand -> Int -> Config.Config -> BuildConfig -> [T.Text] -> FilePath -> IO Bool
-buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
-  results <- mapM buildOne moduleTexts
+  InstallCommand -> Int -> Config.Config -> BuildConfig -> [(T.Text, FilePath)] -> IO Bool
+buildInstalledModules args verbosity conf buildConfig installed = do
+  results <- mapM buildOne installed
   return (and results)
   where
     force = installForce args == ForceOverwrite
 
-    buildOne modstr = do
-      name <- T.unpack <$> Mod.extractModuleName modstr
-      let moduleDir = libpath </> name
+    buildOne (nameT, moduleDir) = do
+      let name = T.unpack nameT
       mainFile <- findMainLocFile moduleDir name
       case mainFile of
         Nothing -> do
@@ -262,7 +245,8 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
     buildModuleExecutable locFile name verbosity' config buildConfig' forceOverwrite recipe = do
       code <- MT.readFile locFile
       -- `morloc install --build` re-enters the make pipeline. The
-      -- --unsafe-skip-null-check, --inline-size, --no-shm, --tmpdir, and
+      -- --unsafe-skip-null-check, --unsafe-skip-utf8-check, --inline-size,
+      -- --no-shm, --tmpdir, and
       -- --debug flags are `morloc make` opt-ins only, so default them here
       -- (safer). Build parameters, however, still flow from the build
       -- config's `lang-params` and the environment (this path has no `-X`
@@ -287,6 +271,7 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
 -- long, transposition-prone positional tail.
 data MakeOptions = MakeOptions
   { moUnsafeSkipNullCheck :: Bool
+  , moUnsafeSkipUtf8Check :: Bool
   , moInlineSize :: Maybe Int64
   , moNoShm :: Bool
   , moTmpdir :: Maybe Path
@@ -305,6 +290,7 @@ defaultMakeOptions :: MakeOptions
 defaultMakeOptions =
   MakeOptions
     { moUnsafeSkipNullCheck = False
+    , moUnsafeSkipUtf8Check = False
     , moInlineSize = Nothing
     , moNoShm = False
     , moTmpdir = Nothing
@@ -340,6 +326,7 @@ langParamsEnvVar = "MORLOC_LANG_PARAMS"
 applyMakeOptions :: MakeOptions -> MorlocState -> MorlocState
 applyMakeOptions mopts s =
   s { stateUnsafeSkipNullCheck = moUnsafeSkipNullCheck mopts
+    , stateUnsafeSkipUtf8Check = moUnsafeSkipUtf8Check mopts
     , stateInlineSize = moInlineSize mopts
     , stateNoShm = moNoShm mopts
     , stateTmpdir = moTmpdir mopts
@@ -470,6 +457,7 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
       let mopts =
             MakeOptions
               { moUnsafeSkipNullCheck = makeUnsafeSkipNullCheck args
+              , moUnsafeSkipUtf8Check = makeUnsafeSkipUtf8Check args
               , moInlineSize = makeInlineSize args
               , moNoShm = makeNoShm args
               , moTmpdir = makeTmpdir args
@@ -775,6 +763,96 @@ cmdLangSupport _ =
     langReqs = [(name, DF.embededFileText ef) | (name, ef) <- DF.requirementsFiles]
     installScripts = [(name, DF.embededFileText ef) | (name, ef) <- DF.installScriptFiles]
 
+-- | Write a program's generated type definitions under a directory, one
+-- subdirectory per language, for programs outside morloc (GEN-13). The Rust
+-- subdirectory is a crate of its own.
+cmdTypes :: TypesCommand -> Config.Config -> BuildConfig -> IO Bool
+cmdTypes args config buildConfig = do
+  (path, code) <- readScript False (typesScript args)
+  r@((result, _), _) <-
+    MM.runMorlocMonad Nothing (typesVerbose args) config buildConfig (M.emitPoolScripts translator path code)
+  case result of
+    Left _ -> MM.writeMorlocReturn r
+    Right pools -> do
+      let allTrees = [(l, ts) | s' <- pools, (l, ts) <- typeTrees (scriptCode s')]
+          trees = [(l, ts) | (l, ts) <- allTrees, maybe True (== l) (typesLang args)]
+      case typesLang args of
+        Just l | null trees -> do
+          hPutStrLn stderr $
+            "Error: the program generates no types in language '" <> l <> "'"
+              <> (if null allTrees then "" else "; it generates types in " <> intercalate ", " (map fst allTrees))
+          return False
+        _ -> do
+          oks <- mapM (writeTypes (typesOut args)) trees
+          (&&) (and oks) <$> MM.writeMorlocReturn r
+  where
+    typeTrees (_ MS.:/ MS.Dir "pools" cs) = [(l, ts) | MS.Dir "types" langs <- cs, MS.Dir l ts <- langs]
+    typeTrees _ = []
+    -- Each language's directory is replaced whole, so no file of an earlier
+    -- run is left to import.
+    writeTypes out (l, ts0) = do
+      let dir = out MS.</> l
+          isNote (MS.File n _) = n == poolPrivateNoteName
+          isNote _ = False
+          isDeps (MS.File n _) = n == typesDependenciesName
+          isDeps _ = False
+          (notes, ts1) = partition isNote ts0
+          (depFiles, ts) = partition isDeps ts1
+          depLines = concat [MT.lines (unCode c) | MS.File _ c <- depFiles]
+      sequence_
+        [ hPutStrLn stderr $
+            "Note: these generated " <> l <> " types are defined only inside the pool and are not written"
+              <> " (a field names a type no generated file can import, or the type has no module): "
+              <> intercalate ", " (map MT.unpack (MT.lines (unCode c)))
+        | MS.File _ c <- notes ]
+      exists <- MS.doesDirectoryExist dir
+      when exists (MS.removeDirectoryRecursive dir)
+      let paths = concatMap (filesUnder []) [cs | MS.Dir "mlc" ms <- ts, MS.Dir "types" cs <- ms]
+          crate =
+            [ MS.File "Cargo.toml" (Code (cargoToml <> (if null depLines then "" else MT.unlines ("" : "[dependencies]" : depLines))))
+            , MS.Dir "src" [MS.File "lib.rs" (Code (rustStandaloneLib paths))]
+            ]
+      (_ MS.:/ tree) <- MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (out MS.:/ MS.Dir l (ts <> (if l == "rust" then crate else [])))
+      case MS.failures tree of
+        [] -> return True
+        errs -> do
+          mapM_ (\e -> hPutStrLn stderr ("Error: cannot write " <> show e)) errs
+          return False
+    filesUnder prefix = concatMap (filesAt prefix)
+    filesAt prefix (MS.Dir n cs) = filesUnder (prefix <> [MT.pack n]) cs
+    filesAt prefix (MS.File n _) = [prefix <> [MT.pack (MS.dropExtension n)]]
+    filesAt _ _ = []
+    cargoToml =
+      MT.unlines
+        [ "[package]"
+        , "name = \"mlc_types\""
+        , "version = \"0.0.0\""
+        , "edition = \"2021\""
+        , ""
+        , "[lib]"
+        , "path = \"src/lib.rs\""
+        , ""
+        , "[workspace]"
+        ]
+
+-- | Record or list library origins (PKG-5).
+cmdLibrary :: LibraryCommand -> Config.Config -> BuildConfig -> IO Bool
+cmdLibrary (LibraryAdd lib origin) config buildConfig =
+  MM.runMorlocMonad Nothing 0 config buildConfig action >>= MM.writeMorlocReturn
+  where
+    action = case Mod.parseOrigin (T.pack origin) of
+      Nothing -> MM.throwRejected $
+        squotes (pretty origin) <+> "is not an origin; write host:owner, e.g. github:weena"
+      Just o -> Mod.addOrigin (T.pack lib) o
+cmdLibrary LibraryList config buildConfig =
+  MM.runMorlocMonad Nothing 0 config buildConfig action >>= MM.writeMorlocReturn
+  where
+    action = do
+      origins <- Mod.loadOrigins
+      liftIO . forM_ (Map.toList origins) $ \(lib, o) ->
+        putStrLn (T.unpack lib <> "  " <> T.unpack (Mod.renderOrigin o)
+          <> if Map.member lib Mod.shippedOrigins then "  (shipped)" else "")
+
 -- | Print, as JSON, the contract versions this compiler emits: the ABI version,
 -- the envspec_version, and the lang-support schema_version. The environment
 -- manager reads this (CI inlines it into the release manifest) to gate on
@@ -790,6 +868,7 @@ cmdVersions _ = do
       , ("abi_version", jsonInt abiVersion)
       , ("envspec_version", jsonInt envspecVersion)
       , ("lang_support_schema", jsonStr langSupportSchemaVersion)
+      , ("plane_layout_version", jsonInt Mod.planeLayoutVersion)
       ]
   return True
 
@@ -838,26 +917,7 @@ cmdNew args = do
         if null (newName args)
           then takeFileName <$> getCurrentDirectory
           else return (newName args)
-      writeFile pkgFile $
-        unlines
-          [ "name: " ++ name
-          , "version: 0.1.0"
-          , "homepage: null"
-          , "synopsis: null"
-          , "description: null"
-          , "category: null"
-          , "license: MIT"
-          , "author: null"
-          , "maintainer: null"
-          , "github: null"
-          , "bug-reports: null"
-          , "dependencies: []"
-          , "# Uncomment to restrict which files are copied during install."
-          , "# By default, all files are included (filtered by .morlocignore)."
-          , "# include:"
-          , "#   - \"*.py\""
-          , "#   - \"src/\""
-          ]
+      writeFile pkgFile (Mod.newPackageYaml name)
       hPutStrLn stderr $ "Created package.yaml for '" ++ name ++ "'"
       return True
 
@@ -879,7 +939,6 @@ data ModuleManifest = ModuleManifest
   , mmSynopsis :: T.Text
   , mmExports :: [(T.Text, T.Text)]
   , mmMorlocDeps :: [T.Text]
-  , mmReason :: T.Text
   }
 
 data ProgramManifest = ProgramManifest
@@ -914,12 +973,11 @@ invocationOf c = maybe n (\g -> g <> " " <> n) (pcGroup c)
 instance JSON.FromJSON ModuleManifest where
   parseJSON = JSON.withObject "ModuleManifest" $ \o ->
     ModuleManifest
-      <$> o JSON..:? "name" JSON..!= ""
+      <$> (fromMaybe "" <$> ((<|>) <$> o JSON..:? "key" <*> o JSON..:? "name"))
       <*> o JSON..:? "version" JSON..!= ""
       <*> o JSON..:? "synopsis" JSON..!= ""
       <*> (o JSON..:? "exports" JSON..!= [] >>= mapM parseExport)
       <*> (o JSON..:? "morloc_dependencies" JSON..!= [] >>= mapM parseDepName)
-      <*> o JSON..:? "install_reason" JSON..!= ""
     where
       parseExport = JSON.withObject "Export" $ \o ->
         (,) <$> o JSON..: "name" <*> o JSON..: "type"
@@ -974,9 +1032,10 @@ subsequenceMatch (p : ps) (t : ts)
 
 cmdList :: ListCommand -> Config.Config -> IO Bool
 cmdList args config = do
+  Mod.checkPlaneLayout config
   let fdbDir = Config.fdbDir config
       exeDir = Config.exeDir config
-      libDir = Config.configLibrary config </> Config.configPlane config
+      libDir = Config.configLibrary config
       verbose = listVerbose args
       kind = listKind args
       pat = listPattern args
@@ -985,9 +1044,7 @@ cmdList args config = do
   allModules <-
     if kind /= Just ListPrograms
       then do
-        mods <- loadModuleManifests fdbDir
-        discovered <- discoverModules libDir fdbDir
-        return (mods ++ discovered)
+        loadModuleManifests fdbDir
       else return []
 
   -- Load program manifests
@@ -1007,7 +1064,7 @@ cmdList args config = do
   -- For verbose mode, fill in exports from .loc files when manifest has none
   modules' <-
     if verbose > 0
-      then mapM (fillModuleExports libDir) modules
+      then mapM (fillModuleExports config) modules
       else return modules
 
   -- Print results
@@ -1029,12 +1086,14 @@ cmdList args config = do
   return True
 
 -- | If a module has no exports in its manifest, scan its .loc file for type signatures
-fillModuleExports :: FilePath -> ModuleManifest -> IO ModuleManifest
-fillModuleExports libDir m
+fillModuleExports :: Config.Config -> ModuleManifest -> IO ModuleManifest
+fillModuleExports config m
   | not (null (mmExports m)) = return m
-  | otherwise = do
-      let modDir = libDir </> T.unpack (mmName m)
-          modName = T.unpack (mmName m)
+  | otherwise = case Mod.parseModuleKey (mmName m) of
+     Left _ -> return m
+     Right (mid, _) -> do
+      let modDir = Mod.moduleInstallDir config mid
+          modName = T.unpack (Mod.midName mid)
       mainFile <- findMainLocFile modDir modName
       case mainFile of
         Nothing -> return m
@@ -1200,58 +1259,6 @@ loadProgramManifests exeDir = do
               Right m -> return (Just m {pmName = T.pack name})
               Left _ -> return Nothing
 
--- | Discover modules in the library that lack manifests
-discoverModules :: FilePath -> FilePath -> IO [ModuleManifest]
-discoverModules libDir fdbDir = do
-  libExists <- doesDirectoryExist libDir
-  if not libExists
-    then return []
-    else do
-      entries <- listDirectory libDir
-      catMaybes
-        <$> mapM
-          ( \name -> do
-              let manifestPath = fdbDir </> name ++ ".module"
-                  moduleDir = libDir </> name
-              hasManifest <- doesFileExist manifestPath
-              isDir <- doesDirectoryExist moduleDir
-              if hasManifest || not isDir
-                then return Nothing
-                else do
-                  -- Try to read package.yaml for basic info
-                  let pkgYaml = moduleDir </> "package.yaml"
-                  pkgExists <- doesFileExist pkgYaml
-                  if pkgExists
-                    then do
-                      r <- try (BL.readFile pkgYaml) :: IO (Either SomeException BL.ByteString)
-                      case r of
-                        Left _ -> return (Just (minimalManifest name))
-                        Right bs -> case decodePackageMeta bs of
-                          Just meta ->
-                            return . Just $
-                              ModuleManifest
-                                { mmName = if T.null (packageName meta) then T.pack name else packageName meta
-                                , mmVersion = packageVersion meta
-                                , mmSynopsis = packageSynopsis meta
-                                , mmExports = []
-                                , mmMorlocDeps = []
-                                , mmReason = ""
-                                }
-                          Nothing -> return (Just (minimalManifest name))
-                    else return (Just (minimalManifest name))
-          )
-          entries
-  where
-    minimalManifest name =
-      ModuleManifest
-        { mmName = T.pack name
-        , mmVersion = ""
-        , mmSynopsis = ""
-        , mmExports = []
-        , mmMorlocDeps = []
-        , mmReason = ""
-        }
-
 printModule :: Int -> ModuleManifest -> IO ()
 printModule verbose m = do
   let name = mmName m
@@ -1280,8 +1287,9 @@ printProgram verbose p = do
 
 cmdUninstall :: UninstallCommand -> Config.Config -> IO Bool
 cmdUninstall args config = do
+  Mod.checkPlaneLayout config
   let fdbDir = Config.fdbDir config
-      libDir = Config.configLibrary config </> Config.configPlane config
+      libDir = Config.configLibrary config
       binDir = Config.configHome config </> "bin"
       exeDir = Config.exeDir config
       dryRun = uninstallDryRun args
@@ -1294,7 +1302,10 @@ cmdUninstall args config = do
         then return []
         else do
           entries <- listDirectory fdbDir
-          let moduleNames = [dropExtension f | f <- entries, ".module" `isSuffixOf` f]
+          let stemKey stem = case break (== '.') stem of
+                (lib, '.' : name) -> T.unpack (Mod.moduleKey (Mod.ModuleId (T.pack lib) (T.pack name)))
+                _ -> stem
+              moduleNames = [stemKey (dropExtension f) | f <- entries, ".module" `isSuffixOf` f]
           return moduleNames
     else return (uninstallNames args)
 
@@ -1318,12 +1329,13 @@ cmdUninstall args config = do
 
 uninstallOne ::
   Config.Config -> FilePath -> FilePath -> FilePath -> FilePath -> Bool -> Bool -> Maybe ListKind -> String -> IO Bool
-uninstallOne config fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = do
-  let moduleManifest = fdbDir </> name ++ ".module"
-      moduleDir = libDir </> name
+uninstallOne config fdbDir _ binDir exeDir dryRun skipDepCheck kind name = do
+  let mayMid = either (const Nothing) (Just . fst) (Mod.parseModuleKey (T.pack name))
+      moduleManifest = maybe (fdbDir </> name ++ ".module") (\m -> fdbDir </> Mod.moduleStem m ++ ".module") mayMid
 
   hasModule <- doesFileExist moduleManifest
-  hasModuleDir <- doesDirectoryExist moduleDir
+  hasModuleDir <- maybe (return False) (doesDirectoryExist . Mod.moduleInstallDir config) mayMid
+  let moduleDir = maybe "" (Mod.moduleInstallDir config) mayMid
   -- A program is identified by its exe/<name>/ build directory (which
   -- holds manifest.json), not an fdb entry.
   exeDirPath <- findExeDir exeDir name
@@ -1351,11 +1363,16 @@ uninstallOne config fdbDir libDir binDir exeDir dryRun skipDepCheck kind name = 
                 then putStrLn $ "  Remove: " <> moduleManifest
                 else return ()
             else do
-              if hasModuleDir then removeDirectoryRecursive moduleDir else return ()
+              if hasModuleDir
+                then do
+                  removeDirectoryRecursive moduleDir
+                  rest <- listDirectory (takeDirectory moduleDir)
+                  if null rest then MS.removeDirectory (takeDirectory moduleDir) else return ()
+                else return ()
               if hasModule then removeFile moduleManifest else return ()
               -- Symmetric with install: wipe per-language exposed copies so
               -- headers / Python pkgs / R scripts don't outlive the module.
-              Mod.wipeExposed config (T.pack name)
+              forM_ mayMid (Mod.wipeExposed config)
               hPutStrLn stderr $ "Uninstalled module '" <> name <> "'"
         else return ()
 

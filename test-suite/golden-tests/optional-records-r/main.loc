@@ -12,7 +12,6 @@ type R => List a = "list" a
 record Person where
   name :: Str
   age :: ?Int
-record R => Person = "list"
 
 makePerson :: Str -> ?Int -> Person
 getName :: Person -> Str

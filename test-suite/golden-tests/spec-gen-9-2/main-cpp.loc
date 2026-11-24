@@ -1,0 +1,22 @@
+-- GEN-9: the C++ twin of main-rust.loc.
+module main (mkTenths, sumP)
+import root-cpp
+
+newtype Tenths = Int
+type Cpp => Tenths = "double"
+
+instance Packable Int Tenths where
+  source Cpp from "um.hpp" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+record Cpp => Pair a = "pair_t<$1>" a
+
+source Cpp from "um.hpp" ("tenthsOf", "dupU", "sumP")
+tenthsOf :: Int -> Tenths
+dupU :: a -> Pair a
+sumP :: Pair Tenths -> Int
+
+mkTenths :: Int -> Pair Tenths
+mkTenths x = dupU (tenthsOf x)

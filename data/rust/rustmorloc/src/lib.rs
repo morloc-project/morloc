@@ -92,6 +92,8 @@ extern "C" {
                             errmsg: *mut *mut c_char) -> i32;
     fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
+    fn mlc_packet_block(packet: *const u8, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_tracked_block(packet: *const u8) -> *mut c_void;
     fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
     fn make_pipe_closed_packet(msg: *const c_char) -> *mut u8;
@@ -127,11 +129,24 @@ extern "C" {
         ctx: *mut c_void,
         errmsg: *mut *mut c_char,
     ) -> i32;
+    fn mlc_ifile_slice_with(
+        handle: i64,
+        bounds: *const IFileWalkArg,
+        on_begin: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+        decode: unsafe extern "C" fn(*mut c_void, *const c_void, MorlocSpace) -> i32,
+        ctx: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> i32;
     fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_begin(level: i64, handle: i64, flags: i32, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_place(size: u64, reached: *const u8, room: *mut MlcRoom, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_place_run(k: u64, reached: *const u8, slots: *mut *mut u8, placed: *mut u64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_commit(reached: *const u8, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write_abort();
     fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
@@ -140,12 +155,21 @@ extern "C" {
     fn mlc_spawn(socket_path: *const c_char, mid: u32, args: *const *const u8, nargs: usize, handle: i64, errmsg: *mut *mut c_char) -> bool;
     fn mlc_tell(errmsg: *mut *mut c_char) -> u64;
     fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char;
-    fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_cell_get(handle: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_cell_put(handle: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_new(native: *mut c_void, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_side_with_native(id: i64, is_fold: i32, f: unsafe extern "C" fn(*mut c_void, *mut c_void), arg: *mut c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_side_put(id: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_sink_failed(h: i64);
+    fn mlc_exit_forked();
+    fn mlc_side_take(id: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_fold_new(ctx: *mut c_void, fresh: unsafe extern "C" fn(*mut c_void) -> *mut c_void, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_fold_checkout(id: i64, value: *mut *mut c_void, fresh: *mut i32, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_fold_store(id: i64, value: *mut c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_fold_failed(id: i64);
+    fn mlc_fold_take(id: i64, values: *mut *mut *mut c_void, n: *mut usize, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_fold_drop(id: i64, values: *mut *mut *mut c_void, n: *mut usize);
+    fn mlc_side_next(reader: *mut c_void, schema: *const CSchema, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_side_reader_free(reader: *mut c_void);
+    fn mlc_side_drop(id: i64);
     fn mlc_open_ostream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_istream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
@@ -900,11 +924,7 @@ pub unsafe fn release_packet(packet: *const u8, owned: bool) {
         return;
     }
     if *packet.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
-        let offset = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
-        let relptr = core::ptr::read_unaligned(packet.add(PKT_HEADER_SIZE + offset) as *const isize);
-        let mut err: *mut c_char = std::ptr::null_mut();
-        let block = rel2abs(relptr, &mut err);
-        discard_err(err);
+        let block = mlc_tracked_block(packet);
         if !block.is_null() {
             release_tracked(block);
         }
@@ -1243,6 +1263,15 @@ pub fn install_panic_hook() {
     }));
 }
 
+/// LIFE-6: a Rust pool refuses a libmorloc of another build than its
+/// nexus's; its own compiled-in code records no build id.
+pub fn require_build() {
+    extern "C" {
+        fn morloc_require_build(binding: u64);
+    }
+    unsafe { morloc_require_build(0) };
+}
+
 pub fn install_crash_handler() {
     extern "C" {
         fn morloc_install_crash_handler(
@@ -1378,6 +1407,9 @@ impl Drop for ShmGuard {
 pub trait ToVoidstar {
     /// A scalar: sized and written directly, never given a frame.
     const IS_LEAF: bool = false;
+    /// A scalar whose every value is written in its inline slot at an `Int`
+    /// schema, with no tail, so its size is the schema's width.
+    const INLINE: bool = false;
 
     fn shm_size(&self, schema: &Schema) -> usize
     where
@@ -1397,6 +1429,29 @@ pub trait ToVoidstar {
         let mut w = WriteWalk::new(schema, cursor);
         w.child(self, dest, schema);
         w.run();
+    }
+    /// Write a leaf from inside a walk, which may be placing the value in a
+    /// stream's buffer (SLOT-36).
+    ///
+    /// # Safety
+    /// As for `write`.
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema)
+    where
+        Self: Sized,
+    {
+        self.write(dest, w.cursor, schema)
+    }
+    /// Write `self` as one `@write` batch in place (SLOT-37), or say that
+    /// it takes a voidstar copy: not a sequence, or a stream that refuses.
+    ///
+    /// # Safety
+    /// `schema` is the batch's list schema.
+    unsafe fn write_in_place(&self, schema: &Schema, level: i64, handle: u64) -> InPlace
+    where
+        Self: Sized,
+    {
+        let _ = (schema, level, handle);
+        InPlace::Copy(None, Converted::default())
     }
     /// Add this node's own bytes to the walk and hand it the compound
     /// children. `schema` is resolved; `idx` is the element to visit for a
@@ -1481,6 +1536,22 @@ pub trait FromVoidstar: Sized {
         let _ = (elem, src, n);
         None
     }
+    /// A list type, built from pieces by `seq_with_capacity` and
+    /// `read_append`.
+    const SEQ: bool = false;
+    /// An empty list with room for `n` elements; None when there is no room.
+    fn seq_with_capacity(n: usize) -> Option<Self> {
+        let _ = n;
+        morloc_infra_abort("seq_with_capacity reached a type that is not a list")
+    }
+    /// Read the list of `schema` at `data` onto the end of `acc`.
+    ///
+    /// # Safety
+    /// As for `read`.
+    unsafe fn read_append(acc: &mut Self, schema: &Schema, data: *const u8, space: MorlocSpace) {
+        let _ = (acc, schema, data, space);
+        morloc_infra_abort("read_append reached a type that is not a list")
+    }
 }
 
 // ---- walks ----------------------------------------------------------------
@@ -1516,34 +1587,113 @@ struct SizeFrame {
     env_pushed: bool,
 }
 
-pub struct SizeWalk {
+/// The converted value of each packed field the size walk made, for the
+/// write walk to write, so a field converts once per write.
+#[derive(Default)]
+pub struct Converted {
+    made: std::collections::HashMap<(usize, std::any::TypeId, usize), Box<dyn std::any::Any>>,
+    /// A size walk has filled the table.
+    sized: bool,
+}
+
+impl Converted {
+    /// The converted value of field `idx` (of type `which`) at address
+    /// `field`: the one already made, else a new one.
+    fn get_or_make<R: 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R) -> *const R {
+        self.get_or_make_in(false, true, field, which, idx, convert)
+    }
+
+    /// As `get_or_make`; in a write walk (`writes`), missing a value the
+    /// size walk should have made (one not of fixed width) is a defect,
+    /// since making it again could write more than was sized.
+    fn get_or_make_in<R: 'static>(&mut self, writes: bool, fixed: bool, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R) -> *const R {
+        let key = (field, which, idx);
+        if let Some(b) = self.made.get(&key) {
+            match b.downcast_ref::<R>() {
+                Some(r) => return r as *const R,
+                None => morloc_infra_abort("a converted value was found under another type's key"),
+            }
+        }
+        if writes && self.sized && !fixed {
+            morloc_infra_abort("a write walk met a converted value its size walk did not make");
+        }
+        let b = Box::new(convert());
+        let r: *const R = &*b;
+        self.made.insert(key, b);
+        r
+    }
+}
+
+pub struct SizeWalk<'c> {
     stack: Vec<SizeFrame>,
     cur: SizeFrame,
     keep: Vec<Box<dyn std::any::Any>>,
     pub total: isize,
     /// The root has no back-reference: nothing needs a frame.
     pub direct: bool,
+    converted: *mut Converted,
+    table: std::marker::PhantomData<&'c mut Converted>,
 }
 
 unsafe fn size_thunk<T: ToVoidstar>(w: &mut SizeWalk, s: &Schema, obj: *const u8, idx: usize) {
     (*(obj as *const T)).size_step(w, s, idx)
 }
 
-impl SizeWalk {
-    pub fn new(root: &Schema) -> SizeWalk {
+impl<'c> SizeWalk<'c> {
+    pub fn new(root: &Schema) -> SizeWalk<'c> {
         SizeWalk {
             stack: Vec::new(),
             cur: SizeFrame { step: None, schema: std::ptr::null(), obj: std::ptr::null(), idx: 0, inline_slot: false, env_pushed: false },
             keep: Vec::new(),
             total: 0,
             direct: !schema_has_recur(root),
+            converted: std::ptr::null_mut(),
+            table: std::marker::PhantomData,
         }
+    }
+
+    /// A walk whose packed fields keep their converted values in
+    /// `converted`.
+    pub fn with_converted(root: &Schema, converted: &'c mut Converted) -> SizeWalk<'c> {
+        converted.sized = true;
+        let mut w = SizeWalk::new(root);
+        w.converted = converted;
+        w
+    }
+
+    /// A field written in converted form, converted once per write.
+    pub fn child_converted<R: ToVoidstar + 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R, schema: &Schema, inline_slot: bool) {
+        // A value of fixed width, and an inline integer at an Int schema,
+        // size the same whatever they hold, so they are converted only where
+        // they are written.
+        let s = resolve_recur(schema);
+        if s.is_fixed_width() || (R::INLINE && s.serial_type == SerialType::Int) {
+            if !inline_slot {
+                self.total += s.width as isize;
+            }
+            return;
+        }
+        let r: *const R = if self.converted.is_null() {
+            self.keep_ref(convert())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            unsafe { (*self.converted).get_or_make(field, which, idx, convert) }
+        };
+        // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+        self.child(unsafe { &*r }, schema, inline_slot);
     }
 
     /// A child of a schema that cannot describe unbounded depth is stepped
     /// by call.
     pub fn flat(&self, schema: &Schema) -> bool {
         self.direct || !schema_has_recur(schema)
+    }
+
+    /// Size the next value with the same walk.
+    fn reset(&mut self) {
+        self.stack.clear();
+        self.keep.clear();
+        self.total = 0;
     }
 
     /// Account for a child. A leaf is summed here; a compound child is
@@ -1581,14 +1731,6 @@ impl SizeWalk {
         r
     }
 
-    /// A child the step itself produced (a reified closure origin): the walk
-    /// keeps it alive until it is reached.
-    pub fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, schema: &Schema, inline_slot: bool) {
-        let r = self.keep_ref(v);
-        // SAFETY: the box lives in `keep` for the rest of the walk.
-        self.child(unsafe { &*r }, schema, inline_slot);
-    }
-
     /// Visit the current node again for element `idx`.
     pub fn resume(&mut self, idx: usize) {
         let mut f = self.cur;
@@ -1605,9 +1747,26 @@ impl SizeWalk {
         self.child(payload, a, false);
     }
 
-    /// As `variant_payload`, for a payload the step itself produced.
-    pub fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, payload: T) {
-        let r = self.keep_ref(payload);
+    /// A variant slot plus the out-of-line slot of one arm whose fields the
+    /// caller then sizes one by one, each inline (`child(.., true)`), from
+    /// the value itself: an arm of a user-written enum.
+    pub fn variant_arm<'s>(&mut self, schema: &Schema, arm: &'s Schema) -> &'s Schema {
+        let a = resolve_recur(arm);
+        self.total += (schema.width + (a.alignment().max(1) - 1)) as isize;
+        self.total += a.width as isize;
+        a
+    }
+
+    /// As `variant_payload`, for a payload made from the value at
+    /// `obj` once per write, so the write walk writes the one sized.
+    pub fn variant_payload_converted<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, obj: usize, idx: usize, make: impl FnOnce() -> T) {
+        let r: *const T = if self.converted.is_null() {
+            self.keep_ref(make())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            unsafe { (*self.converted).get_or_make(obj, std::any::TypeId::of::<T>(), idx, make) }
+        };
+        // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
         self.variant_payload(schema, arm, unsafe { &*r });
     }
 
@@ -1657,10 +1816,24 @@ pub struct WriteWalk<'a> {
     keep: Vec<Box<dyn std::any::Any>>,
     pub cursor: &'a mut *mut u8,
     pub direct: bool,
+    // SLOT-36: in a stream's buffer, offsets are relative to `base` and
+    // parts aligned relative to `origin`; null for shared-memory relptrs.
+    base: *mut u8,
+    origin: *mut u8,
+    // SLOT-36: deferred child frames, for the layout in a stream's buffer.
+    later: Vec<WriteFrame>,
+    in_step: bool,
+    deferring: bool,
+    converted: *mut Converted,
+    table: std::marker::PhantomData<&'a mut Converted>,
 }
 
 unsafe fn write_thunk<T: ToVoidstar>(w: &mut WriteWalk, s: &Schema, dest: *mut u8, obj: *const u8, idx: usize) {
     (*(obj as *const T)).write_step(w, dest, s, idx)
+}
+
+unsafe fn write_leaf_thunk<T: ToVoidstar>(w: &mut WriteWalk, s: &Schema, dest: *mut u8, obj: *const u8, _idx: usize) {
+    (*(obj as *const T)).write_leaf(w, dest, s)
 }
 
 impl<'a> WriteWalk<'a> {
@@ -1671,11 +1844,89 @@ impl<'a> WriteWalk<'a> {
             keep: Vec::new(),
             cursor,
             direct: !schema_has_recur(root),
+            base: std::ptr::null_mut(),
+            origin: std::ptr::null_mut(),
+            later: Vec::new(),
+            in_step: false,
+            deferring: false,
+            converted: std::ptr::null_mut(),
+            table: std::marker::PhantomData,
         }
+    }
+
+    /// A walk that writes the converted values `converted` holds.
+    pub fn with_converted(root: &Schema, cursor: &'a mut *mut u8, converted: &'a mut Converted) -> WriteWalk<'a> {
+        let mut w = WriteWalk::new(root, cursor);
+        w.converted = converted;
+        w
+    }
+
+    /// A field written in converted form: the value the size walk made, or
+    /// one made here when no size walk ran.
+    ///
+    /// # Safety
+    /// As for `child`.
+    pub unsafe fn child_converted<R: ToVoidstar + 'static>(&mut self, field: usize, which: std::any::TypeId, idx: usize, convert: impl FnOnce() -> R, dest: *mut u8, schema: &Schema) {
+        // A value of fixed width, or an inline integer at an Int schema, was
+        // not converted by the size walk; it is converted here, once, and
+        // written at once, since it holds no part a later step writes.
+        let s = resolve_recur(schema);
+        if s.is_fixed_width() || (R::INLINE && s.serial_type == SerialType::Int) {
+            let v = convert();
+            self.child(&v, dest, schema);
+            return;
+        }
+        let r: *const R = if self.converted.is_null() {
+            self.keep_ref(convert())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            (*self.converted).get_or_make_in(true, false, field, which, idx, convert)
+        };
+        self.child(&*r, dest, schema);
+    }
+
+    /// Write the next value into a stream buffer's room, its cursor at
+    /// `data`.
+    fn place(&mut self, data: *mut u8, base: *mut u8, origin: *mut u8) {
+        *self.cursor = data;
+        self.base = base;
+        self.origin = origin;
+        self.keep.clear();
+        self.later.clear();
+        self.in_step = false;
+        self.deferring = false;
     }
 
     pub fn flat(&self, schema: &Schema) -> bool {
         self.direct || !schema_has_recur(schema)
+    }
+
+    /// The relative pointer to `p`.
+    ///
+    /// # Safety
+    /// `p` lies in the block the walk writes.
+    pub unsafe fn rel(&self, p: *mut u8) -> RelPtr {
+        if self.base.is_null() {
+            to_rel(p)
+        } else {
+            (p as usize - self.base as usize) as RelPtr
+        }
+    }
+
+    /// The data pointer of an empty array or string.
+    pub fn empty_rel(&self) -> RelPtr {
+        if self.base.is_null() { RELNULL } else { 0 }
+    }
+
+    /// Move the cursor to the next multiple of `align`.
+    pub fn align(&mut self, align: usize) {
+        let c = *self.cursor as usize;
+        *self.cursor = if self.origin.is_null() {
+            align_up(c, align)
+        } else {
+            let o = self.origin as usize;
+            o + align_up(c - o, align)
+        } as *mut u8;
     }
 
     /// Write a child into its slot: a leaf now, a compound node by call or
@@ -1684,20 +1935,32 @@ impl<'a> WriteWalk<'a> {
     /// # Safety
     /// `dest` must be the child's slot in a buffer sized by `shm_size`.
     pub unsafe fn child<T: ToVoidstar>(&mut self, v: &T, dest: *mut u8, schema: &Schema) {
+        let frame = |step: WriteStep| WriteFrame {
+            step: Some(step),
+            schema,
+            dest,
+            obj: v as *const T as *const u8,
+            idx: 0,
+            aux: std::ptr::null_mut(),
+            env_pushed: false,
+        };
         if T::IS_LEAF {
-            v.write(dest, self.cursor, resolve_recur(schema));
+            // A Rust Int is always inline, so it has no tail.
+            let s = resolve_recur(schema);
+            if self.deferring && !s.is_fixed_width() && s.serial_type != SerialType::Int {
+                self.later.push(frame(write_leaf_thunk::<T>));
+            } else {
+                v.write_leaf(self, dest, s);
+            }
+        } else if self.deferring && !resolve_recur(schema).is_fixed_width() {
+            self.later.push(frame(write_thunk::<T>));
         } else if self.flat(schema) {
             v.write_step(self, dest, schema, 0);
+        } else if self.in_step && !self.base.is_null() {
+            self.later.push(frame(write_thunk::<T>));
+            self.deferring = true;
         } else {
-            self.stack.push(WriteFrame {
-                step: Some(write_thunk::<T>),
-                schema,
-                dest,
-                obj: v as *const T as *const u8,
-                idx: 0,
-                aux: std::ptr::null_mut(),
-                env_pushed: false,
-            });
+            self.stack.push(frame(write_thunk::<T>));
         }
     }
 
@@ -1706,16 +1969,6 @@ impl<'a> WriteWalk<'a> {
         let r: *const T = &*b;
         self.keep.push(b);
         r
-    }
-
-    /// A child the step itself produced (a reified closure origin): the walk
-    /// keeps it alive until it is reached.
-    ///
-    /// # Safety
-    /// As for `child`.
-    pub unsafe fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, dest: *mut u8, schema: &Schema) {
-        let r = self.keep_ref(v);
-        self.child(&*r, dest, schema);
     }
 
     /// Visit the current node again for element `idx`, carrying `aux`.
@@ -1737,8 +1990,7 @@ impl<'a> WriteWalk<'a> {
     /// # Safety
     /// The buffer must have room for it (see `shm_size`).
     pub unsafe fn alloc(&mut self, inner: &Schema) -> *mut u8 {
-        let align = inner.alignment().max(1);
-        *self.cursor = align_up(*self.cursor as usize, align) as *mut u8;
+        self.align(inner.alignment().max(1));
         let slot = *self.cursor;
         *self.cursor = slot.add(inner.width);
         slot
@@ -1751,20 +2003,37 @@ impl<'a> WriteWalk<'a> {
     /// `dest` must point at a writable slot of at least the schema's width,
     /// and the buffer must have room for the payload (see `shm_size`).
     pub unsafe fn variant_payload<T: ToVoidstar>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: &T) {
+        let (slot, a) = self.variant_arm(dest, arm, tag);
+        self.child(payload, slot, a);
+    }
+
+    /// A variant slot and the out-of-line slot of one arm, whose fields the
+    /// caller then writes one by one at the arm's offsets, from the value
+    /// itself: an arm of a user-written enum.
+    ///
+    /// # Safety
+    /// As for `variant_payload`.
+    pub unsafe fn variant_arm<'s>(&mut self, dest: *mut u8, arm: &'s Schema, tag: u8) -> (*mut u8, &'s Schema) {
         *dest = tag;
         core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
         let a = resolve_recur(arm);
         let slot = self.alloc(a);
-        core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, to_rel(slot));
-        self.child(payload, slot, a);
+        core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, self.rel(slot));
+        (slot, a)
     }
 
-    /// As `variant_payload`, for a payload the step itself produced.
+    /// As `variant_payload`, for a payload made from the value at
+    /// `obj` once per write: the one the size walk made, when it ran.
     ///
     /// # Safety
     /// As for `variant_payload`.
-    pub unsafe fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: T) {
-        let r = self.keep_ref(payload);
+    pub unsafe fn variant_payload_converted<T: ToVoidstar + 'static>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, obj: usize, idx: usize, make: impl FnOnce() -> T) {
+        let r: *const T = if self.converted.is_null() {
+            self.keep_ref(make())
+        } else {
+            // SAFETY: `converted` is non-null only as the `&mut` `with_converted` took.
+            (*self.converted).get_or_make_in(true, resolve_recur(arm).is_fixed_width(), obj, std::any::TypeId::of::<T>(), idx, make)
+        };
         self.variant_payload(dest, arm, tag, &*r);
     }
 
@@ -1784,7 +2053,14 @@ impl<'a> WriteWalk<'a> {
                 f.env_pushed = true;
             }
             self.cur = f;
+            self.in_step = true;
+            self.deferring = false;
             unsafe { step(self, s, f.dest, f.obj, f.idx) };
+            self.in_step = false;
+            self.deferring = false;
+            if !self.later.is_empty() {
+                self.stack.extend(self.later.drain(..).rev());
+            }
         }
     }
 }
@@ -2105,6 +2381,7 @@ macro_rules! int_impl {
     ($t:ty, $kind:ident) => {
         impl ToVoidstar for $t {
             const IS_LEAF: bool = true;
+            const INLINE: bool = true;
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
@@ -2129,8 +2406,11 @@ macro_rules! int_impl {
                     // Inline BigInt [size=1, value] (16 bytes); v1 never emits
                     // multi-limb (I6 handles consume).
                     SerialType::Int => {
+                        let v = i64::try_from(*self as i128).unwrap_or_else(|_| {
+                            morloc_throw(format!("{} does not fit the Int this Rust value is written as", *self))
+                        });
                         core::ptr::write_unaligned(dest as *mut i64, 1);
-                        core::ptr::write_unaligned((dest as *mut i64).add(1), *self as i64);
+                        core::ptr::write_unaligned((dest as *mut i64).add(1), v);
                     }
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
                     | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
@@ -2331,12 +2611,12 @@ impl FromVoidstar for bool {
 }
 
 // ---- Unit () (NIL, the value of `<E> ()` effect results) -------------------
-// NIL occupies a 1-byte inline slot (schema.width) with no variable region;
-// nothing meaningful is written or read.
+// NIL has an empty slot (width 0) and no variable region; nothing is
+// written or read.
 impl ToVoidstar for () {
     const IS_LEAF: bool = true;
     #[inline]
-    fn shm_size(&self, _schema: &Schema) -> usize { 0 }
+    fn shm_size(&self, schema: &Schema) -> usize { schema.width }
     #[inline]
     unsafe fn write(&self, _dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {}
 }
@@ -2364,6 +2644,18 @@ impl ToVoidstar for String {
         };
         core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: data_rel });
     }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, _schema: &Schema) {
+        let n = self.len();
+        let data_rel = if n == 0 {
+            w.empty_rel()
+        } else {
+            let at = *w.cursor;
+            core::ptr::copy_nonoverlapping(self.as_ptr(), at, n);
+            *w.cursor = at.add(n);
+            w.rel(at)
+        };
+        core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: data_rel });
+    }
 }
 impl FromVoidstar for String {
     const IS_LEAF: bool = true;
@@ -2376,7 +2668,11 @@ impl FromVoidstar for String {
         let bytes = core::slice::from_raw_parts(p, a.size).to_vec();
         match String::from_utf8(bytes) {
             Ok(s) => s,
-            Err(_) => morloc_throw("Str field is not valid UTF-8"), // I5
+            Err(e) => morloc_throw(&format!(
+                "a Str that is not valid UTF-8 (byte {} of {})",
+                e.utf8_error().valid_up_to(),
+                a.size
+            )), // I5
         }
     }
 }
@@ -2414,8 +2710,12 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         let elem = resolve_recur(&schema.parameters[0]);
         if idx == 0 {
             // width slot + worst-case cursor alignment padding + element data
-            w.total += (schema.width + (elem.array_data_alignment() - 1)) as isize;
-            if elem.is_primitive_numeric() || elem.serial_type == SerialType::Bool {
+            w.total += schema.width as isize;
+            if self.is_empty() {
+                return;
+            }
+            w.total += (elem.array_data_alignment() - 1) as isize;
+            if elem.is_fixed_width() {
                 w.total += (self.len() * elem.width) as isize;
                 return;
             }
@@ -2439,14 +2739,14 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         let width = elem.width;
         let start = if idx == 0 {
             if n == 0 {
-                core::ptr::write_unaligned(dest as *mut Array, Array { size: 0, data: RELNULL });
+                core::ptr::write_unaligned(dest as *mut Array, Array { size: 0, data: w.empty_rel() });
                 return;
             }
             // align cursor for element data (bumps to 64 for primitive numerics)
-            *w.cursor = align_up(*w.cursor as usize, elem.array_data_alignment()) as *mut u8;
+            w.align(elem.array_data_alignment());
             let start = *w.cursor;
             *w.cursor = start.add(n * width);
-            core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: to_rel(start) });
+            core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: w.rel(start) });
             if T::IS_LEAF || w.flat(elem) {
                 let (a, b) = self.two_slices();
                 if T::write_array(a, elem, start) && T::write_array(b, elem, start.add(a.len() * width)) {
@@ -2466,8 +2766,20 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         }
         w.child(&self[idx], start.add(idx * width), elem);
     }
+    unsafe fn write_in_place(&self, schema: &Schema, level: i64, handle: u64) -> InPlace {
+        write_seq_in_place(self.two_slices(), schema, level, handle)
+    }
 }
 impl<T: FromVoidstar> FromVoidstar for $container<T> {
+    const SEQ: bool = true;
+    fn seq_with_capacity(n: usize) -> Option<Self> {
+        let mut v = $container::new();
+        v.try_reserve(n).ok()?;
+        Some(v)
+    }
+    unsafe fn read_append(acc: &mut Self, schema: &Schema, data: *const u8, space: MorlocSpace) {
+        acc.extend(Self::read(schema, data, space));
+    }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, idx: usize) {
         let a = core::ptr::read_unaligned(data as *const Array);
         let elem = resolve_recur(&schema.parameters[0]);
@@ -2531,7 +2843,7 @@ impl<T: ToVoidstar> ToVoidstar for Option<T> {
             Some(v) => {
                 let inner = resolve_recur(&schema.parameters[0]);
                 let slot = w.alloc(inner);
-                core::ptr::write_unaligned(dest as *mut RelPtr, to_rel(slot));
+                core::ptr::write_unaligned(dest as *mut RelPtr, w.rel(slot));
                 w.child(v, slot, inner);
             }
         }
@@ -2598,6 +2910,9 @@ impl<T: ToVoidstar> ToVoidstar for Box<T> {
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
         (**self).write(dest, cursor, schema)
     }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema) {
+        (**self).write_leaf(w, dest, schema)
+    }
     fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
         (**self).size_step(w, schema, idx)
     }
@@ -2619,20 +2934,152 @@ impl<T: FromVoidstar> FromVoidstar for Box<T> {
     }
 }
 
-// ---- RecBox (deferred-release cycle-break indirection) --------------------
+// Transparent on the wire, exactly as Box: a field of a user-written type may
+// hold its value in an Arc.
+impl<T: ToVoidstar> ToVoidstar for std::sync::Arc<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
+    fn shm_size(&self, schema: &Schema) -> usize {
+        (**self).shm_size(schema)
+    }
+    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+        (**self).write(dest, cursor, schema)
+    }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema) {
+        (**self).write_leaf(w, dest, schema)
+    }
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
+        (**self).size_step(w, schema, idx)
+    }
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, idx: usize) {
+        (**self).write_step(w, dest, schema, idx)
+    }
+}
+impl<T: FromVoidstar> FromVoidstar for std::sync::Arc<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        std::sync::Arc::new(T::read(schema, data, space))
+    }
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+        w.push_finish::<Self>(schema, data);
+        w.child_step::<T>(schema, data);
+    }
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+        std::sync::Arc::new(w.child_read::<T>(schema, data))
+    }
+}
+
+// ---- Fields of a user-written enum arm --------------------------------------
 //
-// A generated `data` type holds each constructor's fields behind a `RecBox`,
-// and a generated record holds any field that mentions the record behind
-// one, so a value may hold its own type again at any depth. Dropping the last
-// owner of a deep chain would otherwise run one drop frame per level and
-// overflow the stack at a depth the heap could easily hold. While one drop is
-// draining, every further last-owner drop on the thread hands its block to
-// the drain's worklist and returns; the outermost drop pops and frees until
-// the list is empty. Depth then costs heap.
+// A user-written enum's arm is a tuple variant with one field per morloc
+// field, each holding the field's morloc type T as it is or behind a Box or
+// an Arc. Generated code names T and converts through these traits, so the
+// field type the user wrote is checked against morloc's and the value is
+// always marshalled at T.
+
+/// A field holding a value of morloc type `T`.
+#[diagnostic::on_unimplemented(
+    message = "a field of a user-written Rust enum arm holds `{Self}`, but morloc's field type is `{T}`",
+    label = "expected `{T}`, `Box<{T}>` or `Arc<{T}>`",
+    note = "an arm is a tuple variant with one field per morloc field (`Add(Box<Expr>, Box<Expr>)`); one box of a tuple (`Add(Box<(Expr, Expr)>)`) is not accepted"
+)]
+pub trait MlcField<T>: Sized {
+    fn field(&self) -> &T;
+    fn from_field(v: T) -> Self;
+    fn unfield(self) -> T
+    where
+        T: Clone;
+}
+
+impl<T> MlcField<T> for T {
+    fn field(&self) -> &T {
+        self
+    }
+    fn from_field(v: T) -> Self {
+        v
+    }
+    fn unfield(self) -> T
+    where
+        T: Clone,
+    {
+        self
+    }
+}
+
+impl<T> MlcField<T> for Box<T> {
+    fn field(&self) -> &T {
+        self
+    }
+    fn from_field(v: T) -> Self {
+        Box::new(v)
+    }
+    fn unfield(self) -> T
+    where
+        T: Clone,
+    {
+        *self
+    }
+}
+
+impl<T> MlcField<T> for std::sync::Arc<T> {
+    fn field(&self) -> &T {
+        self
+    }
+    fn from_field(v: T) -> Self {
+        std::sync::Arc::new(v)
+    }
+    fn unfield(self) -> T
+    where
+        T: Clone,
+    {
+        std::sync::Arc::try_unwrap(self).unwrap_or_else(|a| (*a).clone())
+    }
+}
+
+/// A field holding a value of morloc type `?T`.
+#[diagnostic::on_unimplemented(
+    message = "an optional field of a user-written Rust enum arm holds `{Self}`, but morloc's field type is `?{T}`",
+    label = "expected `Option<{T}>`, `Option<Box<{T}>>` or `Option<Arc<{T}>>`"
+)]
+pub trait MlcOptField<T>: Sized {
+    fn opt(&self) -> Option<&T>;
+    fn from_opt(v: Option<T>) -> Self;
+    fn unfield_opt(self) -> Option<T>
+    where
+        T: Clone;
+}
+
+impl<T, F: MlcField<T>> MlcOptField<T> for Option<F> {
+    fn opt(&self) -> Option<&T> {
+        self.as_ref().map(F::field)
+    }
+    fn from_opt(v: Option<T>) -> Self {
+        v.map(F::from_field)
+    }
+    fn unfield_opt(self) -> Option<T>
+    where
+        T: Clone,
+    {
+        self.map(F::unfield)
+    }
+}
+
+/// The field itself, once its type is known to hold morloc's `?T`: it is
+/// marshalled as it is, its pointer being transparent on the wire.
+pub fn opt_field<T, F: MlcOptField<T>>(f: &F) -> &F {
+    f
+}
+
+// ---- Deferred release of recursive nodes ------------------------------------
 //
-// The box is reference counted: cloning shares the pointee, which keeps a
-// projection out of a value (which clones the projected field) at a constant
-// cost instead of a copy of the whole subtree.
+// A value morloc generates may hold its own type again at any depth: the arms
+// of a generated `data` type and the node of a generated record that refers
+// to itself are reference-counted nodes, declared in each crate that uses
+// them. Dropping the last owner of a deep chain would otherwise run one drop
+// frame per level and overflow the stack at a depth the heap could easily
+// hold. While one drop is draining, every further last-owner release on the
+// thread (`rec_release`) hands its block to the drain's worklist and returns;
+// the outermost release pops and frees until the list is empty. Depth then
+// costs heap.
 pub mod rec_drain {
     use std::cell::Cell;
 
@@ -2721,39 +3168,71 @@ pub mod rec_drain {
     }
 }
 
-pub struct RecBox<T>(std::mem::ManuallyDrop<std::sync::Arc<T>>);
+/// A recursive node as a generated crate declares one, for the runtime's own
+/// tests of the drain and the walks.
+#[cfg(test)]
+pub(crate) struct RecNode<T>(std::mem::ManuallyDrop<std::sync::Arc<T>>);
 
-impl<T> RecBox<T> {
+#[cfg(test)]
+impl<T> RecNode<T> {
     pub fn new(v: T) -> Self {
-        RecBox(std::mem::ManuallyDrop::new(std::sync::Arc::new(v)))
-    }
-
-    /// The value, moved out when this is the only owner and copied
-    /// otherwise.
-    pub fn into_inner(self) -> T
-    where
-        T: Clone,
-    {
-        let mut me = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `me` is never dropped, so the Arc is taken exactly once.
-        let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
-        std::sync::Arc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+        RecNode(std::mem::ManuallyDrop::new(std::sync::Arc::new(v)))
     }
 
     /// The value if `Arc::try_unwrap` gives it, else the box back.
-    pub fn try_into_inner(self) -> Result<T, RecBox<T>> {
+    pub fn try_into_inner(self) -> Result<T, RecNode<T>> {
         let mut me = std::mem::ManuallyDrop::new(self);
         // SAFETY: `me` is not dropped and its Arc is not used after this take.
         let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
-        std::sync::Arc::try_unwrap(rc).map_err(|rc| RecBox(std::mem::ManuallyDrop::new(rc)))
+        std::sync::Arc::try_unwrap(rc).map_err(|rc| RecNode(std::mem::ManuallyDrop::new(rc)))
+    }
+}
+
+/// Copy `x`, a value held in a payload that is shared: a `Clone` type is
+/// cloned, and any other fails the call ('MlcCopy').
+#[macro_export]
+macro_rules! mlc_copy {
+    ($x:expr) => {{
+        #[allow(unused_imports)]
+        use $crate::{MlcCopyClone, MlcCopyFail};
+        (&$crate::MlcCopy(&$x)).mlc_copy()
+    }};
+}
+
+/// The copy a take falls back to when the payload is shared. A type that is
+/// `Clone` is cloned; any other type cannot be copied, so the call fails.
+/// The choice is made at the concrete type by method resolution: write
+/// `(&::rustmorloc::MlcCopy(&x)).mlc_copy()` with both traits in scope.
+pub struct MlcCopy<'a, T>(pub &'a T);
+
+pub trait MlcCopyClone<T> {
+    fn mlc_copy(&self) -> T;
+}
+
+impl<'a, T: Clone> MlcCopyClone<T> for MlcCopy<'a, T> {
+    fn mlc_copy(&self) -> T {
+        self.0.clone()
+    }
+}
+
+pub trait MlcCopyFail<T> {
+    fn mlc_copy(&self) -> T;
+}
+
+impl<'a, T> MlcCopyFail<T> for &MlcCopy<'a, T> {
+    fn mlc_copy(&self) -> T {
+        morloc_throw_as(format!(
+            "a value of type `{}` is held in more than one place and cannot be copied (it is not Clone)",
+            std::any::type_name::<T>()
+        ))
     }
 }
 
 /// The box around a constructor's payload, taken apart at the last use of
 /// the value that holds it: the payload is moved out when the box is its
-/// only owner, and otherwise the part needed is cloned from it. A generated
-/// type's arms are `RecBox`es; a user-mapped type may use `Box`, `Rc` or
-/// `Arc`.
+/// only owner, and otherwise the part needed is copied ('MlcCopy'). A generated
+/// type's arms are its crate's nodes; a user-written arm's fields are taken
+/// through `MlcField` instead.
 pub trait MlcTake: Sized {
     type Payload;
     fn take_with<R>(self, owned: impl FnOnce(Self::Payload) -> R, shared: impl FnOnce(&Self::Payload) -> R) -> R;
@@ -2766,7 +3245,8 @@ impl<T> MlcTake for Box<T> {
     }
 }
 
-impl<T> MlcTake for RecBox<T> {
+#[cfg(test)]
+impl<T> MlcTake for RecNode<T> {
     type Payload = T;
     fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
         match self.try_into_inner() {
@@ -2796,32 +3276,37 @@ impl<T> MlcTake for std::sync::Arc<T> {
     }
 }
 
-impl<T> From<T> for RecBox<T> {
+#[cfg(test)]
+impl<T> From<T> for RecNode<T> {
     fn from(v: T) -> Self {
-        RecBox::new(v)
+        RecNode::new(v)
     }
 }
 
-impl<T> std::ops::Deref for RecBox<T> {
+#[cfg(test)]
+impl<T> std::ops::Deref for RecNode<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
     }
 }
 
-impl<T> Clone for RecBox<T> {
+#[cfg(test)]
+impl<T> Clone for RecNode<T> {
     fn clone(&self) -> Self {
-        RecBox(std::mem::ManuallyDrop::new(std::sync::Arc::clone(&self.0)))
+        RecNode(std::mem::ManuallyDrop::new(std::sync::Arc::clone(&self.0)))
     }
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for RecBox<T> {
+#[cfg(test)]
+impl<T: std::fmt::Debug> std::fmt::Debug for RecNode<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         (**self).fmt(f)
     }
 }
 
-impl<T: PartialEq> PartialEq for RecBox<T> {
+#[cfg(test)]
+impl<T: PartialEq> PartialEq for RecNode<T> {
     fn eq(&self, other: &Self) -> bool {
         **self == **other
     }
@@ -2831,37 +3316,48 @@ unsafe fn rec_drop_thunk<T>(p: *mut u8) {
     drop(std::sync::Arc::from_raw(p as *const T));
 }
 
-impl<T> Drop for RecBox<T> {
+#[cfg(test)]
+impl<T> Drop for RecNode<T> {
     fn drop(&mut self) {
         // SAFETY: the field is taken exactly once, here.
-        let mut rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
-        // STATE-2: uniqueness, not a count, picks the owner that drains.
-        if std::sync::Arc::get_mut(&mut rc).is_none() {
-            drop(rc);
-            return;
-        }
-        match rec_drain::state() {
-            rec_drain::State::Active => {
-                let raw = std::sync::Arc::into_raw(rc) as *mut u8;
-                if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
-                    // SAFETY: `raw` came from `into_raw` just above.
-                    unsafe { rec_drop_thunk::<T>(raw) };
-                }
+        let rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        rec_release(rc);
+    }
+}
+
+/// Release one holder of a recursive node (STATE-8): a `RecNode`, or the node
+/// of a generated record that refers to itself (GEN-1).
+pub fn rec_release<T>(mut rc: std::sync::Arc<T>) {
+    // STATE-2: uniqueness, not a count, picks the owner that drains.
+    if std::sync::Arc::get_mut(&mut rc).is_none() {
+        drop(rc);
+        return;
+    }
+    match rec_drain::state() {
+        rec_drain::State::Active => {
+            let raw = std::sync::Arc::into_raw(rc) as *mut u8;
+            if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
+                // SAFETY: `raw` came from `into_raw` just above.
+                unsafe { rec_drop_thunk::<T>(raw) };
             }
-            rec_drain::State::Inactive => rec_drain::run(|| drop(rc)),
-            rec_drain::State::Unavailable => drop(rc),
         }
+        rec_drain::State::Inactive => rec_drain::run(|| drop(rc)),
+        rec_drain::State::Unavailable => drop(rc),
     }
 }
 
 // Transparent on the wire, exactly as Box.
-impl<T: ToVoidstar> ToVoidstar for RecBox<T> {
+#[cfg(test)]
+impl<T: ToVoidstar> ToVoidstar for RecNode<T> {
     const IS_LEAF: bool = T::IS_LEAF;
     fn shm_size(&self, schema: &Schema) -> usize {
         (**self).shm_size(schema)
     }
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
         (**self).write(dest, cursor, schema)
+    }
+    unsafe fn write_leaf(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema) {
+        (**self).write_leaf(w, dest, schema)
     }
     fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
         (**self).size_step(w, schema, idx)
@@ -2870,17 +3366,18 @@ impl<T: ToVoidstar> ToVoidstar for RecBox<T> {
         (**self).write_step(w, dest, schema, idx)
     }
 }
-impl<T: FromVoidstar> FromVoidstar for RecBox<T> {
+#[cfg(test)]
+impl<T: FromVoidstar> FromVoidstar for RecNode<T> {
     const IS_LEAF: bool = T::IS_LEAF;
     unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
-        RecBox::new(T::read(schema, data, space))
+        RecNode::new(T::read(schema, data, space))
     }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
         w.push_finish::<Self>(schema, data);
         w.child_step::<T>(schema, data);
     }
     unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
-        RecBox::new(w.child_read::<T>(schema, data))
+        RecNode::new(w.child_read::<T>(schema, data))
     }
 }
 
@@ -2992,7 +3489,8 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
             Err(err) => fail_packet_from_c(err, "arrow_to_shm failed in put_value"),
         };
     }
-    let total = value.shm_size(schema).max(1);
+    let mut converted = Converted::default();
+    let total = size_converted(value, schema, &mut converted).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
@@ -3000,7 +3498,7 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
     }
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
-    value.write(root, &mut cursor, schema); // panic -> guard shfree
+    write_converted(value, root, &mut cursor, schema, &mut converted); // panic -> guard shfree
     let relptr = abs2rel(root as *mut c_void, &mut err);
     let cs = cschema_of(schema);
     let packet = if self_contained {
@@ -3248,17 +3746,16 @@ unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
         morloc_throw(msg);
     }
 
-    if *result.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
-        let meta = core::ptr::read_unaligned(result.add(PKT_OFFSET_OFF) as *const u32) as usize;
-        let rel = core::ptr::read_unaligned(result.add(PKT_HEADER_SIZE + meta) as *const RelPtr);
-        let mut rerr: *mut c_char = std::ptr::null_mut();
-        let voidstar = rel2abs(rel, &mut rerr);
-        discard_err(rerr);
-        if !voidstar.is_null() {
-            // The callee took a reference before sending; it is ours now.
-            // Inherit it rather than adding another.
-            track(voidstar);
-        }
+    let mut refused: *mut c_char = std::ptr::null_mut();
+    let block = mlc_packet_block(result, &mut refused);
+    if !refused.is_null() {
+        let msg = cstr_take(refused);
+        libc::free(result as *mut c_void);
+        morloc_infra_abort(&msg);
+    }
+    if !block.is_null() {
+        // SHM-3, SHM-8
+        track(block);
     }
 
     result
@@ -3374,8 +3871,19 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     schema: &Schema,
     f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
 ) -> R {
+    with_voidstar_sized(value, schema, None, Converted::default(), f)
+}
+
+/// `with_voidstar` for a value whose size may already be known.
+unsafe fn with_voidstar_sized<T: ToVoidstar, R>(
+    value: &T,
+    schema: &Schema,
+    known: Option<usize>,
+    mut converted: Converted,
+    f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
+) -> R {
     let _recur = RecurScope::enter(schema);
-    let total = value.shm_size(schema).max(1);
+    let total = known.unwrap_or_else(|| size_converted(value, schema, &mut converted)).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
@@ -3383,7 +3891,10 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     }
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
-    value.write(root, &mut cursor, schema); // panic -> guard shfree
+    write_converted(value, root, &mut cursor, schema, &mut converted); // panic -> guard shfree
+    if cursor as usize > root as usize + total {
+        morloc_infra_abort("a value was written past the size computed for it");
+    }
     let r = f(root as *mut c_void, cschema_of(schema), &mut err);
     drop(guard); // the C call has consumed the voidstar; free it now
     if !err.is_null() {
@@ -3564,6 +4075,40 @@ pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: 
 pub unsafe fn load<T: FromVoidstar>(schema: &Schema, path: &str) -> T {
     let path_c = cstr_arg(path, "@load");
     let mut err: *mut c_char = std::ptr::null_mut();
+    // SLOT-25: a stream file of this list type is read as its whole IFile
+    // slice; any other file, or one that does not open as an IFile, takes the
+    // general load.
+    if T::SEQ {
+        let h = with_schema_str(schema, |s| mlc_open_ifile(s, path_c.as_ptr(), &mut err));
+        if err.is_null() && h >= 0 {
+            struct Opened(i64);
+            impl Drop for Opened {
+                fn drop(&mut self) {
+                    if self.0 >= 0 {
+                        let mut e: *mut c_char = std::ptr::null_mut();
+                        unsafe {
+                            mlc_close(self.0, &mut e);
+                            if !e.is_null() {
+                                libc::free(e as *mut c_void);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut opened = Opened(h);
+            let value = ifile_slice::<T>(schema, h as u64, None, None, "@load");
+            opened.0 = -1;
+            let mut close_err: *mut c_char = std::ptr::null_mut();
+            if mlc_close(h, &mut close_err) != 0 || !close_err.is_null() {
+                morloc_throw(format!("@load: {}", reason_or_abort(close_err, "@load")));
+            }
+            return value;
+        }
+        if !err.is_null() {
+            libc::free(err as *mut c_void);
+            err = std::ptr::null_mut();
+        }
+    }
     let voidstar = mlc_load(path_c.as_ptr(), cschema_of(schema), &mut err);
     read_voidstar(voidstar, err, schema, "@load")
 }
@@ -3660,6 +4205,15 @@ pub unsafe fn replay<E, F: Invoke1<Vec<E>, ()>>(schema: &Schema, handle: u64, f:
 where
     Vec<E>: FromVoidstar,
 {
+    replay_owned(schema, handle, |frame: Vec<E>| f.invoke(&frame))
+}
+
+/// @replay whose function takes each frame by value, so the frame can be
+/// taken apart without a copy (a frame of a packed element is unpacked).
+pub unsafe fn replay_owned<E, F: Fn(Vec<E>)>(schema: &Schema, handle: u64, f: F)
+where
+    Vec<E>: FromVoidstar,
+{
     loop {
         let mut err: *mut c_char = std::ptr::null_mut();
         let mut eof: i32 = 0;
@@ -3668,7 +4222,8 @@ where
             break;
         }
         let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
-        f.invoke(&frame);
+        let _fork = ForkGuard::new();
+        f(frame);
     }
 }
 
@@ -3686,19 +4241,166 @@ pub unsafe fn stream(ifile_handle: u64) -> u64 {
     handle_or_throw(h, err, "@stream")
 }
 
-/// @write: emit one sub-packet of a value to an OStream handle. `mlc_write`
-/// copies the staged voidstar synchronously and takes no schema, so the
-/// `with_voidstar` closure ignores its CSchema argument.
+/// @write: emit one batch to an OStream handle, in place where the stream
+/// takes it (SLOT-37), else from a voidstar copy, which `mlc_write` copies
+/// synchronously.
 pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
-    let rc = with_voidstar(value, schema, |vs, _cs, err| {
+    let (total, converted) = match value.write_in_place(schema, level, handle) {
+        InPlace::Done => return,
+        InPlace::Copy(total, converted) => (total, converted),
+    };
+    let rc = with_voidstar_sized(value, schema, total, converted, |vs, _cs, err| {
         mlc_write(level, handle as i64, vs, err)
     });
+    stream_result(rc, std::ptr::null_mut(), "@write");
+}
+
+/// SIDE-12, SLOT-35: a sink's write that panics fails its stream.
+pub unsafe fn sink_write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
+    guarded_put(handle, || write(schema, level, value, handle))
+}
+
+/// What `ToVoidstar::write_in_place` did: wrote the batch, or left it to the
+/// voidstar copy, with the copy's size when it already knows it.
+pub enum InPlace {
+    Done,
+    /// The copy's size when known, and the converted values its sizing
+    /// made.
+    Copy(Option<usize>, Converted),
+}
+
+/// The size of `value` written at `schema`, its converted fields kept in
+/// `converted`.
+pub fn size_converted<T: ToVoidstar>(value: &T, schema: &Schema, converted: &mut Converted) -> usize {
+    let mut w = SizeWalk::with_converted(schema, converted);
+    w.child(value, schema, false);
+    w.run()
+}
+
+/// Write `value` as `ToVoidstar::write` does, writing the converted values
+/// in `converted`.
+///
+/// # Safety
+/// As for `ToVoidstar::write`.
+pub unsafe fn write_converted<T: ToVoidstar>(value: &T, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema, converted: &mut Converted) {
+    let mut w = WriteWalk::with_converted(schema, cursor, converted);
+    w.child(value, dest, schema);
+    w.run();
+}
+
+/// The result of an mlc_write_* call: the pipe-closed code is its own
+/// condition, an errmsg a catchable throw.
+unsafe fn stream_result(rc: i32, err: *mut c_char, what: &str) {
     if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
         pipe_closed()
     }
+    check_err(err);
     if rc != 0 {
-        failed_without_reason("@write");
+        failed_without_reason(what);
     }
+}
+
+/// SLOT-36: where one element is encoded in a stream's buffer.
+#[repr(C)]
+pub struct MlcRoom {
+    slot: *mut u8,
+    data: *mut u8,
+    end: *mut u8,
+    base: *mut u8,
+    origin: *mut u8,
+}
+
+/// SLOT-37: aborts the open in-place batch unless disarmed.
+struct WriteTxn(bool);
+impl Drop for WriteTxn {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { mlc_write_abort() };
+        }
+    }
+}
+
+/// Write the elements `a` then `b` of a batch in place (SLOT-36), or leave
+/// it to the voidstar copy when the stream refuses. Each element is sized
+/// before the batch opens.
+unsafe fn write_seq_in_place<T: ToVoidstar>((a, b): (&[T], &[T]), schema: &Schema, level: i64, handle: u64) -> InPlace {
+    let _recur = RecurScope::enter(schema);
+    let elem = resolve_recur(&schema.parameters[0]);
+    // A table element has no voidstar size; the stream refuses it in place.
+    if elem.serial_type == SerialType::Table {
+        return InPlace::Copy(None, Converted::default());
+    }
+    let w = elem.width;
+    let run = (elem.is_fixed_width() || elem.serial_type == SerialType::Int) && w > 0;
+    let mut converted = Converted::default();
+    let sizes: Vec<usize> = if run {
+        Vec::new()
+    } else {
+        let mut sw = SizeWalk::with_converted(elem, &mut converted);
+        a.iter()
+            .chain(b)
+            .map(|x| {
+                sw.reset();
+                sw.child(x, elem, false);
+                sw.run()
+            })
+            .collect()
+    };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let rc = mlc_write_begin(level, handle as i64, 0, &mut err);
+    if rc == morloc_runtime_types::MLC_WRITE_FALLBACK {
+        // The list's own size: its header, the data's alignment slack, and
+        // each element's.
+        let n = a.len() + b.len();
+        let total = (!run).then(|| schema.width + if n > 0 { elem.array_data_alignment() - 1 } else { 0 } + sizes.iter().sum::<usize>());
+        return InPlace::Copy(total, converted);
+    }
+    stream_result(rc, err, "@write");
+    let mut txn = WriteTxn(true);
+    let mut reached: *const u8 = std::ptr::null();
+    let mut cursor: *mut u8 = std::ptr::null_mut();
+    let mut ww = WriteWalk::with_converted(elem, &mut cursor, &mut converted);
+    if run {
+        for mut part in [a, b] {
+            while !part.is_empty() {
+                let mut slots: *mut u8 = std::ptr::null_mut();
+                let mut k: u64 = 0;
+                let rc = mlc_write_place_run(part.len() as u64, reached, &mut slots, &mut k, &mut err);
+                stream_result(rc, err, "@write");
+                let (now, rest) = part.split_at(k as usize);
+                if !T::write_array(now, elem, slots) {
+                    ww.place(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+                    for (m, x) in now.iter().enumerate() {
+                        ww.child(x, slots.add(m * w), elem);
+                    }
+                    ww.run();
+                }
+                reached = slots.add(now.len() * w);
+                part = rest;
+            }
+        }
+    } else {
+        for (x, &size) in a.iter().chain(b).zip(&sizes) {
+            let mut room = MlcRoom {
+                slot: std::ptr::null_mut(),
+                data: std::ptr::null_mut(),
+                end: std::ptr::null_mut(),
+                base: std::ptr::null_mut(),
+                origin: std::ptr::null_mut(),
+            };
+            let rc = mlc_write_place(size as u64, reached, &mut room, &mut err);
+            stream_result(rc, err, "@write");
+            ww.place(room.data, room.base, room.origin);
+            ww.child(x, room.slot, elem);
+            ww.run();
+            reached = *ww.cursor;
+        }
+    }
+    drop(ww);
+    txn.0 = false;
+    let rc = mlc_write_commit(reached, &mut err);
+    stream_result(rc, err, "@write");
+    InPlace::Done
 }
 
 /// @append: open an existing stream file for append, returning a fresh handle.
@@ -3752,80 +4454,479 @@ pub unsafe fn tmpfile() -> String {
     cstr_take(s)
 }
 
-/// @cellnew: create a fold accumulator seeded with `init`.
-pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
-    let mut handle: i64 = -1;
-    let rc = with_voidstar(init, schema, |vs, cs, err| {
-        handle = mlc_cell_new(cs, vs, err);
-        if handle < 0 { 1 } else { 0 }
-    });
-    if rc != 0 {
-        failed_without_reason("@fold");
-    }
-    handle as u64
+// -- Gathers and folds (model/runtime/side.md, fold.md) -----------------
+
+pub trait Batch: Sized + 'static {
+    fn join(batches: Vec<Self>) -> Self;
 }
 
-/// @cellget: this thread's accumulator.
-pub unsafe fn cell_get<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let voidstar = mlc_cell_get(handle as i64, cschema_of(schema), &mut err);
-    read_runtime_voidstar(voidstar, err, schema, "@fold")
-}
-
-/// @cellput: replace this thread's accumulator.
-pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
-    let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_cell_put(handle as i64, cs, vs, err)
-    });
-    if rc != 0 {
-        failed_without_reason("@fold");
+impl<E: 'static> Batch for Vec<E> {
+    fn join(mut batches: Vec<Self>) -> Self {
+        if batches.len() == 1 {
+            return batches.pop().unwrap_or_default();
+        }
+        let n = batches.iter().map(|b| b.len()).sum();
+        let mut out = Vec::with_capacity(n);
+        for b in batches {
+            out.extend(b);
+        }
+        out
     }
 }
 
-/// Every accumulator of a cell, in its wire form; with `reduce_list` it
-/// runs @cellreduce.
-pub unsafe fn cell_slots<T: FromVoidstar>(schema: &Schema, handle: u64) -> Vec<T> {
+#[repr(C)]
+struct GatherList<L> {
+    tag: std::any::TypeId,
+    batches: Vec<L>,
+}
+
+unsafe extern "C" fn gather_append<L: Batch>(container: *mut c_void, item: *mut c_void) {
+    if *(container as *const std::any::TypeId) != std::any::TypeId::of::<L>() {
+        morloc_infra_abort("@gather: a batch was put with another type than its gather's");
+    }
+    let list = &mut *(container as *mut GatherList<L>);
+    list.batches.push(std::ptr::read(item as *mut L));
+}
+
+struct SideReader(*mut c_void);
+impl Drop for SideReader {
+    fn drop(&mut self) {
+        unsafe { mlc_side_reader_free(self.0) };
+    }
+}
+
+unsafe fn side_take(h: u64) -> SideReader {
     let mut err: *mut c_char = std::ptr::null_mut();
-    struct FreeOnUnwind(i64);
-    impl Drop for FreeOnUnwind {
+    let r = mlc_side_take(h as i64, &mut err);
+    check_err(err);
+    if r.is_null() {
+        failed_without_reason("@gather");
+    }
+    SideReader(r)
+}
+
+unsafe fn side_each<L: FromVoidstar>(schema: &Schema, reader: &SideReader, mut each: impl FnMut(L)) {
+    loop {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut eof: i32 = 0;
+        let vs = mlc_side_next(reader.0, cschema_of(schema), &mut eof, &mut err);
+        if eof != 0 && err.is_null() {
+            break;
+        }
+        each(read_voidstar(vs, err, schema, "@gather"));
+    }
+}
+
+unsafe fn side_put<T: ToVoidstar>(schema: &Schema, h: u64, batch: &T) {
+    let rc = with_voidstar(batch, schema, |vs, cs, err| mlc_side_put(h as i64, cs, vs, err));
+    if rc != 0 {
+        failed_without_reason("@gather");
+    }
+}
+
+/// SIDE-6
+pub unsafe fn gather_native<L: Batch + FromVoidstar + Send, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
+    let mut list = GatherList::<L> { tag: std::any::TypeId::of::<L>(), batches: Vec::new() };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = mlc_side_new(&mut list as *mut GatherList<L> as *mut c_void, &mut err);
+    check_err(err);
+    let h = h as u64;
+    struct Abandon(Option<i64>);
+    impl Drop for Abandon {
         fn drop(&mut self) {
-            let mut err: *mut c_char = std::ptr::null_mut();
-            unsafe {
-                mlc_cell_free(self.0, &mut err);
-                discard_err(err);
+            if let Some(h) = self.0 {
+                unsafe { mlc_side_drop(h) };
             }
         }
     }
-    let guard = FreeOnUnwind(handle as i64);
-    let n = mlc_cell_count(handle as i64, &mut err);
-    check_err(err);
-    if n < 1 {
-        failed_without_reason("@fold");
+    let mut abandon = Abandon(Some(h as i64));
+    { let _fork = ForkGuard::new(); f.invoke(&h) };
+    abandon.0 = None;
+    let reader = side_take(h);
+    side_each::<L>(schema, &reader, |b| list.batches.push(b));
+    L::join(std::mem::take(&mut list.batches))
+}
+
+/// RUST-5: an argument the caller still needs, lent to a sourced function.
+pub struct Lend<'a, T>(pub &'a T);
+/// RUST-5: an argument the caller is done with, given to a sourced function.
+pub struct Give<'a, T>(pub &'a mut Option<T>);
+
+/// RUST-5: the conversion a sourced function's parameter type selects.
+#[diagnostic::on_unimplemented(
+    message = "RUST-5: a sourced Rust function cannot take `{Self}` for this argument",
+    note = "write the parameter as T or &T, &str for Str, or &[A] for a list; never &mut or a generic"
+)]
+pub trait FromArg<S>: Sized {
+    fn from_arg(s: S) -> Self;
+}
+
+impl<'a, T> FromArg<Lend<'a, T>> for &'a T {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, T>) -> Self {
+        s.0
     }
-    let mut xs = Vec::with_capacity(n.max(0) as usize);
-    for i in 0..n {
-        let mut serr: *mut c_char = std::ptr::null_mut();
-        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
-        xs.push(read_runtime_voidstar(vs, serr, schema, "@fold"));
+}
+
+impl<'a, T: Clone> FromArg<Lend<'a, T>> for T {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, T>) -> Self {
+        s.0.clone()
     }
+}
+
+impl<'a, T> FromArg<Give<'a, T>> for T {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, T>) -> Self {
+        match s.0.take() {
+            Some(v) => v,
+            None => morloc_infra_abort("RUST-5: an argument was given twice"),
+        }
+    }
+}
+
+impl<'a, T> FromArg<Give<'a, T>> for &'a T {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, T>) -> Self {
+        match s.0.as_ref() {
+            Some(v) => v,
+            None => morloc_infra_abort("RUST-5: an argument was given twice"),
+        }
+    }
+}
+
+impl<'a> FromArg<Lend<'a, String>> for &'a str {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, String>) -> Self {
+        s.0.as_str()
+    }
+}
+
+impl<'a> FromArg<Give<'a, String>> for &'a str {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, String>) -> Self {
+        <&String as FromArg<Give<'a, String>>>::from_arg(s).as_str()
+    }
+}
+
+impl<'a, A> FromArg<Lend<'a, Vec<A>>> for &'a [A] {
+    #[inline(always)]
+    fn from_arg(s: Lend<'a, Vec<A>>) -> Self {
+        s.0.as_slice()
+    }
+}
+
+impl<'a, A> FromArg<Give<'a, Vec<A>>> for &'a [A] {
+    #[inline(always)]
+    fn from_arg(s: Give<'a, Vec<A>>) -> Self {
+        <&Vec<A> as FromArg<Give<'a, Vec<A>>>>::from_arg(s).as_slice()
+    }
+}
+
+/// RUST-5
+#[inline(always)]
+pub fn lend<'a, T, P: FromArg<Lend<'a, T>>>(x: &'a T) -> P {
+    P::from_arg(Lend(x))
+}
+
+/// RUST-5
+#[inline(always)]
+pub fn give<'a, T, P: FromArg<Give<'a, T>>>(x: &'a mut Option<T>) -> P {
+    P::from_arg(Give(x))
+}
+
+/// FORK-17
+static FORK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn count_fork() {
+    FORK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static FORK_COUNT_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+/// FORK-17
+pub fn install_fork_count() {
+    FORK_COUNT_INSTALLED.call_once(|| unsafe {
+        libc::pthread_atfork(None, None, Some(count_fork));
+    });
+}
+
+/// FORK-17
+pub struct ForkGuard(u64);
+
+impl ForkGuard {
+    #[inline(always)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        install_fork_count();
+        ForkGuard(FORK_COUNT.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Drop for ForkGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if FORK_COUNT.load(std::sync::atomic::Ordering::Relaxed) != self.0 {
+            unsafe { mlc_exit_forked() };
+        }
+    }
+}
+
+/// SIDE-12: armed for a put, so a put that panics or throws fails its sink.
+struct SinkPut(i64);
+
+impl Drop for SinkPut {
+    fn drop(&mut self) {
+        unsafe { mlc_sink_failed(self.0) };
+    }
+}
+
+fn guarded_put(h: u64, put: impl FnOnce()) {
+    let guard = SinkPut(h as i64);
+    put();
     std::mem::forget(guard);
-    let mut ferr: *mut c_char = std::ptr::null_mut();
-    mlc_cell_free(handle as i64, &mut ferr);
-    check_err(ferr);
+}
+
+/// SIDE-4: a gather id puts to its record, a stream handle to its stream.
+pub unsafe fn gather_put<L: Batch + ToVoidstar + Send>(schema: &Schema, h: u64, batch: L) {
+    guarded_put(h, || gather_put_unguarded(schema, h, batch))
+}
+
+unsafe fn gather_put_unguarded<L: Batch + ToVoidstar + Send>(schema: &Schema, h: u64, batch: L) {
+    if (h as i64) >= 0 {
+        write(schema, 0, &batch, h);
+        return;
+    }
+    let mut slot = std::mem::ManuallyDrop::new(batch);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let r = mlc_side_with_native(h as i64, 0, gather_append::<L>, &mut *slot as *mut L as *mut c_void, &mut err);
+    if r == 1 {
+        return;
+    }
+    let batch = std::mem::ManuallyDrop::into_inner(slot);
+    check_err(err);
+    if r != 0 {
+        failed_without_reason("@gather");
+    }
+    side_put(schema, h, &batch);
+}
+
+/// The handle is the stream.
+pub unsafe fn gather_file<L: FromVoidstar, F: Invoke1<u64, ()>>(schema: &Schema, f: F) -> L {
+    let path = tmpfile();
+    let o = open_ostream(schema, &path);
+    { let _fork = ForkGuard::new(); f.invoke(&o) };
+    close(o);
+    let xs = load::<L>(schema, &path);
+    unlink_tmp(&path);
     xs
 }
 
-/// A non-empty list folded with `combine`.
-pub fn reduce_list<T, F: Invoke2<T, T, T>>(combine: F, xs: Vec<T>) -> T {
-    let mut items = xs.into_iter();
-    let mut acc = match items.next() {
-        Some(first) => first,
-        None => failed_without_reason("@fold"),
-    };
-    for x in items {
-        acc = combine.invoke(&acc, &x);
+#[repr(C)]
+struct FoldValue<B> {
+    tag: std::any::TypeId,
+    value: B,
+}
+
+unsafe fn fold_value<B: 'static>(p: *mut c_void) -> Box<FoldValue<B>> {
+    if *(p as *const std::any::TypeId) != std::any::TypeId::of::<B>() {
+        morloc_infra_abort("@fold: a batch was put with another accumulator type than its fold's");
     }
-    acc
+    Box::from_raw(p as *mut FoldValue<B>)
+}
+
+// FOLD-8: producer threads copy init one at a time, since B need not be Sync.
+#[repr(C)]
+struct FoldInit<B> {
+    tag: std::any::TypeId,
+    value: std::sync::Mutex<B>,
+}
+
+// FOLD-6: under the entry lock, so it only counts a reference to init; the
+// put copies it.
+unsafe extern "C" fn fold_fresh<B: 'static>(init: *mut c_void) -> *mut c_void {
+    std::sync::Arc::increment_strong_count(init as *const FoldInit<B>);
+    init
+}
+
+unsafe fn fold_init<B: Clone + 'static>(p: *mut c_void) -> Box<FoldValue<B>> {
+    let init = std::sync::Arc::from_raw(p as *const FoldInit<B>);
+    if init.tag != std::any::TypeId::of::<B>() {
+        morloc_infra_abort("@fold: a batch was put with another accumulator type than its fold's");
+    }
+    let value = init.value.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    Box::new(FoldValue { tag: init.tag, value })
+}
+
+struct FoldValues<B: 'static>(Vec<Box<FoldValue<B>>>);
+
+unsafe fn fold_values<B: 'static>(values: *mut *mut c_void, n: usize) -> FoldValues<B> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(fold_value::<B>(*values.add(i)));
+    }
+    libc::free(values as *mut c_void);
+    FoldValues(out)
+}
+
+/// fold.md, FOLD-8: the slots, and the side records `replay` steps from
+/// init (FOLD-3), combined; an empty fold is its init.
+unsafe fn fold_with<B, C, F>(init: &B, combine: C, f: F, replay: impl FnOnce(&SideReader) -> Option<B>) -> B
+where
+    B: Clone + Send + 'static,
+    C: Fn(B, B) -> B,
+    F: Invoke1<u64, ()>,
+{
+    let ctx = std::sync::Arc::into_raw(std::sync::Arc::new(FoldInit {
+        tag: std::any::TypeId::of::<B>(),
+        value: std::sync::Mutex::new(init.clone()),
+    }));
+    struct Ctx<B>(*const FoldInit<B>);
+    impl<B> Drop for Ctx<B> {
+        fn drop(&mut self) {
+            drop(unsafe { std::sync::Arc::from_raw(self.0) });
+        }
+    }
+    let _ctx = Ctx(ctx);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = mlc_fold_new(ctx as *mut c_void, fold_fresh::<B>, &mut err);
+    check_err(err);
+    struct Abandon<B: 'static>(Option<i64>, std::marker::PhantomData<B>);
+    impl<B: 'static> Drop for Abandon<B> {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                let (mut values, mut n) = (std::ptr::null_mut(), 0usize);
+                unsafe {
+                    mlc_fold_drop(h, &mut values, &mut n);
+                    drop(fold_values::<B>(values, n));
+                }
+            }
+        }
+    }
+    let mut abandon = Abandon::<B>(Some(h), std::marker::PhantomData);
+    { let _fork = ForkGuard::new(); f.invoke(&(h as u64)) };
+    abandon.0 = None;
+    let (mut values, mut n) = (std::ptr::null_mut(), 0usize);
+    let r = mlc_fold_take(h, &mut values, &mut n, &mut err);
+    let held = fold_values::<B>(values, n);
+    check_err(err);
+    if r.is_null() {
+        failed_without_reason("@fold");
+    }
+    let side = replay(&SideReader(r));
+    let mut acc: Option<B> = None;
+    for v in held.0.into_iter().map(|v| v.value).chain(side) {
+        acc = Some(match acc {
+            Some(a) => { let _fork = ForkGuard::new(); combine(a, v) }
+            None => v,
+        });
+    }
+    acc.unwrap_or_else(|| init.clone())
+}
+
+pub unsafe fn fold<B, L, S, C, F>(schema: &Schema, init: &B, step: S, combine: C, f: F) -> B
+where
+    B: Clone + Send + 'static,
+    L: FromVoidstar,
+    S: Fn(B, &L) -> B,
+    C: Fn(B, B) -> B,
+    F: Invoke1<u64, ()>,
+{
+    fold_with(init, combine, f, |reader| {
+        let mut side: Option<B> = None;
+        side_each::<L>(schema, reader, |b| {
+            let acc = side.take().unwrap_or_else(|| init.clone());
+            side = Some({ let _fork = ForkGuard::new(); step(acc, &b) });
+        });
+        side
+    })
+}
+
+/// SIDE-10: a schemaless side file holds only poison records.
+pub unsafe fn fold_schemaless<B, L, S, C, F>(init: &B, _step: S, combine: C, f: F) -> B
+where
+    B: Clone + Send + 'static,
+    S: Fn(B, &L) -> B,
+    C: Fn(B, B) -> B,
+    F: Invoke1<u64, ()>,
+{
+    fold_with(init, combine, f, |reader| {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut eof: i32 = 0;
+        mlc_side_next(reader.0, std::ptr::null(), &mut eof, &mut err);
+        check_err(err);
+        None
+    })
+}
+
+/// FOLD-1: step this thread's slot, or hand the batch to `side`.
+unsafe fn fold_step<B, L, S>(step: S, h: u64, batch: &L, side: impl FnOnce())
+where
+    B: Clone + Send + 'static,
+    S: Fn(B, &L) -> B,
+{
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let (mut p, mut fresh) = (std::ptr::null_mut(), 0i32);
+    let r = mlc_fold_checkout(h as i64, &mut p, &mut fresh, &mut err);
+    check_err(err);
+    if r == 0 {
+        side();
+        return;
+    }
+    struct Failed(Option<i64>);
+    impl Drop for Failed {
+        fn drop(&mut self) {
+            if let Some(h) = self.0 {
+                unsafe { mlc_fold_failed(h) };
+            }
+        }
+    }
+    let mut failed = Failed(Some(h as i64));
+    let v = if fresh != 0 { fold_init::<B>(p) } else { fold_value::<B>(p) };
+    let FoldValue { tag, value } = *v;
+    let value = { let _fork = ForkGuard::new(); step(value, batch) };
+    failed.0 = None;
+    let raw = Box::into_raw(Box::new(FoldValue { tag, value }));
+    if mlc_fold_store(h as i64, raw as *mut c_void, &mut err) != 0 {
+        drop(Box::from_raw(raw));
+        check_err(err);
+        failed_without_reason("@fold");
+    }
+}
+
+/// FOLD-1, FOLD-9
+pub unsafe fn fold_put<B, L, S>(schema: &Schema, step: S, h: u64, batch: &L)
+where
+    B: Clone + Send + 'static,
+    L: ToVoidstar,
+    S: Fn(B, &L) -> B,
+{
+    guarded_put(h, || {
+        if (h as i64) >= 0 {
+            write(schema, 0, batch, h);
+            flush(h);
+        } else {
+            fold_step(step, h, batch, || side_put(schema, h, batch));
+        }
+    })
+}
+
+/// SIDE-10: a batch with no wire form poisons the side file.
+pub unsafe fn fold_put_schemaless<B, L, S>(step: S, h: u64, batch: &L)
+where
+    B: Clone + Send + 'static,
+    S: Fn(B, &L) -> B,
+{
+    guarded_put(h, || {
+        if (h as i64) >= 0 {
+            morloc_throw("@fold: this fold reads its batches from a stream, but its batch type has no wire form in Rust");
+        }
+        fold_step(step, h, batch, || {
+            let mut err: *mut c_char = std::ptr::null_mut();
+            mlc_side_put(h as i64, std::ptr::null(), std::ptr::null(), &mut err);
+            check_err(err);
+        });
+    })
 }
 
 /// @open (OStream): open a file for writing with the element schema.
@@ -3918,6 +5019,9 @@ pub unsafe fn ifile_walk<T: FromVoidstar>(
             None => IFileWalkArg { has: 0, _pad: [0; 7], value: 0 },
         })
         .collect();
+    if T::SEQ && path == ".[:]" && args.len() == 3 && args[2].map_or(true, |step| step == 1) {
+        return ifile_slice::<T>(schema, handle, args[0], args[1], "@ifile_walk");
+    }
     let path_c = cstr_arg(path, "@ifile_walk");
     let args_ptr = if packed.is_empty() { std::ptr::null() } else { packed.as_ptr() };
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -3929,6 +5033,76 @@ pub unsafe fn ifile_walk<T: FromVoidstar>(
         &mut err,
     );
     read_voidstar(voidstar, err, schema, "@ifile_walk")
+}
+
+struct Sliced<'a, T> {
+    schema: &'a Schema,
+    value: Option<T>,
+    unwinding: Option<Box<dyn std::any::Any + Send>>,
+}
+
+// SLOT-25: a throw in a callback must not unwind through the runtime, so it
+// is held and resumed once the runtime has returned.
+unsafe extern "C" fn slice_begin<T: FromVoidstar>(c: *mut c_void, n: u64) -> i32 {
+    let d = &mut *(c as *mut Sliced<T>);
+    match std::panic::catch_unwind(|| match T::seq_with_capacity(n as usize) {
+        Some(v) => v,
+        None => morloc_throw(format!("@ifile_walk: no memory for a slice of {n} elements")),
+    }) {
+        Ok(v) => {
+            d.value = Some(v);
+            0
+        }
+        Err(p) => {
+            d.unwinding = Some(p);
+            1
+        }
+    }
+}
+
+unsafe extern "C" fn slice_decode<T: FromVoidstar>(c: *mut c_void, data: *const c_void, space: MorlocSpace) -> i32 {
+    let d = &mut *(c as *mut Sliced<T>);
+    let schema = d.schema;
+    let Some(acc) = d.value.as_mut() else {
+        morloc_infra_abort("@ifile_walk: a slice piece came before its length")
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _recur = RecurScope::enter(schema);
+        T::read_append(acc, schema, data as *const u8, space)
+    })) {
+        Ok(()) => 0,
+        Err(p) => {
+            d.unwinding = Some(p);
+            1
+        }
+    }
+}
+
+/// `.[start:stop]` of a list-valued IFile, each sub-packet's part read
+/// where it lies onto the end of the list (SLOT-25).
+unsafe fn ifile_slice<T: FromVoidstar>(schema: &Schema, handle: u64, start: Option<i64>, stop: Option<i64>, what: &str) -> T {
+    let arg = |v: Option<i64>| IFileWalkArg { has: v.is_some() as u8, _pad: [0; 7], value: v.unwrap_or(0) };
+    let bounds = [arg(start), arg(stop)];
+    let mut d = Sliced::<T> { schema, value: None, unwinding: None };
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let rc = mlc_ifile_slice_with(
+        handle as i64,
+        bounds.as_ptr(),
+        slice_begin::<T>,
+        slice_decode::<T>,
+        &mut d as *mut Sliced<T> as *mut c_void,
+        &mut err,
+    );
+    if rc < 0 {
+        morloc_throw(format!("{what}: {}", reason_or_abort(err, what)));
+    }
+    if let Some(p) = d.unwinding {
+        std::panic::resume_unwind(p);
+    }
+    match d.value {
+        Some(v) if rc == 0 => v,
+        _ => failed_without_reason(what),
+    }
 }
 
 /// String interpolation: alternate `fragments[0], insertions[0], fragments[1],
@@ -4117,11 +5291,11 @@ mod panic_classifier_tests {
 
     #[test]
     fn a_runtime_crates_frame_is_the_runtimes_from_any_file() {
-        assert!(runtime_symbol("morloc_runtime[1a2b]::cell::cell_put"));
+        assert!(runtime_symbol("morloc_runtime[1a2b]::fold::checkout"));
         assert!(runtime_symbol("<rustmorloc::X as core::ops::Drop>::drop"));
         assert!(!runtime_symbol("morloc_runtimex::f"));
         assert!(!runtime_symbol("pool_ab12::m1"));
-        let t = trace(&[], &[("morloc_runtime[h]::cell::cell_put", Some("/elsewhere/cell.rs")), ("u", Some(USER))], false);
+        let t = trace(&[], &[("morloc_runtime[h]::fold::checkout", Some("/elsewhere/fold.rs")), ("u", Some(USER))], false);
         assert!(walk_is_runtime(&t, &[POOL], &[USER, "/"], &[]));
     }
 
@@ -4285,6 +5459,93 @@ mod panic_classifier_tests {
     #[ignore]
     fn child_user_index() {
         classify_in_child(|| { user_index(&[1], std::hint::black_box(5)); });
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct NotClone(i64);
+
+    #[test]
+    fn a_shared_payload_of_a_clone_type_is_copied() {
+        #[allow(unused_imports)]
+        use super::{MlcCopyClone, MlcCopyFail};
+        let held = vec![1i64, 2];
+        let copy: Vec<i64> = (&MlcCopy(&held)).mlc_copy();
+        assert_eq!(copy, held);
+    }
+
+    #[test]
+    fn a_shared_payload_of_a_type_that_is_not_clone_fails_the_call() {
+        #[allow(unused_imports)]
+        use super::{MlcCopyClone, MlcCopyFail};
+        let held = NotClone(3);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: NotClone = (&MlcCopy(&held)).mlc_copy();
+        }));
+        let payload = r.expect_err("copying a value that is not Clone must fail");
+        assert!(payload.downcast_ref::<MorlocThrow>().is_some(), "the failure is a morloc throw");
+        assert_eq!(held.0, 3);
+    }
+
+    #[test]
+    fn taking_a_shared_payload_that_is_not_clone_fails_the_call() {
+        let a: Arc<NotClone> = Arc::new(NotClone(7));
+        let keep = Arc::clone(&a);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            a.take_with(|x| x.0, |x| crate::mlc_copy!(*x).0)
+        }));
+        assert!(r.expect_err("a shared payload cannot be taken").downcast_ref::<MorlocThrow>().is_some());
+        assert_eq!(keep.0, 7);
+    }
+
+    #[test]
+    fn a_unique_payload_that_is_not_clone_is_moved_out() {
+        #[allow(unused_imports)]
+        use super::{MlcCopyClone, MlcCopyFail};
+        let a: Arc<NotClone> = Arc::new(NotClone(7));
+        let v = a.take_with(|x| x.0, |x| (&MlcCopy(x)).mlc_copy().0);
+        assert_eq!(v, 7);
+    }
+}
+
+#[cfg(test)]
+mod user_field_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // Each field form a user-written enum arm may use converts to and from
+    // morloc's type.
+    #[test]
+    fn plain_box_and_arc_fields_hold_morloc_values() {
+        let p: i64 = MlcField::<i64>::from_field(3);
+        let b: Box<i64> = MlcField::<i64>::from_field(4);
+        let a: Arc<i64> = MlcField::<i64>::from_field(5);
+        assert_eq!(*MlcField::<i64>::field(&p) + *MlcField::<i64>::field(&b) + *MlcField::<i64>::field(&a), 12);
+        assert_eq!(MlcField::<i64>::unfield(b), 4);
+        assert_eq!(MlcField::<i64>::unfield(p), 3);
+    }
+
+    #[test]
+    fn an_arc_field_is_taken_when_unique_and_copied_when_shared() {
+        let a: Arc<String> = MlcField::<String>::from_field("x".to_string());
+        let keep = Arc::clone(&a);
+        assert_eq!(MlcField::<String>::unfield(a), "x");
+        assert_eq!(Arc::strong_count(&keep), 1);
+        assert_eq!(MlcField::<String>::unfield(keep), "x");
+    }
+
+    #[test]
+    fn optional_fields_behind_pointers_hold_optionals() {
+        let b: Option<Box<i64>> = MlcOptField::<i64>::from_opt(Some(7));
+        let a: Option<Arc<i64>> = MlcOptField::<i64>::from_opt(None);
+        assert_eq!(MlcOptField::<i64>::opt(&b), Some(&7));
+        assert_eq!(MlcOptField::<i64>::opt(&a), None);
+        assert_eq!(MlcOptField::<i64>::unfield_opt(b), Some(7));
+        assert!(std::ptr::eq(opt_field::<i64, _>(&a), &a));
     }
 }
 
@@ -4471,6 +5732,23 @@ mod tests {
     use super::*;
     use morloc_runtime_types::schema::parse_schema;
 
+    /// A u64 above i64::MAX has no inline Int form; it is refused rather
+    /// than wrapped negative.
+    #[test]
+    fn a_u64_too_large_for_an_inline_int_is_refused() {
+        let schema = parse_schema("j").expect("parse schema");
+        let mut slot = [0u8; 16];
+        let mut cursor = slot.as_mut_ptr();
+        let dest = slot.as_mut_ptr();
+        unsafe { (i64::MAX as u64).write(dest, &mut cursor, &schema) };
+        assert_eq!(i64::from_le_bytes(slot[8..16].try_into().unwrap()), i64::MAX);
+        let big = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let mut cursor = slot.as_mut_ptr();
+            (i64::MAX as u64 + 1).write(dest, &mut cursor, &schema)
+        }));
+        assert!(big.is_err(), "u64 2^63 was written as an inline Int");
+    }
+
     /// A thread that ends frees the schema conversions it cached. A sourced
     /// function may spawn short-lived threads that call manifolds, so a cache
     /// outliving its thread would grow with every such call.
@@ -4573,6 +5851,76 @@ mod tests {
         let out = <T as FromVoidstar>::read(&schema, base, MorlocSpace::payload(base, buf.len()));
         TEST_BASE.with(|b| b.set(None));
         out
+    }
+
+    /// `value` written as `schema_str` into a buffer of its own, relptrs
+    /// relative to its start.
+    unsafe fn piece_bytes<T: ToVoidstar>(schema: &Schema, value: &T) -> Vec<u8> {
+        let _recur = RecurScope::enter(schema);
+        let mut buf = vec![0u8; value.shm_size(schema).max(1) + 64];
+        let base = buf.as_mut_ptr();
+        TEST_BASE.with(|b| b.set(Some(base as usize)));
+        let mut cursor = base.add(schema.width);
+        value.write(base, &mut cursor, schema);
+        TEST_BASE.with(|b| b.set(None));
+        buf
+    }
+
+    /// SLOT-25: the pieces of an in-place slice, each in a space of its
+    /// own, read onto the end of one list, which `on_begin` sized.
+    #[test]
+    fn slice_pieces_read_onto_one_list() {
+        unsafe fn pieces<T: ToVoidstar + FromVoidstar + PartialEq + std::fmt::Debug + Clone>(schema_str: &str, parts: &[Vec<T>]) {
+            let schema = parse_schema(schema_str).unwrap();
+            let total: usize = parts.iter().map(|p| p.len()).sum();
+            let mut d = Sliced::<Vec<T>> { schema: &schema, value: None, unwinding: None };
+            let ctx = &mut d as *mut Sliced<Vec<T>> as *mut c_void;
+            assert_eq!(slice_begin::<Vec<T>>(ctx, total as u64), 0);
+            assert!(d.value.as_ref().unwrap().capacity() >= total);
+            for p in parts {
+                let mut bytes = piece_bytes(&schema, p);
+                let space = MorlocSpace::payload(bytes.as_mut_ptr(), bytes.len());
+                assert_eq!(slice_decode::<Vec<T>>(ctx, bytes.as_ptr() as *const c_void, space), 0);
+            }
+            let want: Vec<T> = parts.iter().flatten().cloned().collect();
+            assert_eq!(d.value.unwrap(), want, "{schema_str}");
+        }
+        unsafe {
+            pieces::<f64>("af8", &[vec![1.5, 2.5], vec![], vec![3.5], vec![4.5, 5.5, 6.5]]);
+            pieces::<String>("as", &[vec!["a".into(), "".into()], vec!["bcd".into()], vec!["e".into()]]);
+            pieces::<(String, Vec<i64>)>("at2sai8", &[vec![("x".into(), vec![1, 2])], vec![("yy".into(), vec![]), ("z".into(), vec![3])]]);
+        }
+    }
+
+    /// SLOT-25: a piece that fails to read is held as an unwinding, not
+    /// thrown through the runtime, and fails the callback.
+    #[test]
+    fn a_slice_piece_that_fails_is_held_for_after_the_runtime() {
+        let schema = parse_schema("af8").unwrap();
+        let mut d = Sliced::<Vec<f64>> { schema: &schema, value: None, unwinding: None };
+        let ctx = &mut d as *mut Sliced<Vec<f64>> as *mut c_void;
+        unsafe {
+            assert_eq!(slice_begin::<Vec<f64>>(ctx, 3), 0);
+            let mut good = piece_bytes(&schema, &vec![1.0f64]);
+            let space = MorlocSpace::payload(good.as_mut_ptr(), good.len());
+            assert_eq!(slice_decode::<Vec<f64>>(ctx, good.as_ptr() as *const c_void, space), 0);
+            let mut bad = piece_bytes(&schema, &vec![2.0f64, 3.0]);
+            bad[0..8].copy_from_slice(&1000usize.to_le_bytes());
+            let space = MorlocSpace::payload(bad.as_mut_ptr(), bad.len());
+            assert_eq!(slice_decode::<Vec<f64>>(ctx, bad.as_ptr() as *const c_void, space), 1);
+        }
+        let held = d.unwinding.take().expect("the failure was not held");
+        assert!(held.downcast_ref::<MorlocThrow>().is_some_and(|t| t.0.contains("runs past")), "not the read's throw");
+    }
+
+    /// A list type is read by slices; any other type keeps the copying walk.
+    #[test]
+    fn only_list_types_are_read_by_slices() {
+        assert!(<Vec<f64> as FromVoidstar>::SEQ);
+        assert!(<std::collections::VecDeque<String> as FromVoidstar>::SEQ);
+        assert!(!<f64 as FromVoidstar>::SEQ);
+        assert!(!<String as FromVoidstar>::SEQ);
+        assert!(!<(i64, f64) as FromVoidstar>::SEQ);
     }
 
     /// Lay a flattened voidstar into a packet body and read it back through
@@ -4722,9 +6070,9 @@ mod tests {
     /// a box that has another.
     #[test]
     fn a_rec_box_gives_up_its_value_only_when_unshared() {
-        let b = RecBox::new((vec![1u8, 2], 7i64));
+        let b = RecNode::new((vec![1u8, 2], 7i64));
         assert_eq!(b.try_into_inner().map(|t| t.0).ok(), Some(vec![1, 2]));
-        let b = RecBox::new((vec![3u8], 8i64));
+        let b = RecNode::new((vec![3u8], 8i64));
         let other = b.clone();
         let back = b.try_into_inner().err().expect("a shared box gave up its value");
         assert_eq!((*back).1, 8);
@@ -4929,11 +6277,11 @@ mod tests {
     // A recursive record `LL { head: Int, tail: ?LL }` -- exactly the shape the
     // translator emits, cycle-break box included. Schema:
     // &2LL m2 4head j 4tail ?^2LL. The default drop is iterative through
-    // RecBox, so a deep chain tests the walk and the release together.
+    // RecNode, so a deep chain tests the walk and the release together.
     #[derive(Debug, PartialEq, Clone)]
     struct LL {
         head: i64,
-        tail: Option<RecBox<LL>>,
+        tail: Option<RecNode<LL>>,
     }
     impl ToVoidstar for LL {
         fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
@@ -4950,12 +6298,12 @@ mod tests {
         unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
             w.push_finish::<Self>(schema, data);
             w.child_step::<i64>(&schema.parameters[0], data.add(schema.offsets[0]));
-            w.child_step::<Option<RecBox<LL>>>(&schema.parameters[1], data.add(schema.offsets[1]));
+            w.child_step::<Option<RecNode<LL>>>(&schema.parameters[1], data.add(schema.offsets[1]));
         }
         unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
             LL {
                 head: w.child_read::<i64>(&schema.parameters[0], data.add(schema.offsets[0])),
-                tail: w.child_read::<Option<RecBox<LL>>>(&schema.parameters[1], data.add(schema.offsets[1])),
+                tail: w.child_read::<Option<RecNode<LL>>>(&schema.parameters[1], data.add(schema.offsets[1])),
             }
         }
     }
@@ -4971,9 +6319,9 @@ mod tests {
             // 1 -> 2 -> 3 chain through the recursive optional (Box at cycles, I7).
             let chain = LL {
                 head: 1,
-                tail: Some(RecBox::new(LL {
+                tail: Some(RecNode::new(LL {
                     head: 2,
-                    tail: Some(RecBox::new(LL { head: 3, tail: None })),
+                    tail: Some(RecNode::new(LL { head: 3, tail: None })),
                 })),
             };
             assert_eq!(roundtrip::<LL>(SCHEMA, &chain), chain);
@@ -4982,7 +6330,7 @@ mod tests {
             // here each element's RecurScope::enter makes the back-ref resolve.
             let list = vec![
                 LL { head: 10, tail: None },
-                LL { head: 20, tail: Some(RecBox::new(LL { head: 21, tail: None })) },
+                LL { head: 20, tail: Some(RecNode::new(LL { head: 21, tail: None })) },
             ];
             assert_eq!(roundtrip::<Vec<LL>>(&format!("a{SCHEMA}"), &list), list);
         }
@@ -4997,7 +6345,7 @@ mod tests {
         for _ in 0..4 {
             let mut chain = LL { head: 0, tail: None };
             for i in 1..=DEPTH {
-                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+                chain = LL { head: i, tail: Some(RecNode::new(chain)) };
             }
             let tail = chain.tail.clone().unwrap();
             drop(chain);
@@ -5027,7 +6375,7 @@ mod tests {
         std::thread::spawn(|| {
             let mut chain = LL { head: 0, tail: None };
             for i in 1..=100 {
-                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+                chain = LL { head: i, tail: Some(RecNode::new(chain)) };
             }
             drop(chain);
             assert!(rec_drain::idle());
@@ -5047,7 +6395,7 @@ mod tests {
             const DEPTH: i64 = 1_000_000;
             let mut chain = LL { head: 0, tail: None };
             for i in 1..=DEPTH {
-                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+                chain = LL { head: i, tail: Some(RecNode::new(chain)) };
             }
             let got = roundtrip::<LL>(SCHEMA, &chain);
             let mut n = 0;
@@ -5079,11 +6427,11 @@ mod tests {
     }
 
     // The enum shape the translator emits for a payload-bearing `data`:
-    // every arm's fields behind one RecBox holding a tuple.
+    // every arm's fields behind one RecNode holding a tuple.
     #[derive(Debug, PartialEq, Clone)]
     enum Tree {
         Leaf,
-        Node(RecBox<(i64, Tree, Tree)>),
+        Node(RecNode<(i64, Tree, Tree)>),
     }
     impl ToVoidstar for Tree {
         fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
@@ -5106,7 +6454,7 @@ mod tests {
                 0 => {}
                 1 => {
                     let p = w.payload_ptr(data, &schema.parameters[1]);
-                    w.child_step::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p);
+                    w.child_step::<RecNode<(i64, Tree, Tree)>>(&schema.parameters[1], p);
                 }
                 t => panic!("Tree: no constructor for tag {}", t),
             }
@@ -5116,7 +6464,7 @@ mod tests {
                 0 => Self::Leaf,
                 1 => {
                     let p = w.payload_ptr(data, &schema.parameters[1]);
-                    Self::Node(w.child_read::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p))
+                    Self::Node(w.child_read::<RecNode<(i64, Tree, Tree)>>(&schema.parameters[1], p))
                 }
                 t => panic!("Tree: no constructor for tag {}", t),
             }
@@ -5130,7 +6478,7 @@ mod tests {
             const DEPTH: i64 = 1_000_000;
             let mut chain = Tree::Leaf;
             for i in 1..=DEPTH {
-                chain = Tree::Node(RecBox::new((i, Tree::Leaf, chain)));
+                chain = Tree::Node(RecNode::new((i, Tree::Leaf, chain)));
             }
             let got = roundtrip::<Tree>(SCHEMA, &chain);
             let mut n = 0;
@@ -5312,24 +6660,31 @@ mod tests {
 
     #[test]
     fn a_value_made_where_a_registered_one_was_has_no_entry() {
-        let f = crossing1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64, |_| origin_of(2));
-        let key = Arc::as_ptr(&f) as *const () as usize;
-        drop(f);
-        // A local closure over one u64 is the size of a crossing one (a guard
-        // pointer), so the allocator hands back the freed block.
-        let mut reused = 0;
-        let mut held = Vec::new();
-        for _ in 0..1000 {
-            let g = local1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64);
-            if Arc::as_ptr(&g) as *const () as usize == key {
-                reused += 1;
-                assert!(reify(&g).is_none(), "a stale entry answered for a new value");
+        // A fresh thread starts with an empty glibc tcache, so its freed block
+        // comes back to it and not to another thread's arena bins.
+        let t = std::thread::spawn(|| {
+            let f = crossing1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64, |_| origin_of(2));
+            let key = Arc::as_ptr(&f) as *const () as usize;
+            drop(f);
+            // A local closure over one u64 is the size of a crossing one (a guard
+            // pointer), so the allocator hands back the freed block.
+            let mut reused = 0;
+            let mut held = Vec::new();
+            for _ in 0..1000 {
+                let g = local1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64);
+                if Arc::as_ptr(&g) as *const () as usize == key {
+                    reused += 1;
+                    assert!(reify(&g).is_none(), "a stale entry answered for a new value");
+                }
+                held.push(g);
             }
-            held.push(g);
-        }
-        // glibc hands a thread its own freed block back; other allocators may not.
-        if cfg!(target_os = "linux") {
-            assert!(reused > 0, "the freed address was never reused, so nothing was checked");
+            // glibc hands a thread its own freed block back; other allocators may not.
+            if cfg!(target_os = "linux") {
+                assert!(reused > 0, "the freed address was never reused, so nothing was checked");
+            }
+        });
+        if let Err(e) = t.join() {
+            std::panic::resume_unwind(e);
         }
     }
 
@@ -5346,7 +6701,7 @@ mod tests {
         assert_thread_safe(&g);
         assert_thread_safe(&t);
         assert_thread_safe(&cb);
-        assert_thread_safe(&RecBox::new(LL { head: 1, tail: None }));
+        assert_thread_safe(&RecNode::new(LL { head: 1, tail: None }));
         let out: Vec<(String, i64, i64, usize)> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..4i64)
                 .map(|i| {
@@ -5458,5 +6813,81 @@ mod frame_stack_tests {
             assert_eq!(other, 0);
             assert_eq!(frame_depth(), 1);
         })
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    extern "C" {
+        fn shinit(basename: *const c_char, size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
+        fn shclose(errmsg: *mut *mut c_char) -> bool;
+    }
+
+    const CHILD_ENV: &str = "MORLOC_FOLD_TEST_CHILD";
+
+    static COPYING: AtomicUsize = AtomicUsize::new(0);
+    static OVERLAPS: AtomicUsize = AtomicUsize::new(0);
+
+    // A Send accumulator need not be Sync, so two threads must never copy
+    // one value at once (FOLD-8). This one counts copies that overlap.
+    struct Probe(u64);
+    impl Clone for Probe {
+        fn clone(&self) -> Self {
+            if COPYING.fetch_add(1, Ordering::SeqCst) > 0 {
+                OVERLAPS.fetch_add(1, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            COPYING.fetch_sub(1, Ordering::SeqCst);
+            Probe(self.0)
+        }
+    }
+
+    fn step(acc: Probe, xs: &Vec<i64>) -> Probe {
+        Probe(acc.0 + xs.len() as u64)
+    }
+
+    // The fold needs shared memory, so it runs in a child process of its own.
+    #[test]
+    fn producer_threads_never_copy_init_at_once() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["fold_tests::child_folds_from_four_threads", "--exact", "--ignored", "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    #[ignore]
+    fn child_folds_from_four_threads() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let name = CString::new(format!("/morloc-fold-test-{}", std::process::id())).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        assert!(!unsafe { shinit(name.as_ptr(), 0x100000, &mut err) }.is_null());
+        let sum = unsafe {
+            fold_schemaless::<Probe, Vec<i64>, _, _, _>(
+                &Probe(0),
+                step,
+                |a: Probe, b: Probe| Probe(a.0 + b.0),
+                |h: &u64| {
+                    let h = *h;
+                    std::thread::scope(|s| {
+                        for _ in 0..4 {
+                            s.spawn(move || fold_put_schemaless::<Probe, Vec<i64>, _>(step, h, &vec![1, 2]));
+                        }
+                    });
+                },
+            )
+        };
+        let overlaps = OVERLAPS.load(Ordering::SeqCst);
+        unsafe { shclose(&mut err) };
+        eprintln!("sum {} overlaps {}", sum.0, overlaps);
+        unsafe { libc::_exit(if sum.0 == 8 && overlaps == 0 { 0 } else { 1 }) };
     }
 }

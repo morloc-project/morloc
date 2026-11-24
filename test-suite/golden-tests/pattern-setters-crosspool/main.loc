@@ -29,13 +29,9 @@ import root-r
 import root-cpp
 
 record Pair = Pair { zed :: Str, alpha :: Str }
-record Py => Pair = "dict"
-record R => Pair = "list"
 record Cpp => Pair = "pair_t"
 
 record Box = Box { inner :: Pair, n :: Int }
-record Py => Box = "dict"
-record R => Box = "list"
 record Cpp => Box = "box_t"
 
 pair :: Pair

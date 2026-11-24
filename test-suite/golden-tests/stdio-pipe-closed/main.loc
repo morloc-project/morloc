@@ -28,19 +28,13 @@ module main (produceBig, produceInCatch, bigList)
 
 import root-py
 
-produceBig :: <IO> ()
-produceBig = do
-  o <- @stdout :: <IO> OStream Int
-  @write 0 o (range 0 100000)
-  @close o
+produceBig :: <IO> (Collect Int)
+produceBig = @stdout (\o -> @write 0 o (range 0 100000))
 
-produceInCatch :: <IO> ()
-produceInCatch = do
-  _tr <- @try (do
-    o <- @stdout :: <IO> (OStream Int)
-    @write 0 o (range 0 100000)
-    @close o)
-  match _tr | (Ok _cv) = _cv | (Err _) = ()
+produceInCatch :: <IO> (Collect Int)
+produceInCatch = @stdout (\o -> do
+  _tr <- @try (@write 0 o (range 0 100000))
+  match _tr | (Ok _) = () | (Err _) = ())
 
 -- A large result printed as a raw packet into a closed pipe also ends with
 -- the SIGPIPE status, not a generic failure.

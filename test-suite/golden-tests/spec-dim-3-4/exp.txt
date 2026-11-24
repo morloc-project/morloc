@@ -1,0 +1,37 @@
+11
+exit: 0
+Error: dimension mismatch in 'dotA': n is 2 from the length of argument #0, but the length of argument #1 is 1
+exit: 1
+11
+exit: 0
+Error: dimension mismatch in 'dotP': n is 2 from the length of argument #0, but the length of argument #1 is 1
+exit: 1
+Dot product, its second argument behind an alias
+
+Usage: ./nexus <nexus_options> dotA <command_options>
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Positional arguments:
+  1:  type: Vector Int
+  2:  type: Vector Int
+
+Return: Int
+  A dot product of a fixed first vector
+exit: 0
+Dot product, its second argument in a group
+
+Usage: ./nexus <nexus_options> dotP <command_options>
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Positional arguments:
+  1:  type: Vector Int
+  2:  type: Vector Int
+
+Return: Int
+exit: 0

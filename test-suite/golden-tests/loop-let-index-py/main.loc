@@ -1,0 +1,23 @@
+-- A let bound in a tail loop and only ever called keeps its own name: a
+-- fresh variable made for a later argument never overwrites it.
+module main (run)
+
+import root-py
+
+type Source a = ([a] -> <IO> ()) -> <IO> ()
+
+source Py from "drive.py" ("drive", "tag")
+drive :: Source Int -> <IO> [Int]
+tag :: [Int] -> [Int]
+
+run :: Int -> <IO> [Int]
+run n = drive (go True [n, 2, 3])
+
+go :: Bool -> [Int] -> Source Int
+go more xs sink = do
+  ? more = do
+    let s = sink
+    s (tag xs)
+    go False xs sink
+  : do
+    ()

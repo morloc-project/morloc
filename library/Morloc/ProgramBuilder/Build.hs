@@ -42,8 +42,10 @@ import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, takeFileName)
-import System.IO.Error (ioeGetFileName)
+import System.FilePath (takeDirectory, takeFileName, (</>))
+import Control.Monad (filterM)
+import Data.Maybe (isJust)
+import System.IO.Error (ioeGetFileName, isDoesNotExistError)
 import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
 -- | The build layout, resolved once by 'resolveBuildDirs'.
@@ -217,12 +219,36 @@ buildProgram (manifest, wrappers, pools) = do
     buildAll projectRoot ss = do
       mapM_ writeScript ss
       syncEnvDeps projectRoot
+      checkToolBins
       mapM_ requireStrictToolchain (Set.toList (Set.fromList [k | s <- ss, SysRequireToolchain k <- scriptMake s]))
       mapM_ runMakes ss
 
+-- | PKG-16: every executable a tool-deps entry names resolves, in the
+-- environment's bin directory when managed and on PATH otherwise.
+checkToolBins :: MorlocMonad ()
+checkToolBins = do
+  metas <- MM.gets statePackageMeta
+  prefix <- MM.gets stateEnvPrefix
+  let wanted = unique [(name, b) | m <- metas, (name, bs) <- Map.toList (packageToolBins m), b <- bs]
+      found b = case prefix of
+        Just p -> do
+          let f = p </> "bin" </> b
+          isFile <- SD.doesFileExist f
+          if isFile then SD.executable <$> SD.getPermissions f else return False
+        Nothing -> isJust <$> SD.findExecutable b
+      place = maybe "on PATH" (\p -> "in " <> pretty (p </> "bin")) prefix
+  missing <- liftIO $ filterM (fmap not . found . MT.unpack . snd) wanted
+  case missing of
+    [] -> return ()
+    ws ->
+      MM.throwFailed . vsep $
+        [ "tool dependency '" <> pretty name <> "' names the executable '" <> pretty b <> "', which is not" <+> place
+        | (name, b) <- ws
+        ]
+
 -- | Provision a program's declared package dependencies before its pools are
 -- compiled, by invoking the environment's build hook: an external program named
--- by @MORLOC_BUILD_HOOK@ (the in-environment dependency agent, e.g. @mim-env@),
+-- by @MORLOC_BUILD_HOOK@,
 -- run as @<hook> sync --name <key> --spec envspec.json --root <projectRoot>@.
 -- @projectRoot@ is the absolute directory the hook resolves local (filesystem
 -- path) dependencies against; the caller resolves it before the build changes
@@ -331,10 +357,6 @@ syncEnvDeps projectRoot = do
       (_, _, _, ph) <- createProcess spec
       waitForProcess ph
 
--- | Atomically replace @dest@ with @staging@ (same parent, so the rename is
--- atomic). An existing @dest@ is removed only when it is a real directory
--- (not a symlink) carrying the 'buildMarker', so a stray or user-owned
--- directory is never destroyed.
 swapIn :: FilePath -> FilePath -> IO ()
 swapIn staging dest = do
   destExists <- SD.doesDirectoryExist dest
@@ -428,8 +450,9 @@ removeMatching pattern = do
     names <- liftIO $ SD.listDirectory dir
     forM_ (filter (matchGlob namePat) names) $ \name -> do
       let path = dir </> name
-      result <- liftIO $ try (SD.removeFile path) :: MorlocMonad (Either IOException ())
+      result <- liftIO $ try (SD.removeFile path)
       case result of
-        Right () -> return ()
-        Left e ->
-          MM.throwFailed $ "Cannot remove" <+> pretty path <> ":" <+> pretty (show e)
+        Left e
+          | not (isDoesNotExistError e) ->
+              MM.throwFailed $ "Cannot remove" <+> pretty path <> ":" <+> pretty (show e)
+        _ -> return ()

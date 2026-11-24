@@ -10,7 +10,7 @@ Replaced by CLS-7: a class may give a method a default body.
 
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
-Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6
+Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6, spec-cls-2-7, spec-cls-2-8, spec-cls-2-9, spec-cls-2-10, spec-cls-2-11, spec-cls-2-12, spec-cls-2-13, spec-cls-2-14, spec-cls-2-15
 Code: deviates (issues/typeclasses.md)
 
 A method used at type `T` runs an implementation of the instance for `T`.
@@ -20,10 +20,19 @@ of SIG-2.
 
 ### CLS-3 A method name belongs to one class
 Intent: proposed
-Code: conforms 2026-10-21
+Tests: spec-cls-3-1, spec-cls-3-2, spec-cls-3-3, spec-cls-3-4, spec-cls-3-5, spec-cls-3-6, spec-cls-3-7, spec-cls-3-8
+Code: deviates (issues/typeclasses.md)
 
 Two classes in scope that declare the same method name are a compile error.
-Methods are not importable by name (MOD-10).
+Methods are not importable by name (MOD-10). A top-level declaration with
+no signature named like a method of a class the module declares is a
+compile error: a method is implemented in an instance. A local definition
+of that name (in `where`) shadows the method as any local name does. A
+method of a class the module declares, named like a term the module
+imports with its whole module, is a compile error. Open: should either
+name shadow the other instead (SIG-7)? And an unsigned declaration beside
+a method of an imported class is today a new term that shadows the method
+(issues/typeclasses.md). An instance defines only methods of its class.
 
 ### CLS-4 A constraint with no argument is a compile error
 Intent: ruled 2026-09-23
@@ -33,7 +42,8 @@ Code: conforms 2026-10-21
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: ruled 2026-10-29
-Code: deviates (issues/typeclasses.md)
+Tests: spec-cls-5-1, spec-cls-5-2, spec-cls-5-3, spec-cls-5-4, spec-cls-5-5, spec-cls-5-6, spec-cls-5-7, spec-cls-5-8, spec-cls-5-9, spec-cls-5-10, spec-cls-5-11, spec-cls-5-12, spec-cls-5-13, spec-cls-5-14, spec-cls-5-15, spec-cls-5-16, spec-cls-5-17, spec-cls-5-18, spec-cls-5-19
+Code: conforms 2026-11-05
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
 a `D a` constraint grants the methods of `C`. `instance C a => C (F a)`
@@ -65,9 +75,9 @@ method alongside those the instance gives. Realization chooses among them
 as among any alternatives (REAL-1, REAL-2); being a default neither raises
 nor lowers its standing. An instance may omit a method that has a default.
 
-By REAL-1, every implementation an instance gives for a method must agree
-with the default at that instance. An instance implementation that differs
-on purpose is a false claim, not an override.
+By REAL-1, the default and the implementations the instance gives may
+substitute for each other; an implementation the instance gives does not
+override the default.
 
 Why: a default is an ordinary morloc implementation, so one selection rule
 covers it.
@@ -119,7 +129,8 @@ Code: unaudited
 Under CLS-8, realization may choose defaults for several methods at one
 instance whose bodies call each other, with no implementation the instance
 gives anywhere on the loop. The program then diverges, though a choice of
-the instance's own implementations would not; that breaks REAL-1. Is this
+the instance's own implementations would not, and the compiler is what
+chose the loop, not the author (REAL-1). Is this
 (a) prevented by realization, which never chooses defaults that reach
 themselves at the same instance type through defaults alone, and rejects
 the build (REAL-3) when no other choice exists, (b) prevented at the class,
@@ -137,18 +148,25 @@ Implementations of one instance may come from several modules, so either
 check needs the whole program.
 
 ### CLS-15 A class the compiler refers to is declared in `internal`
-Intent: ruled 2026-10-18
+Intent: ruled 2026-11-02
+Tests: spec-cls-15-1
 Code: deviates (issues/typeclasses.md)
 
 `root` is a prelude a program may replace (MOD-18); `internal` is what the
 compiler assumes. A class the compiler names (to decide literal patterns,
 to derive instances, to serialize) is declared in `internal`: `Packable`,
-`Eq`, `Ord`, `Show`, `Hashable` and the indexing classes. The operators
-defined from a class's methods (`<`, `!=`, ...) may stay in `root`.
+`Eq`, `Ord`, `Show`, `Hashable` and the indexing classes. `Eq` declares
+`==` and `!=`, and `Ord` declares `<`, `<=`, `>` and `>=`, so an instance
+chooses the implementation of each, and a language may use its own
+operators where they are right for the instance's type.
+
+Why: defined in `root` from `==` and `<=`, the four were one or two calls
+more in every language, and a native source for them was chosen at every
+type, bypassing the instance (CLS-21).
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
-Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5
+Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5, spec-cls-16-6, spec-cls-16-7, spec-cls-16-8, spec-cls-16-9, spec-cls-16-10, spec-cls-16-11, spec-cls-16-12, spec-cls-16-13, spec-cls-16-14, spec-cls-16-15, spec-cls-16-16, spec-cls-16-17, spec-cls-16-18, spec-cls-16-19
 Code: deviates (issues/typeclasses.md)
 
 Instances may overlap. At a use at type `T`, the instances whose heads match
@@ -156,32 +174,119 @@ Instances may overlap. At a use at type `T`, the instances whose heads match
 other candidate's is selected. Candidates with equal heads are one instance
 for this rule (CLS-2, CLS-6). Two candidates with neither more specific than
 the other are a compile error at the use. Which implementations a selected
-instance has for a method it omits is CLS-12.
+instance has for a method it omits is CLS-12. Function types compare as
+APP-1 has them: `a -> b` covers `a -> b -> c`, so at a function of two
+numbers an instance at `a -> b -> c` is more specific than one at `a -> b`
+(spec-app-4-4).
+
+A method use selects without regard to language. A value a pool converts
+has no use: the pool selects among the `Packable` instances it can call
+(spec-cls-16-14), because the wire form, not the native value, is the
+contract between languages (CLS-20). A type with a form of its own in a
+language that no such instance covers does not build there: with
+`Map`'s R form declared at every argument and only `Packable [(Str, v)] (Map
+Str v)` in R, a `Map Int v` cannot enter R. With the form declared at `Map
+Str v` only, a `Map Int v` has no form of its own in R and enters as its
+representation (NEWT-7).
+
+A bracket step or a bracket chain's `map` on a list on the wire runs natively
+in the nexus when the selected instance implements no such method or is the
+standard library's (root and vector modules, from the module library): no pool
+starts for it (ruled 2026-11-06, spec-cls-16-17). Any other instance is called
+(spec-cls-16-18).
 
 ### CLS-17 An instance is selected by its head alone
 Intent: ruled 2026-10-29
-Code: deviates (issues/typeclasses.md)
+Tests: spec-cls-17-1, spec-cls-17-2, spec-cls-17-3
+Code: conforms 2026-11-05
 
 A head matches `T` when it instantiates to `T`. No coercion (OPT-1's
 `T` to `?T`, effect widening) is applied to make a head match; a coercion
 applies to a selected method's value as to any other term.
 
 ### CLS-18 A constraint nothing determines is a compile error
-Intent: ruled 2026-10-29
-Code: deviates (issues/typecheck.md)
+Intent: ruled 2026-11-05
+Tests: spec-cls-18-1, spec-cls-18-2, spec-cls-18-3, spec-cls-18-4, spec-cls-18-5, spec-cls-18-6, spec-cls-18-7, spec-cls-18-8, spec-cls-18-9, spec-cls-18-10, spec-cls-18-11, spec-cls-18-12, spec-cls-18-13, spec-cls-18-14
+Code: conforms 2026-11-07
 
 A constrained type variable that does not occur in the signature's type
 outside its constraints is an error at the signature. One that occurs but
-that nothing at a use determines is an error at the use. Neither is
-defaulted.
+that nothing at a use determines is an error at the use, even when only one
+instance could match (`[] == []`, `showList [gen n]` with one `Gen`
+instance). Neither is defaulted, except a numeric variable (NUM-10). Nat and effect-row variables are exempt:
+a class argument may hold one that nothing determines (`size` of a `Vector
+n a` whose `n` is unknown). An argument a dependency determines (CLS-20)
+is not undetermined.
+
+Why: an instance's existence elsewhere in a program would otherwise decide
+whether distant code compiles, and the failure would not name the class.
 
 ### CLS-19 A sourced constrained term runs the selected instance
-Intent: ruled 2026-10-29
+Intent: retired 2026-11-05
+Code: unaudited
+
+Replaced by CLS-21: a host function that agrees with an instance only at
+some types is an instance at those types.
+
+
+### CLS-20 Packable's wire argument is determined by the packed type
+Intent: ruled 2026-11-05
+Tests: spec-cls-20-1, spec-cls-20-2, spec-cls-20-3, spec-cls-20-4, spec-cls-20-5, spec-cls-20-6, spec-cls-20-7, spec-cls-20-8, spec-cls-20-9, spec-cls-20-10, spec-cls-20-11, spec-cls-20-12, spec-cls-20-13, spec-cls-20-14, spec-cls-20-15
+Code: conforms 2026-11-05
+
+`Packable a b` has the dependency `b -> a`: the instance selected by `b`
+fixes `a` where a use leaves it open, in an instance's body too (`unpack
+x` needs no annotation of the wire type). No two instances may have
+heads that match the same `b` and differ in `a`; this is checked when
+the program's instances are collected, before typechecking. A use's or a
+context's `a` must agree with the selected instance's, its open
+variables solved and Nat arithmetic evaluated (`Vector (m * n) a` is
+`Vector 6 Real` at `m = 2`, `n = 3`). No other class has a dependency (a
+class named `Packable` with another number of parameters has none), and
+no other class argument is fixed by instance selection.
+
+In one language an instance has at most one source of `pack` and one of
+`unpack`, across all its declarations (NATIVE-10). More is a compile error
+naming the sources.
+
+### CLS-21 A host function that is right only at some types is an instance
+Intent: ruled 2026-11-05
 Code: deviates (issues/typeclasses.md)
 
-A sourced implementation of a term whose signature has a class constraint
-uses the host language's own operations, not the instance (root's `sort`
-uses the host's comparison). It is a candidate only at a use whose
-constraints all select an instance at a primitive type, whose host
-operation is the instance. Elsewhere the term runs a morloc implementation
-that calls the selected instance's methods (`sort` as `sortBy (<=)`).
+A sourced implementation of a constrained term is a candidate at every use
+the constraints admit (REAL-1). A host function that is right only at some
+types (Python's `sorted`
+agrees with `Ord` at `Real` but not at a type deriving `Ord`, DERIV-3) is
+written as an instance of a class whose method is the term, at exactly
+those types, beside a general instance with a morloc body. Root's `sort`,
+`unique` and `groupSort` are methods of such classes (`class Ord a =>
+Sortable a`, general instance `sort xs = sortBy (<=) xs`). CLS-16 selects
+between the instances.
+
+### CLS-22 An instance body gives only implementations
+Intent: ruled 2026-11-05
+Tests: spec-cls-22-1
+Code: conforms 2026-11-05
+
+A signature inside an instance body is a compile error at the signature;
+a method's type comes from its class.
+
+### CLS-23 At a signature's variables, an instance is selected only if every value of them selects it
+Intent: ruled 2026-11-07
+Tests: spec-cls-23-1, spec-cls-23-2, spec-cls-23-3, spec-cls-23-4, spec-cls-23-5, spec-cls-23-6, spec-cls-23-7
+Code: conforms 2026-11-07
+
+A class constraint a body owes over its signature's variables is met by an
+instance only if no other instance could match once those variables are
+known. With `instance Sh a` and `instance Sh Box`, the definition
+
+```morloc
+f :: a -> Str
+f x = sh x
+```
+
+is a compile error: at `Box` another instance would be selected. Writing
+the constraint, `f :: Sh a => a -> Str`, moves the choice to each use. A
+derived comparison (DERIV-6) is selected at such a type only if no
+hand-written instance of its class could match. This is GHC's rule for
+overlapping instances.

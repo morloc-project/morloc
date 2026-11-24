@@ -16,12 +16,18 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , capturesNothing
+  , foldFnPositions
   , serialManifoldArgsBound
   , sealLoop
   , D (..)
   , renameNE
   , renameSE
   , PoolDocs (..)
+  , Chain (..)
+  , ChainKind (..)
+  , ChainDocs (..)
+  , Guards (..)
   , mergePoolDocs
 
     -- * Naming conventions
@@ -34,12 +40,23 @@ module Morloc.CodeGenerator.Grammars.Common
   , walkSelectorBrackets
 
     -- * Record collection/unification
-  , RecEntry (..)
-  , RecMap
-  , collectRecords
-  , unifyRecords
+  , recordsInType
+  , poolPrivateNote
+  , encodeModulePath
+  , poolPrivateNoteName
+  , typesDependenciesName
+  , poolTypesWith
+  , poolNativeTypes
+  , intrinsicValueTypes
+  , collectRecordsWhere
+  , recursiveRecord
+  , recordNameOf
+  , refersTo
   , mergeVariantOccurrences
-  , structName
+  , mergeEnumOccurrences
+  , typeFileTree
+  , fileTree
+  , isIdentifier
 
     -- * Dispatch extraction
   , DispatchEntry (..)
@@ -55,6 +72,11 @@ module Morloc.CodeGenerator.Grammars.Common
   , crossingClosures
   , serialClosuresOf
   , serialClosuresOutsideVariants
+  , serialClosuresOutsideNodes
+  , convertingVariants
+  , fieldConverts
+  , closureSerialASTs
+  , allSerialASTs
   , collectSerialObjects
   , serialObjectsOfAST
   , variantWireArms
@@ -74,18 +96,21 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeTraceLabelLookup
   ) where
 
+import Morloc.Data.Zip (indexed, zipSame, zipWithSameM)
 import Morloc.Frontend.Rename (displayName)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
+import Data.List.NonEmpty (NonEmpty)
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (containsFunF, serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializable, serialAstToNativeType, serialAstToType, makeSerialAST, makeWireSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
-import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
+import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndexFrom)
 import qualified Morloc.Monad as MM
 
 -- Stores pieces of code made while building a pool
@@ -110,6 +135,46 @@ data PoolDocs = PoolDocs
   , poolBorrowedLocal :: Maybe Text
   -- ^ The name of a local bound by reference, when 'poolExpr' is that
   -- name. Returning it copies its referent.
+  , poolChain :: Maybe ChainDocs
+  -- ^ The chain these docs were lowered from, of one short-circuit operator
+  -- (EMIT-4) or of guards (EMIT-5), so that an enclosing chain of the same
+  -- kind extends it rather than nesting it.
+  }
+
+-- | A chain of one short-circuit operator (EMIT-4): the operands of its
+-- first run, then its rungs, each the statements of an operand and the run
+-- of operands that follows them.
+data Chain = Chain
+  { chainAnd :: Bool
+  , chainHead :: NonEmpty MDoc
+  , chainRungs :: Seq.Seq ([MDoc], NonEmpty MDoc)
+  }
+
+-- | A chain of guards (EMIT-5): the first test with its arm, then rungs,
+-- each the statements of a test, the test and its arm, and the arm taken
+-- when no test holds.
+data Guards = Guards
+  { guardsFirst :: (MDoc, NativeExpr, PoolDocs)
+  , guardsRungs :: Seq.Seq ([MDoc], MDoc, NativeExpr, PoolDocs)
+  , guardsElse :: (NativeExpr, PoolDocs)
+  }
+
+data ChainKind = ShortChain Chain | GuardChain Guards
+
+-- | A chain and how its docs hold it. 'cdPre' are the statements before
+-- the chain, 'cdPreBound' the lets among them that the rest of the chain
+-- is in the scope of, 'cdRungNames' the locals its rungs read and
+-- 'cdNames' the locals it reads anywhere. Docs whose expression or prior
+-- lines differ from 'cdExpr', 'cdLineCount' and 'cdPre' have been changed
+-- since, and are an ordinary operand.
+data ChainDocs = ChainDocs
+  { cdChain :: ChainKind
+  , cdPre :: [MDoc]
+  , cdPreBound :: Set.Set Int
+  , cdRungNames :: Set.Set Int
+  , cdNames :: Set.Set Int
+  , cdExpr :: Text
+  , cdLineCount :: Int
   }
 
 instance Defaultable PoolDocs where
@@ -121,6 +186,7 @@ instance Defaultable PoolDocs where
       , poolPriorExprs = []
       , poolReturnFlag = False
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 {- | Merge a series of pools, keeping prior lines, expression and manifolds, but
@@ -136,6 +202,7 @@ mergePoolDocs f ms =
     , poolPriorExprs = concatMap poolPriorExprs ms
     , poolReturnFlag = any poolReturnFlag ms
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | Split a call's arguments into successive call groups according to the
@@ -155,19 +222,23 @@ provideClosure src args0 = f (srcRsize src) args0
       | n < length args = take n args : f ns (drop n args)
       | otherwise = [args]
 
-svarNamer :: Int -> MDoc
-svarNamer i = "s" <> viaShow i
+-- | The names of the locals generated code declares, each under the
+-- language's reserved prefix (its manifold prefix), so that no sourced
+-- function can share one; a manifold is the prefix and a number, a local
+-- the prefix and a letter.
+svarNamer :: MT.Text -> Int -> MDoc
+svarNamer p i = pretty p <> "s" <> viaShow i
 
-nvarNamer :: Int -> MDoc
-nvarNamer i = "n" <> viaShow i
+nvarNamer :: MT.Text -> Int -> MDoc
+nvarNamer p i = pretty p <> "n" <> viaShow i
 
-helperNamer :: Int -> MDoc
-helperNamer i = "helper" <> viaShow i
+helperNamer :: MT.Text -> Int -> MDoc
+helperNamer p i = pretty p <> "helper" <> viaShow i
 
-argNamer :: (HasTypeM t) => Arg t -> MDoc
-argNamer (Arg i (typeMof -> Native _)) = nvarNamer i
-argNamer (Arg i (typeMof -> Function _ _)) = nvarNamer i
-argNamer (Arg i _) = svarNamer i
+argNamer :: (HasTypeM t) => MT.Text -> Arg t -> MDoc
+argNamer p (Arg i (typeMof -> Native _)) = nvarNamer p i
+argNamer p (Arg i (typeMof -> Function _ _)) = nvarNamer p i
+argNamer p (Arg i _) = svarNamer p i
 
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> MDoc
@@ -198,7 +269,7 @@ makeManifoldIndexer getId putId =
 
 patternSetter ::
   (TypeF -> [MDoc] -> MDoc) -> -- make a tuple from a type and list of elements
-  (TypeF -> [MDoc] -> MDoc) -> -- make a record from a type and list of elements
+  (TypeF -> [((Key, TypeF), MDoc)] -> MDoc) -> -- make a record from a type and its fields with their elements
   (TypeF -> MDoc -> Int -> MDoc) -> -- access an element in a tuple
   (TypeF -> MDoc -> Text -> MDoc) -> -- access an element in a record
   (TypeF -> MDoc -> MDoc) -> -- finalize an UNCHANGED field's value for the rebuild
@@ -208,7 +279,7 @@ patternSetter ::
   [MDoc] -> -- ordered arguments substituted at set sites
   MDoc -- the returned data structure with a new spine that reuses unchanged fields
 patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 s0 args0 =
-  setter dat0 t0 (zip (ungroup s0) args0)
+  setter dat0 t0 (zipSame (ungroup s0) args0)
   where
     -- A value belongs to the field the author named it at, not to the next
     -- declared field that happens to be mentioned. 'ungroup' enumerates the
@@ -234,12 +305,12 @@ patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 
         (AppF _ ts1) ->
           makeTuple t1
             [ rebuild (accessTuple t1 dat1 i) t (into (Left i) ps)
-            | (i, t) <- zip [0 ..] ts1
+            | (i, t) <- indexed (tyArgs ts1)
             ]
         (NamF _ _ _ rs1) ->
           makeRecord t1
-            [ rebuild (accessRecord t1 dat1 k) t (into (Right k) ps)
-            | (Key k, t) <- rs1
+            [ (r, rebuild (accessRecord t1 dat1 k) t (into (Right k) ps))
+            | r@(Key k, t) <- rs1
             ]
         -- Every path was checked against the receiver's type when the setter
         -- was typed, so a step into something with no fields means an
@@ -263,12 +334,12 @@ patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 
 -- traversal and arg-threading are shared. Used by both the C++ and Rust
 -- getter-chain lowering.
 walkSelectorBrackets ::
-  (MDoc -> Text -> MDoc) ->                  -- record key step: receiver -> key -> receiver
-  (MDoc -> Int -> MDoc) ->                   -- tuple index step: receiver -> index -> receiver
-  (MDoc -> MDoc -> MDoc) ->                  -- bracket index: index-arg -> receiver -> expr
-  (MDoc -> MDoc -> MDoc -> MDoc -> MDoc) ->  -- bracket slice: start stop step receiver -> expr
-  ([MDoc] -> MDoc) ->                        -- multi-sibling group: results -> expr
-  MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
+  (r -> Text -> r) ->        -- record key step: receiver -> key -> receiver
+  (r -> Int -> r) ->         -- tuple index step: receiver -> index -> receiver
+  (b -> r -> r) ->           -- bracket index: index-arg -> receiver -> expr
+  (b -> b -> b -> r -> r) -> -- bracket slice: start stop step receiver -> expr
+  ([r] -> r) ->              -- multi-sibling group: results -> expr
+  r -> [b] -> Selector -> (r, [b])
 walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice groupStep = go
   where
     go rcv brs SelectorEnd = (rcv, brs)
@@ -297,6 +368,74 @@ walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice groupStep = go
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]
 
+instance Functor D where
+  fmap f (D a ds) = D (f a) ds
+
+-- | The dependencies of the parts of one expression, in the order they
+-- run. Pure work runs in any order (EVAL-2); a part that keeps a local runs
+-- after the parts that keep none, so a read of the local, or of a local
+-- referring into it, comes first and the keeping read may move it (OWN-2).
+-- A part bound across languages, or one that forces a suspension, leaves the
+-- order as the parts give it. The head of a dependency list runs last.
+orderedDeps :: [D (Maybe NativeExpr)] -> [(Int, Either SerialExpr NativeExpr)]
+orderedDeps parts
+  | any (any isSerial . getDeps) parts || any rkForces sums = concatMap getDeps parts
+  | otherwise = concatMap getDeps (keepers <> rest)
+  where
+    isSerial (_, Left _) = True
+    isSerial _ = False
+    summary (D e ds) = foldMap readsKeeps (maybe id (:) e [ne | (_, Right ne) <- ds])
+    sums = map summary parts
+    tagged = zipSame parts sums
+    flags = [not (Set.null (rkKeeps r)) | r <- sums]
+    keepers = [p | ((p, _), True) <- zipSame tagged flags]
+    rest = [p | ((p, _), False) <- zipSame tagged flags]
+
+argExpr :: NativeArg -> Maybe NativeExpr
+argExpr (NativeArgExpr e) = Just e
+argExpr _ = Nothing
+
+-- | The locals an expression may keep -- one named as an element of a value
+-- it builds, an argument of a call that is not sourced, a conditional's
+-- result, or a capture -- and the local it is, if it is one.
+data ReadsKeeps = ReadsKeeps {rkKeeps :: Set.Set Int, rkVar :: Maybe Int, rkForces :: Bool}
+
+instance Semigroup ReadsKeeps where
+  ReadsKeeps a _ f <> ReadsKeeps b _ g = ReadsKeeps (a <> b) Nothing (f || g)
+
+instance Monoid ReadsKeeps where
+  mempty = ReadsKeeps Set.empty Nothing False
+
+readsKeeps :: NativeExpr -> ReadsKeeps
+readsKeeps = runIdentity . foldNativeExprM ops
+  where
+    ops =
+      FoldManifoldM
+        { opSerialManifoldM = \(SerialManifold_ _ _ form _ _) -> return (captures form)
+        , opNativeManifoldM = \(NativeManifold_ _ _ form _) -> return (captures form)
+        , opSerialExprM = \node -> return (foldlSE (<>) mempty node)
+        , opNativeExprM = \node -> return $ case node of
+            LetVarN_ _ i _ -> ReadsKeeps Set.empty (Just i) False
+            BndVarN_ _ i _ -> ReadsKeeps Set.empty (Just i) False
+            EvalN_ _ x -> x {rkForces = True}
+            AppExeN_ _ (SrcCallP _ _) xs -> mconcat xs
+            ListN_ _ _ xs -> held xs
+            TupleN_ _ xs -> held xs
+            RecordN_ _ _ _ kvs -> held (map snd kvs)
+            VariantN_ _ _ _ xs -> held xs
+            AppExeN_ _ _ xs -> held xs
+            IfN_ _ c a b -> c <> held [a, b]
+            NativeLetN_ _ a b -> (a <> b) {rkVar = rkVar b}
+            CoerceN_ _ _ x -> x
+            _ -> foldlNE (<>) mempty node
+        , opSerialArgM = \node -> return (foldlSA (<>) mempty node)
+        , opNativeArgM = \node -> return $ case node of
+            NativeArgExpr_ ne -> ne
+            NativeArgManifold_ nm -> nm
+        }
+    held xs = let r = mconcat xs in r {rkKeeps = rkKeeps r <> Set.fromList [i | Just i <- map rkVar xs]}
+    captures form = let cs = Set.fromList [i | Arg i _ <- manifoldContext form] in ReadsKeeps cs Nothing False
+
 unD :: D a -> a
 unD (D a _) = a
 
@@ -315,7 +454,7 @@ sealLoop body = case body of
   LoopIf g t e -> LoopIf (weave g) (sealLoop t) (sealLoop e)
   LoopNLet i r k -> LoopNLet i (weave r) (sealLoop k)
   LoopSLet i r k -> LoopSLet i (weave r) (sealLoop k)
-  LoopContinue ds -> floated (concatMap (reverse . getDeps) ds) (LoopContinue (map unD ds)) (LoopContinue (map weave ds))
+  LoopContinue ds -> floated (concatMap (reverse . getDeps . snd) ds) (LoopContinue (map (fmap unD) ds)) (LoopContinue (map (fmap weave) ds))
   LoopBase d -> floated (reverse (getDeps d)) (LoopBase (unD d)) (LoopBase (weave d))
   where
     floated deps leaf fallback = case mapM native deps of
@@ -326,12 +465,20 @@ sealLoop body = case body of
       _ -> fallback
     native (i, Right ne) = Just (i, ne)
     native (_, Left _) = Nothing
-    nubOrdOn key = go Set.empty
-      where
-        go _ [] = []
-        go seen (x : xs)
-          | Set.member (key x) seen = go seen xs
-          | otherwise = x : go (Set.insert (key x) seen) xs
+
+-- | The arguments of a fold intrinsic that are its step and combine, each
+-- with the parameters the fold hands it as values it owns (COPY-7).
+foldFnPositions :: Intrinsic -> [(Int, [Int])]
+foldFnPositions intr
+  | intr `elem` [IntrFold, IntrFoldFile] = [(1, [0]), (2, [0, 1])]
+  | intr == IntrFoldPut = [(0, [0])]
+  | otherwise = []
+
+-- | A function value's manifold that takes no context.
+capturesNothing :: ManifoldForm c b -> Bool
+capturesNothing ManifoldPass {} = True
+capturesNothing (ManifoldPart [] _) = True
+capturesNothing _ = False
 
 class Dependable a where
   weave :: D a -> a
@@ -350,6 +497,7 @@ instance Dependable NativeExpr where
         return $ D (LetVarN (typeFof e) i KeptRead) ((i, Right e) : deps)
 
   isAtomic (AppExeN _ _ _) = False
+  isAtomic (PatN _ _) = False
   isAtomic ManN {} = False
   isAtomic SerialLetN {} = False
   isAtomic NativeLetN {} = False
@@ -406,10 +554,22 @@ serialTrivialVar _ = Nothing
 
 -- | Substitute variable index [old/new] throughout a NativeExpr.
 renameNE :: Int -> Int -> NativeExpr -> NativeExpr
-renameNE old new = go where
+renameNE = renameNEWith False
+
+-- | Substitute variable index [old/new] throughout a SerialExpr.
+renameSE :: Int -> Int -> SerialExpr -> SerialExpr
+renameSE = renameSEWith False
+
+-- | The substitution; with 'True', a manifold whose caller variables become
+-- one takes that variable once ('renameFormWith').
+renameNEWith :: Bool -> Int -> Int -> NativeExpr -> NativeExpr
+renameNEWith m old new = go where
+  renameSE = renameSEWith m
+  renameNM = renameNMWith m
   ri i = if i == old then new else i
   go (ManN nm) = ManN (renameNM old new nm)
   go (AppExeN t exe args) = AppExeN t (renameExe old new exe) (map goA args)
+  go (PatN t app) = PatN t (fmap goA app)
   go (ReturnN ne) = ReturnN (go ne)
   go (SerialLetN i se ne) = SerialLetN (ri i) (renameSE old new se) (go ne)
   go (NativeLetN i ne1 ne2) = NativeLetN (ri i) (go ne1) (go ne2)
@@ -439,9 +599,10 @@ renameNE old new = go where
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
 
--- | Substitute variable index [old/new] throughout a SerialExpr.
-renameSE :: Int -> Int -> SerialExpr -> SerialExpr
-renameSE old new = go where
+renameSEWith :: Bool -> Int -> Int -> SerialExpr -> SerialExpr
+renameSEWith m old new = go where
+  renameNE = renameNEWith m
+  renameSM = renameSMWith m
   ri i = if i == old then new else i
   go (ManS sm) = ManS (renameSM old new sm)
   go (AppPoolS t p args) = AppPoolS t (renamePoolCall old new p) (map goA args)
@@ -460,21 +621,34 @@ renameSE old new = go where
   goA (SerialArgExpr se) = SerialArgExpr (go se)
   raPair (Arg i t, sa) = (Arg (ri i) t, sa)
 
-renameNM :: Int -> Int -> NativeManifold -> NativeManifold
-renameNM old new (NativeManifold m lang form body) =
-  NativeManifold m lang (renameForm old new form) (renameNE old new body)
+renameNMWith :: Bool -> Int -> Int -> NativeManifold -> NativeManifold
+renameNMWith merge old new (NativeManifold m lang form body) =
+  NativeManifold m lang (renameFormWith merge old new form) (renameNEWith merge old new body)
 
-renameSM :: Int -> Int -> SerialManifold -> SerialManifold
-renameSM old new (SerialManifold m lang form hf body) =
-  SerialManifold m lang (renameForm old new form) hf (renameSE old new body)
+renameSMWith :: Bool -> Int -> Int -> SerialManifold -> SerialManifold
+renameSMWith merge old new (SerialManifold m lang form hf body) =
+  SerialManifold m lang (renameFormWith merge old new form) hf (renameSEWith merge old new body)
 
-renameForm :: Int -> Int -> ManifoldForm a b -> ManifoldForm a b
-renameForm old new form = case form of
+-- | Rename one variable in a manifold's form. With 'True', caller variables
+-- (a full form's arguments, a partial form's context) that become one are
+-- passed once, in both the forms either had: they are passed by id, so the
+-- callers follow. Bound and passed parameters are positional and fixed by
+-- the function's type, so they are left for 'checkDistinctParameters'.
+renameFormWith :: Bool -> Int -> Int -> ManifoldForm (Or a b) c -> ManifoldForm (Or a b) c
+renameFormWith merge old new form = case form of
   ManifoldPass args -> ManifoldPass (map ra args)
-  ManifoldFull args -> ManifoldFull (map ra args)
-  ManifoldPart ctx bnd -> ManifoldPart (map ra ctx) (map ra bnd)
+  ManifoldFull args -> ManifoldFull (callers (map ra args))
+  ManifoldPart ctx bnd -> ManifoldPart (callers (map ra ctx)) (map ra bnd)
   where
     ra (Arg i t) = Arg (if i == old then new else i) t
+    callers args
+      | merge = [Arg i (foldr1 mergeOr [t | Arg j t <- args, j == i]) | i <- nubOrd [i | Arg i _ <- args]]
+      | otherwise = args
+    mergeOr (LR a b) _ = LR a b
+    mergeOr _ (LR a b) = LR a b
+    mergeOr (L a) (R b) = LR a b
+    mergeOr (R b) (L a) = LR a b
+    mergeOr x _ = x
 
 renamePoolCall :: Int -> Int -> PoolCall -> PoolCall
 renamePoolCall old new (PoolCall mid sock rform args) =
@@ -491,8 +665,8 @@ renameDeps :: Int -> Int -> [(Int, Either SerialExpr NativeExpr)]
            -> [(Int, Either SerialExpr NativeExpr)]
 renameDeps old new = map f where
   ri i = if i == old then new else i
-  f (i, Left se) = (ri i, Left (renameSE old new se))
-  f (i, Right ne) = (ri i, Right (renameNE old new ne))
+  f (i, Left se) = (ri i, Left (renameSEWith True old new se))
+  f (i, Right ne) = (ri i, Right (renameNEWith True old new ne))
 
 -- | Tag every serial variable that names one of its manifold's arguments as
 -- 'BndVarS'. A foreign call's body, and a trivial let renamed to an
@@ -535,6 +709,7 @@ argsBoundS a e0 = case e0 of
 argsBoundN :: Set.Set Int -> NativeExpr -> NativeExpr
 argsBoundN a e0 = case e0 of
   AppExeN t exe xs -> AppExeN t exe (map argN xs)
+  PatN t app -> PatN t (fmap argN app)
   ManN nm -> ManN (nativeManifoldArgsBound nm)
   ReturnN e -> ReturnN (go e)
   SerialLetN i se e -> SerialLetN i (argsBoundS a se) (argsBoundN (Set.delete i a) e)
@@ -610,6 +785,7 @@ wrapArgForms = goSM Map.empty
 
     goN env e0 = case e0 of
       AppExeN t exe xs -> AppExeN t exe (map (argN env) xs)
+      PatN t app -> PatN t (fmap (argN env) app)
       ManN nm -> ManN (goNM env nm)
       ReturnN e -> ReturnN (goN env e)
       SerialLetN i se e -> SerialLetN i (goS env se) (goN (Map.insert i BoundSerial env) e)
@@ -636,7 +812,7 @@ wrapArgForms = goSM Map.empty
       LoopNLet i ne rest -> LoopNLet i (goN env ne) (goLoop (Map.insert i BoundNative env) base rest)
       LoopSLet i se rest -> LoopSLet i (goS env se) (goLoop (Map.insert i BoundSerial env) base rest)
       LoopBase x -> LoopBase (base env x)
-      LoopContinue nes -> LoopContinue (map (goN env) nes)
+      LoopContinue nes -> LoopContinue (map (fmap (goN env)) nes)
 
     natives ids env = foldr (\i -> Map.insert i BoundNative) env ids
 
@@ -671,11 +847,14 @@ argsBoundLoop a base body = case body of
   LoopNLet i ne rest -> LoopNLet i (argsBoundN a ne) (argsBoundLoop a base rest)
   LoopSLet i se rest -> LoopSLet i (argsBoundS a se) (argsBoundLoop (Set.delete i a) base rest)
   LoopBase x -> LoopBase (base a x)
-  LoopContinue nes -> LoopContinue (map (argsBoundN a) nes)
+  LoopContinue nes -> LoopContinue (map (fmap (argsBoundN a)) nes)
 
-invertSerialManifold :: SerialManifold -> SerialManifold
-invertSerialManifold sm0 =
-  wrapArgForms (serialManifoldArgsBound (runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0)))
+-- | The fresh variables it binds are numbered from @next@, which must be
+-- above every index in the manifold; it returns the next unused index.
+invertSerialManifold :: Int -> SerialManifold -> (SerialManifold, Int)
+invertSerialManifold next sm0 =
+  let (sm, next') = runIndexFrom next (unD <$> foldSerialManifoldM fm sm0)
+   in (wrapArgForms (serialManifoldArgsBound sm), next')
   where
     fm =
       FoldManifoldM
@@ -706,12 +885,12 @@ invertSerialManifold sm0 =
     invertSerialExprM (ReturnS_ (D se lets)) = return $ D (ReturnS se) lets
     invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2))
       | Just j <- serialTrivialVar se1 =
-          return $ D (renameSE i j se2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameSEWith True i j se2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D se2 (lets2 <> ((i, Left se1) : lets1))
     invertSerialExprM (NativeLetS_ i (D ne1 lets1) (D se2 lets2))
       | Just j <- nativeTrivialVar ne1 =
-          return $ D (renameSE i j se2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameSEWith True i j se2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
     invertSerialExprM (LetVarS_ t i) = atomize (LetVarS t i) []
@@ -754,8 +933,10 @@ invertSerialManifold sm0 =
       Index (D NativeExpr)
     invertNativeExprM (AppExeN_ t exe nativeArgs) = do
       let nativeArgs' = map unD nativeArgs
-          deps = concatMap getDeps nativeArgs
+          deps = orderedDeps (map (fmap argExpr) nativeArgs)
       atomize (AppExeN t exe nativeArgs') deps
+    invertNativeExprM (PatN_ t app) = do
+      atomize (PatN t (fmap unD app)) (concatMap getDeps app)
     invertNativeExprM (ManN_ (D nm lets)) = atomize (ManN nm) lets
     invertNativeExprM (ReturnN_ (D ne lets)) = atomize (ReturnN ne) lets
     -- Eliminate trivial let-bindings where the RHS is just a variable
@@ -763,28 +944,28 @@ invertSerialManifold sm0 =
     -- This avoids redundant assignments like "n7 = n8" in generated code.
     invertNativeExprM (SerialLetN_ i (D se1 lets1) (D ne2 lets2))
       | Just j <- serialTrivialVar se1 =
-          return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameNEWith True i j ne2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D ne2 (lets2 <> ((i, Left se1) : lets1))
     invertNativeExprM (NativeLetN_ i (D ne1 lets1) (D ne2 lets2))
       | Just j <- nativeTrivialVar ne1 =
-          return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
+          return $ D (renameNEWith True i j ne2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
     invertNativeExprM (LetVarN_ t i r) = atomize (LetVarN t i r) []
     invertNativeExprM (BndVarN_ t i r) = atomize (BndVarN t i r) []
     invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
     invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
-    invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
-    invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (concatMap getDeps xs)
-    invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (concatMap (getDeps . snd) rs)
+    invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (orderedDeps (map (fmap Just) nes))
+    invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map unD xs)) (orderedDeps (map (fmap Just) xs))
+    invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second unD) rs)) (orderedDeps (map (fmap Just . snd) rs))
     invertNativeExprM (LogN_ v x) = atomize (LogN v x) []
     invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
     invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
     invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
     invertNativeExprM (EnumN_ v n i) = atomize (EnumN v n i) []
     invertNativeExprM (VariantN_ v n i xs) =
-      atomize (VariantN v n i (map unD xs)) (concatMap getDeps xs)
+      atomize (VariantN v n i (map unD xs)) (orderedDeps (map (fmap Just) xs))
     invertNativeExprM (NullN_ v) = atomize (NullN v) []
     -- keep dependencies inside suspend so thunk body stays lazy
     invertNativeExprM (DoBlockN_ t (D ne lets)) = return $ D (DoBlockN t (weave (D ne lets))) []
@@ -806,8 +987,16 @@ invertSerialManifold sm0 =
         isLit _ = False
         part (NativeLetN i rhs (LetVarN _ j _)) | i == j = rhs
         part e = e
-    invertNativeExprM (IntrinsicN_ t intr msch nes) =
+    invertNativeExprM (IntrinsicN_ t intr msch nes0) =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
+      where
+        -- A fold calls a step or combine that captures nothing by its
+        -- name, so the closure stays where the fold can see it (COPY-7).
+        positions = map fst (foldFnPositions intr)
+        nes = [if k `elem` positions then atFold d else d | (k, d) <- zip [0 :: Int ..] nes0]
+        atFold (D (LetVarN _ i _) ((j, Right m@(ManN (NativeManifold _ _ form _))) : deps))
+          | i == j, capturesNothing form = D m deps
+        atFold d = d
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
       atomize (MapOptionalN t wt src ne) lets
     invertNativeExprM (WireToNativeN_ t s intr sch nes) =
@@ -830,61 +1019,81 @@ invertSerialManifold sm0 =
     invertNativeArgM (NativeArgManifold_ (D nm deps)) = return $ D (NativeArgManifold nm) deps
     invertNativeArgM (NativeArgExpr_ (D ne deps)) = return $ D (NativeArgExpr ne) deps
 
-maxIndex :: SerialManifold -> Int
-maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
+-- | A module path as one identifier part, distinct for distinct paths:
+-- each component is preceded by its length.
+encodeModulePath :: [Text] -> Text
+encodeModulePath = MT.concat . map (\c -> MT.pack (show (MT.length c)) <> "_" <> c)
+
+-- | The note a pool leaves beside its generated type files naming the
+-- generated records it defines only for itself (GEN-10), which `morloc
+-- types` reports and does not write.
+poolPrivateNote :: [Text] -> [DirTree Code]
+poolPrivateNote [] = []
+poolPrivateNote names = [File poolPrivateNoteName (Code (MT.unlines names))]
+
+poolPrivateNoteName :: String
+poolPrivateNoteName = "pool-private.txt"
+
+-- | The file, beside a language's generated types, listing the
+-- dependencies (TOML lines) a build of them outside the pool needs.
+typesDependenciesName :: String
+typesDependenciesName = "dependencies.toml"
+
+-- | Every occurrence of a record, generated or user-mapped, anywhere in a
+-- type, the arguments a type carries included: its name, those arguments
+-- and its fields.
+recordsInType :: TypeF -> [(FVar, [ArgF], [(Key, TypeF)])]
+recordsInType t = case t of
+  NamF NamTable _ ps rs -> concatMap recordsInType (tyArgs ps <> map snd rs)
+  NamF _ v ps rs -> (v, ps, rs) : concatMap recordsInType (tyArgs ps <> map snd rs)
+  FunF ts r -> concatMap recordsInType (r : ts)
+  AppF h ts -> concatMap recordsInType (h : tyArgs ts)
+  OptionalF x -> recordsInType x
+  EnumF _ ps _ -> concatMap recordsInType (tyArgs ps)
+  VariantF _ ps as -> concatMap recordsInType (tyArgs ps <> concatMap snd as)
+  _ -> []
+
+
+-- | The values intrinsics may marshal: the arguments and results of every
+-- one but those that read no value. Collecting a type no intrinsic writes
+-- costs an unused marshaller; missing one leaves a value with none.
+intrinsicValueTypes :: SerialManifold -> [TypeF]
+intrinsicValueTypes = unique . runIdentity . foldWithSerialManifoldM fm
   where
-    fm =
-      FoldManifoldM
-        { opSerialManifoldM = findSerialManifoldIndices
-        , opNativeManifoldM = findNativeManifoldIndices
-        , opSerialExprM = findSerialIndices
-        , opNativeExprM = findNativeIndices
-        , opSerialArgM = return . foldlSA max 0
-        , opNativeArgM = return . foldlNA max 0
-        }
+    fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = \_ e -> return (foldlSE (<>) [] e)}
+    -- An argument converted to its wire form carries its serial form,
+    -- which the pool's serial forms already include ('allSerialASTs'); its
+    -- type is the unpacked view, which is not a native type.
+    nativeExpr (IntrinsicN t intr _ args) e
+      | marshals intr = return $ foldlNE (<>) (t : [typeFof a | a <- args, not (convertedToWire a)]) e
+    nativeExpr _ e = return $ foldlNE (<>) [] e
+    convertedToWire (NativeToWireN {}) = True
+    convertedToWire _ = False
+    marshals intr = intr `notElem` [IntrVersion, IntrCompiled, IntrLang, IntrDatafile]
 
-    findSerialManifoldIndices :: (Monad m) => SerialManifold_ Int -> m Int
-    findSerialManifoldIndices (SerialManifold_ _ _ form _ bodyMax) = do
-      let formIndices = abilist const const form
-      return $ foldl max bodyMax formIndices
+-- | 'poolTypes', with a serialized value's type taken by the given
+-- projection.
+poolTypesWith :: (SerialAST -> Unpacked) -> SerialManifold -> [TypeF]
+poolTypesWith unpacked = poolTypesBy (\s -> [unpackedAsTypeF (unpacked s)])
 
-    findNativeManifoldIndices :: (Monad m) => NativeManifold_ Int -> m Int
-    findNativeManifoldIndices (NativeManifold_ _ _ form bodyMax) = do
-      let formIndices = abilist const const form
-      return $ foldl max bodyMax formIndices
+-- | The native types of a manifold's expressions: 'poolTypesWith' without
+-- the serialized forms.
+poolNativeTypes :: SerialManifold -> [TypeF]
+poolNativeTypes = poolTypesBy (const [])
 
-    findSerialIndices :: (Monad m) => SerialExpr_ Int Int Int Int Int -> m Int
-    findSerialIndices (LetVarS_ _ i) = return i
-    findSerialIndices (BndVarS_ _ i) = return i
-    findSerialIndices e = return $ foldlSE max 0 e
+poolTypesBy :: (SerialAST -> [TypeF]) -> SerialManifold -> [TypeF]
+poolTypesBy serialTypes = unique . runIdentity . foldWithSerialManifoldM fm
+  where
+    fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
+    nativeExpr _ (DeserializeN_ t s xs) = return $ t : serialTypes s <> xs
+    nativeExpr efull e = return $ foldlNE (<>) [typeFof efull] e
+    serialExpr _ (SerializeS_ s xs) = return $ serialTypes s <> xs
+    serialExpr _ e = return $ foldlSE (<>) [] e
 
-    findNativeIndices :: (Monad m) => NativeExpr_ Int Int Int Int Int -> m Int
-    findNativeIndices (LetVarN_ _ i _) = return i
-    findNativeIndices (BndVarN_ _ i _) = return i
-    findNativeIndices e = return $ foldlNE max 0 e
-
-{- | A record entry stores the common name, keys, and types of records that are
-not imported from source. These records are generated as structs (or
-equivalent) in the pool. 'unifyRecords' takes all such records and "unifies"
-ones with the same name and keys. The unified records may have different
-types, but they will all be instances of the same generic struct. Fields that
-differ between instances are made generic.
--}
-data RecEntry = RecEntry
-  { recName :: MDoc
-  , recFields ::
-      [ ( Key
-        , Maybe TypeF
-        )
-      ]
-  }
-  deriving (Show)
-
--- | Lookup table mapping (FVar, keys) to their unified RecEntry.
-type RecMap = [((FVar, [Key]), RecEntry)]
-
-collectRecords :: SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
-collectRecords e0@(SerialManifold i0 _ _ _ _) =
+-- | Every occurrence of a record whose concrete name passes the test, with
+-- the manifold it occurs in and its fields there.
+collectRecordsWhere :: (Text -> Bool) -> SerialManifold -> [(FVar, Int, [(Key, TypeF)])]
+collectRecordsWhere wanted e0@(SerialManifold i0 _ _ _ _) =
   unique $ CMS.evalState (surroundFoldSerialManifoldM manifoldIndexer fm e0) i0
   where
     fm = defaultValue {opFoldWithNativeExprM = nativeExpr, opFoldWithSerialExprM = serialExpr}
@@ -894,7 +1103,7 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     nativeExpr _ (DeserializeN_ t s xs) = do
       manifoldIndex <- CMS.get
       let tRecs = seekRecs manifoldIndex t
-          sRecs = seekRecs manifoldIndex (serialAstToType s)
+          sRecs = seekRecs manifoldIndex (unpackedAsTypeF (serialAstToType s))
       return $ xs <> tRecs <> sRecs
     nativeExpr efull e = do
       manifoldIndex <- CMS.get
@@ -903,89 +1112,118 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
 
     serialExpr _ (SerializeS_ s xs) = do
       manifoldIndex <- CMS.get
-      return $ seekRecs manifoldIndex (serialAstToType s) <> xs
+      return $ seekRecs manifoldIndex (unpackedAsTypeF (serialAstToType s)) <> xs
     serialExpr _ e = return $ foldlSE (<>) [] e
 
     seekRecs :: Int -> TypeF -> [(FVar, Int, [(Key, TypeF)])]
-    seekRecs m (NamF _ v@(FV _ (CV "struct")) _ rs) = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
+    seekRecs m (NamF _ v@(FV _ (CV c)) _ rs) | wanted c = [(v, m, rs)] <> concatMap (seekRecs m . snd) rs
     seekRecs m (NamF _ _ _ rs) = concatMap (seekRecs m . snd) rs
     seekRecs m (FunF ts t) = concatMap (seekRecs m) (t : ts)
-    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : ts)
+    seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : tyArgs ts)
     seekRecs _ (UnkF _) = []
     seekRecs _ (VarF _) = []
     seekRecs m (OptionalF t) = seekRecs m t
-    seekRecs _ (NatLitF _) = []
-    seekRecs _ (VoidF _) = []
-    seekRecs _ (StrLitF _) = []
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
-    seekRecs _ (RecF _) = []
+    seekRecs _ (RecF _ _) = []
     -- An enum is a leaf: no fields, so no records beneath it.
     seekRecs _ (EnumF _ _ _) = []
     -- A variant's arms can hold records, so they are walked.
     seekRecs d (VariantF _ _ as) = concatMap (concatMap (seekRecs d) . snd) as
 
-unifyRecords ::
-  [ ( FVar
-    , Int
-    , [(Key, TypeF)]
-    )
-  ] ->
-  RecMap
-unifyRecords xs =
-  zipWith (\i ((v, ks), es) -> ((v, ks), RecEntry (structName i v) es)) [1 ..]
-    . map (\((v, ks), rss) -> ((v, ks), map unifyField (transpose (map snd rss))))
-    . groupSort
-    . unique
-    $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
 
-structName :: Int -> FVar -> MDoc
-structName i (FV v (CV "struct")) = "mlc_" <> pretty (tvarIdentifier v) <> "_" <> pretty i
-structName _ (FV _ v) = pretty v
+-- | The record a type names, as itself, a back-reference to it, or a
+-- variable of its name.
+recordNameOf :: TypeF -> Maybe TVar
+recordNameOf t = case t of
+  NamF _ (FV g _) _ _ -> Just g
+  RecF (FV g _) _ -> Just g
+  VarF (FV g _) -> Just g
+  _ -> Nothing
+
+-- | Whether a type names the given record ('recordNameOf').
+refersTo :: TVar -> TypeF -> Bool
+refersTo g t = recordNameOf t == Just g
+
+-- | Whether a generated record's fields refer back to the record itself,
+-- anywhere in their types: such a record is a handle to its fields (CPP-6).
+recursiveRecord :: TVar -> [(Key, TypeF)] -> Bool
+recursiveRecord self fields = any (mentions . snd) fields
+  where
+    mentions t = refersTo self t || case t of
+      NamF _ _ ps rs -> any mentions (tyArgs ps) || any (mentions . snd) rs
+      FunF as r -> any mentions (r : as)
+      AppF h as -> mentions h || any mentions (tyArgs as)
+      OptionalF x -> mentions x
+      VariantF _ ps as -> any mentions (tyArgs ps) || any (any mentions . snd) as
+      RecF _ ps -> any mentions (tyArgs ps)
+      _ -> False
+
+-- | The files of generated type definitions (GEN-6) as a directory tree
+-- below the language's types directory: each module's file at its path
+-- under @mlc/types@, with the given extension.
+typeFileTree :: String -> [([Text], Text)] -> [DirTree Code]
+typeFileTree ext files = [Dir "mlc" [Dir "types" (fileTree [(init p <> [last p <> MT.pack ext], t) | (p@(_ : _), t) <- files])]]
+
+-- | Files, each at its path of directories, as a directory tree.
+fileTree :: [([Text], Text)] -> [DirTree Code]
+fileTree fs =
+  [File (MT.unpack c) (Code t) | ([c], t) <- fs]
+    <> [ Dir (MT.unpack c) (fileTree [(rest, t) | (c' : rest@(_ : _), t) <- fs, c' == c])
+       | c <- unique [c | (c : _ : _, _) <- fs]
+       ]
+
+-- | Whether a name is an ASCII identifier: a letter or underscore, then
+-- letters, digits and underscores.
+isIdentifier :: Text -> Bool
+isIdentifier t = case MT.uncons t of
+  Just (c, rest) -> (isAsciiLetter c || c == '_') && MT.all (\x -> isAsciiLetter x || (x >= '0' && x <= '9') || x == '_') rest
+  Nothing -> False
+  where
+    isAsciiLetter x = (x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z')
+
 
 -- | Merge every occurrence of one `data` type in a pool into the one
--- declaration to emit. Each occurrence lists its arms with the field types
--- as written and as the backend renders them. The merge is arm-wise and
--- keeps declaration order: an arm's position is its wire tag, so sorting
--- by name would silently renumber every constructor. The longer occurrence
--- is the more complete view of the type and supplies the order; a
--- constructor literal's type reports its own arm with no fields, so an
--- occurrence with fields supplies them. Two occurrences that both carry an
--- arm's fields must render them alike: the declaration they disagree on
--- cannot serve both sites, and which one is emitted would otherwise be
--- decided by traversal order.
+-- declaration to emit. Each occurrence lists the type's arms in declaration
+-- order (an arm's position is its wire tag), with each arm's field types as
+-- written and as the backend renders them. Occurrences must list the same
+-- arms in the same order and render each arm's fields alike, or the one
+-- declaration could not serve both sites. The result carries the payload of
+-- the first occurrence.
 mergeVariantOccurrences ::
   Text ->
-  [[(Text, ([a], [Text]))]] ->
-  Either Text [(Text, [a])]
-mergeVariantOccurrences _ [] = Right []
-mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o os
+  [(b, [(Text, ([a], [Text]))])] ->
+  Either Text (b, [(Text, [a])])
+mergeVariantOccurrences name occs = case occs of
+  [] -> Left $ "the `data` type " <> name <> " has no occurrence"
+  ((b, o) : os) -> (,) b . map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o (map snd os)
   where
-    mergeOccurrence as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
-      where
-        order = if length as >= length bs then map fst as else map fst bs
-    pick am bm c = case (Map.lookup c am, Map.lookup c bm) of
-      (Just (xs, rx), Just (ys, ry))
-        | null xs -> Right (c, (ys, ry))
-        | null ys -> Right (c, (xs, rx))
-        | rx == ry -> Right (c, (xs, rx))
-        | otherwise ->
-            Left $
-              "the `data` type " <> name <> " is used with two field types for its constructor "
-                <> c <> ": (" <> spell rx <> ") and (" <> spell ry <> ")"
-      (Just x, Nothing) -> Right (c, x)
-      (Nothing, Just y) -> Right (c, y)
-      _ -> Right (c, ([], []))
+    mergeOccurrence as bs
+      | map fst as /= map fst bs =
+          Left $
+            "the `data` type " <> name <> " has occurrences listing different constructors: ("
+              <> spell (map fst as) <> ") and (" <> spell (map fst bs) <> ")"
+      | otherwise = zipWithSameM pick as bs
+    pick (c, (xs, rx)) (_, (_, ry))
+      | rx == ry = Right (c, (xs, rx))
+      | otherwise =
+          Left $
+            "the `data` type " <> name <> " is used with two field types for its constructor "
+              <> c <> ": (" <> spell rx <> ") and (" <> spell ry <> ")"
     spell = MT.intercalate ", "
 
-unifyField :: [(Key, TypeF)] -> (Key, Maybe TypeF)
-unifyField [] = error "Empty field"
-unifyField rs@((v, _) : _)
-  | not (all ((== v) . fst) rs) =
-      error $ "Bad record - unequal fields: " <> show (unique rs)
-  | otherwise = case unique (map snd rs) of
-      [t] -> (v, Just t)
-      _ -> (v, Nothing)
+-- | The constructor list of one argument-free `data` type, from its
+-- occurrences in a pool, each of which lists the declared constructors in
+-- declaration order (a constructor's position is its wire tag).
+mergeEnumOccurrences :: Text -> [[Text]] -> Either Text [Text]
+mergeEnumOccurrences _ [] = Right []
+mergeEnumOccurrences name (o : os) = case filter (/= o) os of
+  [] -> Right o
+  (other : _) ->
+    Left $
+      "the `data` type " <> name <> " has occurrences listing different constructors: ("
+        <> MT.intercalate ", " o <> ") and (" <> MT.intercalate ", " other <> ")"
+
 
 -- | Collect every manifold ID reachable from the given top-level segments.
 -- Walks both SerialManifold and NativeManifold spines (a 'SerialExpr'
@@ -1114,6 +1352,30 @@ serialClosuresOf = closuresWithin True
 serialClosuresOutsideVariants :: SerialAST -> [SerialAST]
 serialClosuresOutsideVariants = closuresWithin False
 
+-- | Whether a field of a generated record is not written as it is held: it
+-- holds a packed value or a closure outside any record that converts itself
+-- (GEN-14).
+fieldConverts :: SerialAST -> Bool
+fieldConverts fa = not (isSerializable fa) || not (null (serialClosuresOutsideNodes fa))
+
+-- | The serial forms a pool's closures carry: captured, bound and result.
+closureSerialASTs :: Map.Map k ([SerialAST], [SerialAST], SerialAST) -> [SerialAST]
+closureSerialASTs t = [a | (cs, bs, r) <- Map.elems t, a <- cs <> bs <> [r]]
+
+-- | The closures a value holds outside any node that converts its own
+-- fields: a `data` type's arms, and a generated record (GEN-14).
+serialClosuresOutsideNodes :: SerialAST -> [SerialAST]
+serialClosuresOutsideNodes = go
+  where
+    go s | generatedObject s = []
+    go c@(SerialClosure ins out) = c : concatMap go ins <> go out
+    go (SerialPack _ (_, s)) = go s
+    go (SerialList _ _ s) = go s
+    go (SerialTuple _ ss) = concatMap go ss
+    go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
+    go (SerialOptional _ s) = go s
+    go _ = []
+
 closuresWithin :: Bool -> SerialAST -> [SerialAST]
 closuresWithin intoVariants = go
   where
@@ -1123,7 +1385,7 @@ closuresWithin intoVariants = go
     go (SerialTuple _ ss) = concatMap go ss
     go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
-    go (SerialVariant _ _ as) | intoVariants = concatMap (concatMap go . snd) as
+    go (SerialVariant _ _ _ as) | intoVariants = concatMap (concatMap go . snd) as
     go _ = []
 
 -- | Every 'SerialObject' (record) reachable at a (de)serialization site in the
@@ -1147,12 +1409,21 @@ variantWireArms ::
 variantWireArms renderType closureAsts es =
   Map.fromListWith (const id) <$> mapM keyed variants
   where
-    asts = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
-    variants = [(sv, as) | sv@(SerialVariant _ _ as@(_ : _)) <- concatMap serialVariantsOfAST asts]
-    keyed (sv, as) = (\n -> (render n, as)) <$> renderType (serialAstToType sv)
+    variants = [(sv, as) | sv@(SerialVariant _ _ _ as@(_ : _)) <- concatMap serialVariantsOfAST (wireASTs closureAsts es)]
+    keyed (sv, as) = (\n -> (render n, as)) <$> renderType (unpackedAsTypeF (serialAstToType sv))
+
+-- | The `data` types an occurrence of which has an arm field that does not
+-- write as it is held: a template of one is marshalled at each instance.
+convertingVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> Set.Set TVar
+convertingVariants closureAsts es =
+  Set.fromList [gv | SerialVariant (FV gv _) _ _ as <- concatMap serialVariantsOfAST (wireASTs closureAsts es), any (any fieldConverts . snd) as]
+
+-- | Every serial form a pool writes or reads, its closures' included.
+wireASTs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> [SerialAST]
+wireASTs closureAsts es = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
 
 serialVariantsOfAST :: SerialAST -> [SerialAST]
-serialVariantsOfAST v@(SerialVariant _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
+serialVariantsOfAST v@(SerialVariant _ _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
 serialVariantsOfAST (SerialClosure ins out) = concatMap serialVariantsOfAST (ins <> [out])
 serialVariantsOfAST (SerialObject _ _ _ rs) = concatMap (serialVariantsOfAST . snd) rs
 serialVariantsOfAST (SerialList _ _ s) = serialVariantsOfAST s
@@ -1170,6 +1441,9 @@ allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
         { opFoldWithSerialExprM = \_ folded ->
             return $ case folded of
               SerializeS_ s child -> s : child
+              -- A cached or traced call writes its result and its arguments.
+              CacheBodyS_ _ resSa _ _ args child -> resSa : map snd args <> child
+              DebugWrapS_ _ _ args child -> map snd args <> child
               _ -> foldlSE (<>) mempty folded
         , opFoldWithNativeExprM = \_ folded ->
             return $ case folded of
@@ -1313,7 +1587,7 @@ serialObjectsOfAST = go
         go (SerialTuple _ ss) = concatMap go ss
         go (SerialOptional _ s) = go s
         go (SerialPack _ (_, s)) = go s
-        go (SerialVariant _ _ as) = concatMap (concatMap go . snd) as
+        go (SerialVariant _ _ _ as) = concatMap (concatMap go . snd) as
         go _ = []
 
 -- | For each nested closure in the given manifolds, compute its serial wire
@@ -1351,9 +1625,9 @@ computeClosureSchemas lang sms =
           resT = case typeFof nm of
             FunF _ out -> out
             other -> other
-      capAsts <- mapM (makeSerialAST i lang) ctxTs
-      bndAsts <- mapM (makeSerialAST i lang) bndTs
-      resAst <- makeSerialAST i lang resT
+      capAsts <- mapM (makeWireSerialAST i lang) ctxTs
+      bndAsts <- mapM (makeWireSerialAST i lang) bndTs
+      resAst <- makeWireSerialAST i lang resT
       return (i, (capAsts, bndAsts, resAst))
 
 -- | A closure table entry rendered as plain wire schemas: captured, bound,

@@ -1,0 +1,9 @@
+Error: run failed
+boom
+  at down [py] (main.loc:17:1)
+  [previous line repeated 2 more times]
+  at deep [py] (main.loc:22:1)
+-1
+-1
+Error: run failed
+{"Err":["boom\n  at down [py] (main.loc:17:1)\n  at down [py] (main.loc:17:1)\n  at down [py] (main.loc:17:1)"]}

@@ -8,8 +8,6 @@ record Farbe where
   grün :: Int
   名前 :: Str
 record Cpp => Farbe = "farbe_t"
-record Py => Farbe = "dict"
-record R => Farbe = "list"
 
 data Ton = Hell | Dunkel | Mittelgroß
 

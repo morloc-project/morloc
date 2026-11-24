@@ -1,0 +1,18 @@
+-- Spec DERIV-6: an instance context a derived comparison meets also holds where
+-- a value's converter is selected.
+module main (run)
+import root-py
+
+record R where
+  x :: Int
+
+newtype S a = [a]
+type Py => (S a) = "tuple" a
+instance Eq a => Packable [a] (S a) where
+  source Py from "h.py" ("h_id" as pack, "h_id" as unpack)
+
+source Py from "h.py" ("h_size" as size2)
+size2 :: S R -> Int
+
+run :: S R -> Int
+run xs = size2 xs

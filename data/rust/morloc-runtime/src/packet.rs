@@ -54,6 +54,16 @@ pub fn code_checks() -> bool {
     CODE_CHECKS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// Set from `MORLOC_VERIFY_INDEX=1`.
+static VERIFY_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `@open` as an IFile checks a final footer's index against the
+/// file's sub-packets (SLOT-30): in a debug build, or when asked for.
+pub fn verify_index_on_open() -> bool {
+    ensure_config_loaded();
+    VERIFY_INDEX.load(std::sync::atomic::Ordering::Relaxed) || code_checks() || cfg!(debug_assertions)
+}
+
 // Read the live SHM-enabled flag. Cheap and lock-free.
 #[inline]
 pub fn shm_enabled() -> bool {
@@ -107,6 +117,7 @@ fn ensure_config_loaded() {
         .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
     let tmpdir = var("MORLOC_TMPDIR").filter(|s| !s.is_empty());
     let code_checks = var(crate::origin::CODE_CHECKS_ENV).is_some_and(|s| s == "1");
+    let verify_index = var("MORLOC_VERIFY_INDEX").is_some_and(|s| s == "1");
     let mut config = TMPDIR.lock();
     if config.loaded {
         return;
@@ -119,6 +130,9 @@ fn ensure_config_loaded() {
     }
     if code_checks {
         CODE_CHECKS.store(true, Ordering::Relaxed);
+    }
+    if verify_index {
+        VERIFY_INDEX.store(true, Ordering::Relaxed);
     }
     if tmpdir.is_some() {
         config.tmpdir = tmpdir;

@@ -52,7 +52,6 @@ import .actlib (bumpLib)
 record Box a where
   x :: a
   y :: Int
-record Py => Box a = "dict"
 
 mkBox :: Str -> Box Str
 mkBox h = {x = h, y = 1}
@@ -66,7 +65,6 @@ boxY h = .y (mkBox h)
 record BaseQual (n :: Nat) where
   bases :: Vector n U8
   quals :: Vector n U8
-record Py => BaseQual (n :: Nat) = "dict"
 
 mkBaseQual :: Vector n U8 -> Vector n U8 -> BaseQual n
 mkBaseQual b q = {bases = b, quals = q}
@@ -80,7 +78,6 @@ bqQuals b q = .quals (mkBaseQual b q)
 record Sequence h s where
   header :: h
   seq :: s
-record Py => Sequence h s = "dict"
 
 mkRead :: Str -> Vector n U8 -> Vector n U8 -> Sequence Str (BaseQual n)
 mkRead h b q = {header = h, seq = mkBaseQual b q}
@@ -94,7 +91,6 @@ seqQuals h b q = .quals (.seq (mkRead h b q))
 record Tagged (n :: Nat) a where
   tag :: a
   values :: Vector n U8
-record Py => Tagged (n :: Nat) a = "dict"
 
 mkTagged :: Str -> Vector n U8 -> Tagged n Str
 mkTagged t v = {tag = t, values = v}
@@ -136,7 +132,6 @@ relabelY h = .y (relabel (mkBox h))
 record Pair h q where
   left :: h
   right :: q
-record Py => Pair h q = "dict"
 
 mkPair :: Str -> Str -> Pair Str Str
 mkPair a b = {left = a, right = b}
@@ -197,7 +192,6 @@ pickY b h = .y (pick b h)
 -- call: 9
 record Holder where
   inner :: Box Str
-record Py => Holder = "dict"
 
 hold :: Str -> Holder
 hold h = {inner = sourcedBox h}
@@ -223,7 +217,6 @@ directY h = sourcedY {x = h, y = 4}
 record Plain where
   p :: Str
   q :: Int
-record Py => Plain = "dict"
 
 sourcedQ :: Plain -> Int
 

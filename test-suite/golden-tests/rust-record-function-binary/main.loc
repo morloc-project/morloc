@@ -13,7 +13,6 @@ add :: Int -> Int -> Int
 record BinOp where
   op :: Int -> Int -> Int
   seed :: Int
-record Rust => BinOp = "struct"
 
 apply2 :: Int -> Int -> Int
 apply2 a b =

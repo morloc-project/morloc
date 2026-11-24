@@ -1,6 +1,8 @@
 # A Vector of DNA arrives as a compact buffer of one-byte ordinals, a numpy
-# uint8 array, not a list of IntEnum members. Constructing one Python object per base would defeat the purpose
-# of the tier, so nothing here indexes the buffer element by element.
+# uint8 array, not a list of enum members. Constructing one Python object per
+# base would defeat the purpose of the tier, so nothing here indexes the
+# buffer element by element; a single base is returned as its member.
+from mlc_types._local.main import DNA
 
 
 def byte_size(xs):
@@ -14,7 +16,7 @@ def count_purines(xs):
 
 
 def head_base(xs):
-    return memoryview(xs).tolist()[0]
+    return DNA(memoryview(xs).tolist()[0])
 
 
 def identity(xs):

@@ -1,0 +1,5 @@
+-- GEN-5: two generated types that would get one public name are a compile
+-- error naming both; geo-util and geo_util both map to geo_util.
+module main (fa, fb)
+import .geo-util (fa)
+import .geo_util (fb)

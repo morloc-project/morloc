@@ -72,8 +72,6 @@ record ConfigFlat where
   --' @default false
   removeCaches :: Bool
 
-record Py => ConfigFlat = "dict"
-
 configStrFlat :: ConfigFlat -> Str
 
 -- The same fields, but a record-level `@arg` makes the whole record one CLI
@@ -99,16 +97,12 @@ record ConfigWhole where
   --' @default false
   removeCaches :: Bool
 
-record Py => ConfigWhole = "dict"
-
 configStrWhole :: ConfigWhole -> Str
 
 -- A plain record used only as a RETURN type.
 record Result where
   status :: Str
   value :: Int
-
-record Py => Result = "dict"
 
 --' Add one to an integer
 addOne ::

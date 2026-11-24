@@ -1,0 +1,17 @@
+# fold 2026-11-15 01:20 load=4.56 load_max=4.56 morloc=0.112.0 commit=3e8e8f406+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-14	cpp.n.fold.b	0.229622	us/batch	r2=0.9008
+ENC-14	cpp.n.control.b	0.119835	us/batch	r2=0.9294
+ENC-14	cpp.n.extra	0.109787	us/batch	fold slope over the control's
+ENC-14	cpp.map1k.fold.b	22.6615	us/batch	r2=1.0000
+ENC-14	cpp.map1k.control.b	22.1155	us/batch	r2=0.9998
+ENC-14	cpp.map1k.extra	0.54598	us/batch	fold slope over the control's
+ENC-14	cpp.map10k.fold.b	380.224	us/batch	r2=0.9989
+ENC-14	cpp.map10k.control.b	373.165	us/batch	r2=0.9989
+ENC-14	cpp.map10k.extra	7.05887	us/batch	fold slope over the control's
+ENC-14	py.map1k.fold.b	12.628	us/batch	r2=0.9998
+ENC-14	py.map1k.control.b	11.4664	us/batch	r2=0.9984
+ENC-14	py.map1k.extra	1.16165	us/batch	fold slope over the control's
+ENC-14	py.map10k.fold.b	13.6753	us/batch	r2=0.9943
+ENC-14	py.map10k.control.b	12.7655	us/batch	r2=0.9995
+ENC-14	py.map10k.extra	0.909774	us/batch	fold slope over the control's

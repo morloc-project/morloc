@@ -1,0 +1,39 @@
+-- Spec CLS-2: a method use whose type is left open is expanded at its use
+-- alone; the comparisons beside it stay references to their instances, so
+-- root's comparison instances, which use one another, are not all expanded.
+-- In `h`, a method use inside its own instance whose result only the class
+-- fixes selects by its argument.
+module main (f, h)
+
+import root-py
+
+source Py from "foo.py" ("size")
+
+size :: Str -> Int
+
+class Tally f where
+  tally :: f a -> Str
+
+instance Tally List where
+  tally xs = "list"
+
+g :: Bool -> Str
+g b = ? b = "+" : "-"
+
+f :: Int -> Str
+f n = tally [] <> g (n > 0) <> g ((n, 1) < (n, 2))
+
+konst :: a -> b -> a
+konst x y = x
+
+class Render a where
+  render :: a -> Str
+
+instance Render Int where
+  render x = "int"
+
+instance Render Str where
+  render s = konst "str" (render (size s))
+
+h :: Str -> Str
+h x = tally [] <> render x

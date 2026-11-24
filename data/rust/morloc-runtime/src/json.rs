@@ -77,10 +77,17 @@ impl ShmReader {
     fn read_u8(&self, offset: usize) -> u8 { self.read_val(offset) }
     fn read_array(&self, offset: usize) -> Array { unsafe { *(self.ptr.add(offset) as *const Array) } }
 
-    fn read_str(&self, offset: usize, len: usize) -> &str {
-        unsafe {
-            std::str::from_utf8(std::slice::from_raw_parts(self.ptr.add(offset), len)).unwrap_or("")
-        }
+    /// A `Str` body as text; one that is not valid UTF-8 is an error
+    /// (BASE-5), never read as empty.
+    fn read_str(&self, offset: usize, len: usize) -> Result<&str, MorlocError> {
+        let bytes = unsafe { std::slice::from_raw_parts(self.ptr.add(offset), len) };
+        std::str::from_utf8(bytes).map_err(|e| {
+            MorlocError::Serialization(format!(
+                "a Str that is not valid UTF-8 (byte {} of {})",
+                e.valid_up_to(),
+                len
+            ))
+        })
     }
 
     /// Raw bytes with no UTF-8 validation, for `Vector U8` / `[U8]` bodies.
@@ -538,7 +545,7 @@ fn write_leaf(
     match schema.serial_type {
         SerialType::Nil => {
             if !is_null(text) { return Err(err(&format!("expected null, got {}", truncate_for_msg(text)))); }
-            let w = alloc(dest, 1)?; w.write_val::<u8>(0, 0); Ok(w.as_ptr())
+            Ok(alloc(dest, 0)?.as_ptr())
         }
         SerialType::Bool => {
             let t = text.trim();
@@ -755,16 +762,16 @@ impl<'a, 'r, 't> LoadWalk<'a, 'r, 't> {
         let hdr = std::mem::size_of::<Array>();
         let hw = unsafe { ShmWriter::new(f.data as *mut u8, hdr) };
         if f.idx == 0 {
-            let dp = if f.x == 1 {
+            let dp = if n == 0 {
+                std::ptr::null_mut()
+            } else if f.x == 1 {
                 unsafe { (f.data as *mut u8).add(hdr) }
-            } else if n > 0 {
+            } else {
                 let dp = shm::shmalloc(n * ew)?;
                 self.parts.push(dp);
                 // SAFETY: freshly allocated with n * ew bytes.
                 unsafe { std::ptr::write_bytes(dp, 0, n * ew) };
                 dp
-            } else {
-                std::ptr::null_mut()
             };
             let data_rel = if dp.is_null() { RELNULL } else { shm::abs2rel(dp)? };
             hw.write_array_header(0, n, data_rel);
@@ -1138,19 +1145,8 @@ pub unsafe fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), M
     }
 }
 
-/// Write the raw byte body of a `String` voidstar (an `Array<u1>`) with no
-/// quoting or escaping.
-fn write_str_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocError> {
-    let arr = r.read_array(0);
-    if arr.size > 0 && arr.data != RELNULL {
-        let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
-        map_io(w.write_all(dr.read_str(0, arr.size).as_bytes()))?;
-    }
-    Ok(())
-}
-
-/// Write the raw bytes of a `Vector U8` / `[U8]` voidstar unchanged.
-fn write_u8_array_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocError> {
+/// Write the raw body of a `Str`, `Vector U8` or `[U8]` voidstar unchanged.
+fn write_raw_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocError> {
     let arr = r.read_array(0);
     if arr.size > 0 && arr.data != RELNULL {
         let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
@@ -1171,49 +1167,83 @@ fn write_voidstar_raw<W: io::Write>(
     ptr: AbsPtr,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    match schema.serial_type {
-        SerialType::String => {
-            let r = unsafe { ShmReader::new(ptr) };
-            write_str_body(&r, w)
-        }
-        SerialType::Array => {
-            let es = schema.parameters.first().ok_or_else(|| {
-                err("-f raw: array output has no element schema")
-            })?;
-            let r = unsafe { ShmReader::new(ptr) };
+    let shape = raw_shape(schema).ok_or_else(|| {
+        err("-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
+             (a `render` handler's bytes)")
+    })?;
+    let r = unsafe { ShmReader::new(ptr) };
+    match shape {
+        RawShape::Body | RawShape::Bytes => write_raw_body(&r, w),
+        RawShape::Bodies => {
             let arr = r.read_array(0);
             if arr.size == 0 || arr.data == RELNULL {
                 return Ok(());
             }
-            // `Vector U8` / `[U8]`: the array data IS the byte body.
-            if es.serial_type == SerialType::Uint8 {
-                return write_u8_array_body(&r, w);
-            }
-            // `[Str]` / `[Vector U8]`: emit each element's body in turn.
-            let elem_is_u8_vec = es.serial_type == SerialType::Array
-                && es.parameters.first().map_or(false, |i| i.serial_type == SerialType::Uint8);
-            if es.serial_type != SerialType::String && !elem_is_u8_vec {
-                return Err(err(
-                    "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
-                     (a `render` handler's bytes)",
-                ));
-            }
             let data = shm::rel2abs(arr.data)?;
             for i in 0..arr.size {
-                let er = unsafe { ShmReader::new(data.add(i * es.width)) };
-                if elem_is_u8_vec {
-                    write_u8_array_body(&er, w)?;
-                } else {
-                    write_str_body(&er, w)?;
-                }
+                let er = unsafe { ShmReader::new(data.add(i * std::mem::size_of::<Array>())) };
+                write_raw_body(&er, w)?;
             }
             Ok(())
         }
-        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => Err(err(
-            "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
-             (a `render` handler's bytes)",
-        )),
     }
+}
+
+/// Write a streamed render's sub-packet, a list of handler results: each
+/// element's `-f raw` bytes in order (CLI-8). A `[U8]` or `Vector U8`
+/// sub-packet is its bytes.
+fn write_voidstar_raw_batches<W: io::Write>(
+    w: &mut W,
+    ptr: AbsPtr,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
+    if raw_shape(schema) == Some(RawShape::Bytes) {
+        return write_raw_body(unsafe { &ShmReader::new(ptr) }, w);
+    }
+    let elem = schema
+        .parameters
+        .first()
+        .filter(|e| schema.serial_type == SerialType::Array && raw_shape(e).is_some())
+        .ok_or_else(|| {
+            err("a streamed render requires a handler returning Str, [Str], Vector U8, or [Vector U8]")
+        })?;
+    let arr = unsafe { ShmReader::new(ptr) }.read_array(0);
+    if arr.size == 0 || arr.data == RELNULL {
+        return Ok(());
+    }
+    let data = shm::rel2abs(arr.data)?;
+    for i in 0..arr.size {
+        write_voidstar_raw(w, unsafe { data.add(i * elem.width) }, elem)?;
+    }
+    Ok(())
+}
+
+/// The shapes `-f raw` writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RawShape {
+    /// `Str`: one body.
+    Body,
+    /// `[U8]` / `Vector U8`: the array's bytes are the body.
+    Bytes,
+    /// `[Str]` / `[Vector U8]`: each element's body in turn.
+    Bodies,
+}
+
+/// The raw shape of a value of `schema`, or `None` when raw output cannot
+/// carry it.
+pub(crate) fn raw_shape(schema: &Schema) -> Option<RawShape> {
+    let is_bytes = |s: &Schema| {
+        s.serial_type == SerialType::Array && s.parameters.first().is_some_and(|e| e.serial_type == SerialType::Uint8)
+    };
+    if schema.serial_type == SerialType::String {
+        return Some(RawShape::Body);
+    }
+    if is_bytes(schema) {
+        return Some(RawShape::Bytes);
+    }
+    let elem = schema.parameters.first()?;
+    (schema.serial_type == SerialType::Array && (elem.serial_type == SerialType::String || is_bytes(elem)))
+        .then_some(RawShape::Bodies)
 }
 
 /// Verbatim `-f raw` output to stdout -- the output path for `render` terminal
@@ -1221,6 +1251,13 @@ fn write_voidstar_raw<W: io::Write>(
 pub fn print_voidstar_raw(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
     write_voidstar_raw(&mut w, ptr, schema)?;
+    map_io(w.flush())
+}
+
+/// A streamed render's sub-packet to stdout, as `write_voidstar_raw_batches`.
+pub fn print_voidstar_raw_batches(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
+    write_voidstar_raw_batches(&mut w, ptr, schema)?;
     map_io(w.flush())
 }
 
@@ -1240,12 +1277,7 @@ pub unsafe fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: boo
     if let SerialType::String = schema.serial_type {
         if !keep_null && is_top_null(ptr, schema) { return Ok(()); }
         let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
-        let r = unsafe { ShmReader::new(ptr) };
-        let arr = r.read_array(0);
-        if arr.size > 0 && arr.data != RELNULL {
-            let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
-            map_io(w.write_all(dr.read_str(0, arr.size).as_bytes()))?;
-        }
+        write_raw_body(unsafe { &ShmReader::new(ptr) }, &mut w)?;
         map_io(w.write_all(b"\n"))?;
         return map_io(w.flush());
     }
@@ -1433,12 +1465,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 // A tag with no constructor means the value and the schema
                 // disagree. Say so rather than inventing a name.
                 let name = schema.keys.get(tag).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "enum tag {} is out of range; the type has {} constructors ({})",
-                        tag,
-                        schema.size,
-                        schema.keys.join(", ")
-                    ))
+                    morloc_runtime_types::width::enum_tag_error(tag, &schema.keys)
                 })?;
                 map_io(write!(w, "\"{}\"", name))?
             }
@@ -1457,9 +1484,10 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                     map_io(write!(w, "{}", r.read_val::<i64>(8)))?;
                 } else {
                     let relptr = r.read_val::<shm::RelPtr>(8);
-                    let data_ptr = shm::rel2abs(relptr)?;
-                    let limbs: Vec<u64> = (0..size)
-                        .map(|i| unsafe { *((data_ptr as *const u64).add(i)) })
+                    let bytes = unsafe { crate::voidstar::int_limb_bytes(size, relptr)? };
+                    let limbs: Vec<u64> = bytes
+                        .chunks_exact(8)
+                        .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
                         .collect();
                     let s = crate::eval_ffi::limbs_to_decimal(&limbs);
                     map_io(w.write_all(s.as_bytes()))?;
@@ -1472,7 +1500,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                     map_io(w.write_all(b"\"\""))?;
                 } else {
                     let dr = unsafe { ShmReader::new(shm::rel2abs(arr.data)?) };
-                    json_escape(dr.read_str(0, arr.size), w)?;
+                    json_escape(dr.read_str(0, arr.size)?, w)?;
                 }
             }
             SerialType::IFile | SerialType::OStream | SerialType::IStream => {
@@ -1951,6 +1979,48 @@ mod tests {
         }
     }
 
+    /// A streamed render sub-packet writes each handler result's raw bytes
+    /// in order, nothing between them; a list of lists is no whole render.
+    #[test]
+    fn streamed_render_batches_concatenate_each_result() {
+        let _shm = setup();
+        let cases: &[(&str, &str, &[u8])] = &[
+            ("as", r#"["a\n","","bc"]"#, b"a\nbc"),
+            ("aas", r#"[["x","","y\n"],[],["z\n"]]"#, b"xy\nz\n"),
+            ("aau1", "[[104,105],[],[10]]", b"hi\n"),
+            ("aaau1", "[[[104],[],[105,10]],[],[[33]]]", b"hi\n!"),
+            ("au1", "[104,105]", b"hi"),
+            ("aas", "[]", b""),
+        ];
+        for (schema_str, json, want) in cases {
+            let schema = parse_schema(schema_str).unwrap();
+            let p = read_json_with_schema(json, &schema).unwrap();
+            let mut got = Vec::new();
+            write_voidstar_raw_batches(&mut got, p, &schema).unwrap();
+            assert_eq!(&got, want, "{schema_str} {json}");
+            crate::shm::shfree(p).unwrap();
+        }
+        for (schema_str, json) in [("ai4", "[1]"), ("aai4", "[[1]]"), ("s", r#""a""#), ("?s", r#""a""#), ("t2ss", r#"["a","b"]"#)] {
+            let schema = parse_schema(schema_str).unwrap();
+            let p = read_json_with_schema(json, &schema).unwrap();
+            assert!(write_voidstar_raw_batches(&mut Vec::new(), p, &schema).is_err(), "{schema_str}");
+            crate::shm::shfree(p).unwrap();
+        }
+        let schema = parse_schema("aas").unwrap();
+        let p = read_json_with_schema(r#"[["a"]]"#, &schema).unwrap();
+        assert!(voidstar_raw_to_bytes(p, &schema).is_err());
+        crate::shm::shfree(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_field_writes_nothing_past_its_record() {
+        let _shm = setup();
+        let s = parse_schema("am31uz1ss1vz").unwrap();
+        let txt = r#"[{"u":null,"s":"abc","v":null},{"u":null,"s":"defg","v":null}]"#;
+        let p = read_json_with_schema(txt, &s).unwrap();
+        assert_eq!(voidstar_to_json_string(p, &s).unwrap(), txt);
+        crate::shm::shfree(p).unwrap();
+    }
     #[test] fn test_int()     { let _shm = setup(); let s = parse_schema("i4").unwrap(); let p = read_json_with_schema("42", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "42"); }
     #[test] fn test_string()  { let _shm = setup(); let s = parse_schema("s").unwrap(); let p = read_json_with_schema("\"hello\"", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "\"hello\""); }
     #[test] fn test_bool()    { let _shm = setup(); let s = parse_schema("b").unwrap(); let p = read_json_with_schema("true", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "true"); }

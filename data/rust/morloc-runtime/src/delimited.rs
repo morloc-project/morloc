@@ -555,7 +555,7 @@ fn is_float_text(t: &str) -> bool {
     mant_ok && exp_ok
 }
 
-fn nonfinite(t: &str) -> Option<f64> {
+pub(crate) fn nonfinite(t: &str) -> Option<f64> {
     match t {
         "nan" => Some(f64::NAN),
         "inf" => Some(f64::INFINITY),

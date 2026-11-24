@@ -1,0 +1,60 @@
+-- A put whose step, or whose copy of init, does not return marks its
+-- slot failed (FOLD-4), however it ends, so the fold fails saying a step
+-- failed, even when the producer catches the put's error.
+--
+-- copyPy: Python's copy of init raises. copyCpp: C++'s copy of init
+-- throws (an allocation fails), which must not end the pool. conditionR:
+-- an R step signals a condition that is not an error, which the producer
+-- catches.
+
+module main (copyPy, copyCpp, conditionR)
+
+import root-cpp
+import root-py
+import root-r
+
+source Py from "impl.py"
+  ("uncopyable" as uncopyableP, "produce_caught" as caughtP, "add_sum" as addSumP, "merge" as mergeP, "show_n" as showNP)
+source Cpp from "impl.hpp"
+  ("big" as bigC, "produce_starved" as starvedC, "add_len" as addLenC, "merge_len" as mergeLenC, "show_len" as showLenC)
+source R from "impl.R"
+  ("produce_caught" as caughtR, "signal_step" as signalR, "merge" as mergeR, "show_n" as showNR)
+
+caughtP :: ([I64] -> <IO> ()) -> <IO> ()
+starvedC :: ([I64] -> <IO> ()) -> <IO> ()
+caughtR :: ([I64] -> <IO> ()) -> <IO> ()
+
+uncopyableP :: Int
+addSumP :: Int -> [I64] -> Int
+mergeP :: Int -> Int -> Int
+--' The sum, shown by Python
+showNP :: Int -> Str
+
+bigC :: [I64]
+addLenC :: [I64] -> [I64] -> [I64]
+mergeLenC :: [I64] -> [I64] -> [I64]
+--' The length, shown by C++
+showLenC :: [I64] -> Str
+
+signalR :: Int -> [I64] -> Int
+mergeR :: Int -> Int -> Int
+--' The sum, shown by R
+showNR :: Int -> Str
+
+zero :: Int
+zero = 0
+
+--' Fold from an init Python cannot copy
+--' @render --n=showNP @fold=addSumP @init=uncopyableP @combine=mergeP
+copyPy :: <IO> (Collect I64)
+copyPy = @collect caughtP
+
+--' Fold from an init C++ cannot copy
+--' @render --n=showLenC @fold=addLenC @init=bigC @combine=mergeLenC
+copyCpp :: <IO> (Collect I64)
+copyCpp = @collect starvedC
+
+--' Fold with an R step that signals a condition
+--' @render --n=showNR @fold=signalR @init=zero @combine=mergeR
+conditionR :: <IO> (Collect I64)
+conditionR = @collect caughtR

@@ -1,0 +1,17 @@
+-- A pointer field of a record with an erased length is still not a value.
+module main (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-dimrec.hpp" ("mkR", "useR")
+
+record R (n :: Nat) where
+  h :: Int
+record Cpp => R (n :: Nat) = "r_t"
+
+mkR :: Int -> R n
+useR :: R n -> Int
+
+bad :: Int -> Int
+bad k = useR (mkR k)

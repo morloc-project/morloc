@@ -105,10 +105,12 @@ change.
 
 In these files the only comments allowed are spec references:
 
-- morloc-runtime/src: stream.rs, write_behind.rs, handle_scan.rs, pins.rs,
-  cache.rs, shm.rs, shm_companion.rs, eval_arena.rs, cell.rs, crash.rs,
-  daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs, router_ffi.rs, arrow_shm.rs,
-  lifeline.rs, fork_policy.rs, panic_ffi.rs, custody.rs
+- morloc-runtime/src: stream.rs, stream/slot_lock.rs, stream/channel.rs,
+  write_behind.rs,
+  handle_scan.rs, pins.rs, cache.rs, shm.rs, shm_companion.rs, eval_arena.rs,
+  fold.rs, fork_side.rs, crash.rs, daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs,
+  router_ffi.rs, arrow_shm.rs, lifeline.rs, fork_policy.rs, panic_ffi.rs,
+  custody.rs, par_pool.rs, cpus.rs
 - morloc-runtime-types/src: recoverable_lock.rs, shm_lock.rs,
   owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs, panic.rs,
   wait_word.rs
@@ -127,6 +129,8 @@ new comments to it that assert behaviour.
 - avoid non-total functions when possible
 - an unused pattern binding becomes bare `_`, never `_oldname`; if it is truly
   unused, drop the name rather than leaving it visible
+- pair lists through `Morloc.Data.Zip`, not a plain `zip`: `zipSame` where the
+  lengths are equal by construction, `zipPrefix` where truncation is intended
 
 ## ChangeLog
 

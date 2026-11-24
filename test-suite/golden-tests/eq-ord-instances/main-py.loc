@@ -1,0 +1,70 @@
+-- Comparison goes through the instances of a value's parts: a list or a
+-- tuple of a type with its own Eq uses that Eq; a record with no instance
+-- has the derived Eq and Ord, alone or inside a list, tuple or optional;
+-- and a derived newtype's == and != agree.
+module main (listMod, pairMod, recEq, recNe, recLt, recLe, recGt, recGe, listRec, pairRec, optRec, zAgree)
+
+import root-py
+
+newtype Mod3 = Int deriving (Packable)
+
+instance Eq Mod3 where
+  (==) x y = unpack x % 3 == unpack y % 3
+  (!=) x y = not (unpack x % 3 == unpack y % 3)
+
+mod3 :: Int -> Mod3
+mod3 x = pack x
+
+listMod :: Int -> Int -> Bool
+listMod a b = [mod3 a, mod3 1] == [mod3 b, mod3 4]
+
+pairMod :: Int -> Int -> Bool
+pairMod a b = (mod3 a, 7) == (mod3 b, 7)
+
+record P where
+  a :: Int
+  b :: Str
+
+pId :: P -> P
+pId x = x
+
+mkP :: Int -> P
+mkP n = pId {a = n, b = "x"}
+
+recEq :: Int -> Int -> Bool
+recEq x y = mkP x == mkP y
+
+recNe :: Int -> Int -> Bool
+recNe x y = mkP x != mkP y
+
+recLt :: Int -> Int -> Bool
+recLt x y = mkP x < mkP y
+
+recLe :: Int -> Int -> Bool
+recLe x y = mkP x <= mkP y
+
+recGt :: Int -> Int -> Bool
+recGt x y = mkP x > mkP y
+
+recGe :: Int -> Int -> Bool
+recGe x y = mkP x >= mkP y
+
+listRec :: Int -> Int -> Bool
+listRec x y = [mkP x, mkP 2] < [mkP y, mkP 2]
+
+pairRec :: Int -> Int -> Bool
+pairRec x y = (mkP x, mkP 1) >= (mkP y, mkP 1)
+
+optP :: Int -> ?P
+optP n = mkP n
+
+optRec :: Int -> Int -> Bool
+optRec x y = optP x == optP y
+
+newtype Z = Real deriving (Packable, Eq, Ord)
+
+z :: Real -> Z
+z x = pack x
+
+zAgree :: Real -> Real -> Bool
+zAgree x y = (z x == z y) == not (z x != z y)

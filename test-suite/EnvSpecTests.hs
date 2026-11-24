@@ -22,8 +22,10 @@ import Morloc.CodeGenerator.EnvSpec
 import Morloc.Language (makeLang)
 import Morloc.Namespace.Prim (Defaultable (..))
 import Morloc.Namespace.State
-  ( PackageMeta (..)
+  ( MorlocDep (..)
+  , PackageMeta (..)
   , DepSpec (..)
+  , DepImport (..)
   , RegDep (..)
   , LocalDep (..)
   , DepSource (..)
@@ -67,7 +69,7 @@ decodeDep = eitherDecode
 decodeMeta :: BL.ByteString -> Either String PackageMeta
 decodeMeta = eitherDecode
 
--- A module declaring Python + Rust deps, a bare C++ link lib, and a module pin.
+-- A module declaring Python + Rust deps and a module pin.
 -- Python sources are explicit; the Rust crate lets its source default to crates.
 pmA :: PackageMeta
 pmA =
@@ -75,8 +77,7 @@ pmA =
     { packagePyDeps =
         Map.fromList [("numpy", dep ">=2,<3" SrcConda), ("requests", dep "*" SrcPypi)]
     , packageRustDeps = Map.fromList [("ndarray", noSrc "0.16")]
-    , packageDependencies = ["blas"]
-    , packageMorlocDependencies = [("tensor-cpp", "abc123")]
+    , packageMorlocDependencies = [MorlocDep "tensor-cpp" "std" Nothing "abc123"]
     }
 
 -- A second module declaring a C++ dep (source defaults to conda) and a Python
@@ -85,6 +86,7 @@ pmB :: PackageMeta
 pmB =
   pm
     { packageCppDeps = Map.fromList [("opencv", noSrc ">=4.8")]
+    , packageCppLibs = Map.fromList [("opencv", ["opencv_core"])]
     , packageCppVersion = 20
     , packageLangVersions = Map.fromList [("py", ">=3.10")]
     }
@@ -102,6 +104,29 @@ envSpecTests =
   testGroup
     "EnvSpec (envspec.json) foundation"
     [ testGroup
+        "GEN-7 dependency namespaces"
+        [ testCase "a cpp-deps entry with namespace and import parses" $
+            case decodeMeta "{\"cpp-deps\":{\"nlohmann_json\":{\"namespace\":\"nlohmann\",\"import\":\"nlohmann/json.hpp\"}}}" of
+              Right m -> Map.lookup "cpp" (packageDepImports m) @?= Just (Map.fromList [("nlohmann_json", DepImport (Just "nlohmann") ["nlohmann/json.hpp"])])
+              Left e -> assertFailure e
+        , testCase "a cpp-deps entry with neither key has no namespace" $
+            case decodeMeta "{\"cpp-deps\":{\"zlib\":\"*\"}}" of
+              Right m -> Map.lookup "cpp" (packageDepImports m) @?= Just Map.empty
+              Left e -> assertFailure e
+        , testCase "a cpp-deps entry with a namespace and no import is refused" $
+            assertBool "namespace alone" (isLeft (decodeMeta "{\"cpp-deps\":{\"x\":{\"namespace\":\"x\"}}}"))
+        , testCase "a cpp-deps entry with an empty import list is refused" $
+            assertBool "empty import" (isLeft (decodeMeta "{\"cpp-deps\":{\"x\":{\"namespace\":\"x\",\"import\":[]}}}"))
+        , testCase "a qualified namespace is refused" $
+            assertBool "qualified" (isLeft (decodeMeta "{\"cpp-deps\":{\"b\":{\"namespace\":\"boost::asio\",\"import\":\"boost/asio.hpp\"}}}"))
+        , testCase "a namespace the language or morloc owns is refused" $
+            assertBool "std" (isLeft (decodeMeta "{\"cpp-deps\":{\"s\":{\"namespace\":\"std\",\"import\":\"vector\"}}}"))
+        , testCase "a rust crate's namespace defaults to its name with - as _" $
+            case decodeMeta "{\"rust-deps\":{\"serde-json\":\"1\"}}" of
+              Right m -> Map.lookup "rust" (packageDepImports m) @?= Just (Map.fromList [("serde-json", DepImport (Just "serde_json") [])])
+              Left e -> assertFailure e
+        ]
+    , testGroup
         "FromJSON DepSpec (illegal states rejected at parse)"
         [ testCase "a bare version string parses with source defaulted" $
             case decodeDep "\">=2\"" of
@@ -218,10 +243,10 @@ envSpecTests =
                   , ("cpp", [ReqRegistry "opencv" ">=4.8" SrcConda Nothing])
                   , ("rust", [ReqRegistry "ndarray" "0.16" SrcCrates Nothing])
                   ]
-        , testCase "system libs from bare -l dependencies (provider unspecified)" $
-            esSystem spec @?= [SystemReq "blas" "unspecified"]
+        , testCase "a cpp-deps entry's link names are not system requirements" $
+            esSystem spec @?= []
         , testCase "module pins carried through as git hashes" $
-            esModules spec @?= [ModuleReq "tensor-cpp" (Just "abc123")]
+            esModules spec @?= [ModuleReq "tensor-cpp" (Just "abc123") Nothing]
         ]
     , testGroup
         "channel aggregation across the DAG"

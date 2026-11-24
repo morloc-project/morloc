@@ -1,0 +1,8 @@
+-- GEN-11: only the package declaring a record, or its <package>-py
+-- implementation module, may give it a Python class kind (M3).
+module main (f)
+import root-py
+import shell (MemInfo)
+record Py => MemInfo = dataclass
+f :: MemInfo -> MemInfo
+f x = idpy x

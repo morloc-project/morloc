@@ -1,0 +1,22 @@
+-- A generated Rust record nested in itself at other arguments cannot
+-- convert a field whose conversion depends on its argument (a function
+-- here): the nested instance holds another type there. It is refused with
+-- a message naming the field.
+module main (run)
+
+import root-rust
+import root-py
+
+record T a b where
+  val :: a
+  sub :: ?(T b a)
+
+source Rust from "fn.rs" ("inc", "apply")
+inc :: Int -> Int
+apply :: T (Int -> Int) Int -> Int
+
+source Py from "fn.py" ("same")
+same :: a -> a
+
+run :: Int -> Int
+run n = apply (same {val = inc, sub = {val = n, sub = Null}})

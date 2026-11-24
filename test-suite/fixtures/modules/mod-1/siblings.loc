@@ -1,0 +1,11 @@
+module helper (h)
+
+h :: Int
+h = 3
+
+module main (f)
+
+import .helper (h)
+
+f :: Int
+f = h

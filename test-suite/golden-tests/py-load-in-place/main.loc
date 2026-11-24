@@ -1,0 +1,75 @@
+-- A Python pool's @load of a list reads the file as its whole IFile slice,
+-- one sub-packet decoded at a time where it lies (SLOT-25). A list whose
+-- elements read as NumPy arrays or Arrow tables, or that Python reads as
+-- bytes, takes the whole-block load, since a view could outlive its piece.
+-- Covers an empty list, strings, records, nested lists, a compressed stream
+-- of several sub-packets, a NumPy element type and a bytes list. Each
+-- handler is a Python function, so the load runs in the Python pool.
+module main (emptyLoad, strLoad, recLoad, nestedLoad, streamLoad, vecLoad, bytesLoad)
+
+import root-py
+import root-cpp
+import vector
+import vector-py
+
+record P where
+  name :: Str
+  n :: Int
+
+newtype Bytes = [U8] deriving (Packable)
+type Py => Bytes = "bytes"
+
+source Py from "impl.py" ("show_any" as showAny)
+showAny :: a -> Str
+
+mkP :: Str -> Int -> P
+mkP a b = {name = a, n = b}
+
+emptyLoad :: Str -> <IO> Str
+emptyLoad path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @close o
+  Ok xs <- @load path :: <IO> (Try Str [Int])
+  showAny xs
+
+strLoad :: Str -> <IO> Str
+strLoad path = do
+  @save 0 path ["alpha", "", "gamma"]
+  Ok xs <- @load path :: <IO> (Try Str [Str])
+  showAny xs
+
+recLoad :: Str -> <IO> Str
+recLoad path = do
+  @save 0 path [mkP "a" 1, mkP "b" 2]
+  Ok xs <- @load path :: <IO> (Try Str [P])
+  showAny xs
+
+nestedLoad :: Str -> <IO> Str
+nestedLoad path = do
+  @save 0 path [[1, 2], [], [3]]
+  Ok xs <- @load path :: <IO> (Try Str [[Int]])
+  showAny xs
+
+streamLoad :: Str -> <IO> Str
+streamLoad path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write 3 o [1, 2, 3]
+  @flush o
+  @write 3 o [40, 50]
+  @flush o
+  @write 3 o [600]
+  @close o
+  Ok xs <- @load path :: <IO> (Try Str [Int])
+  showAny xs
+
+vecLoad :: Str -> <IO> Str
+vecLoad path = do
+  @save 0 path [([1, 2] :: Vector 2 U8), ([3, 4] :: Vector 2 U8)]
+  Ok xs <- @load path :: <IO> (Try Str [Vector 2 U8])
+  showAny xs
+
+bytesLoad :: Str -> <IO> Str
+bytesLoad path = do
+  @save 0 path (pack ([104, 105] :: [U8]) :: Bytes)
+  Ok xs <- @load path :: <IO> (Try Str Bytes)
+  showAny xs

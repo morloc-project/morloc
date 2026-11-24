@@ -86,8 +86,6 @@ record Container a where
   val :: a
   sub :: ?(Container a)
 
-record Py => Container a = "dict"
-
 containerLit :: Container Int
 containerLit = {val = 1, sub = {val = 2, sub = Null}}
 

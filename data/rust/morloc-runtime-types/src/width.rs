@@ -115,6 +115,17 @@ pub fn arm_tag<P: TryInto<u8>>(position: P, n_arms: usize) -> Option<u8> {
     position.try_into().ok().filter(|&t| usize::from(t) < n_arms)
 }
 
+/// The error for an enum tag no constructor claims, naming the type's
+/// constructors (WIRE-10).
+pub fn enum_tag_error(tag: impl std::fmt::Display, keys: &[String]) -> MorlocError {
+    MorlocError::Serialization(format!(
+        "enum tag {} is out of range; the type has {} constructors ({})",
+        tag,
+        keys.len(),
+        keys.join(", ")
+    ))
+}
+
 /// The `f32` nearest to `v`, or an error when a finite `v` lies beyond the
 /// `f32` range and would become infinite. Rounding is the nature of the
 /// narrower type; overflow is not.

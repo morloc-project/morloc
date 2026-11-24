@@ -1,0 +1,31 @@
+-- SLOT-16, FORK-12: a forked child of a producer puts into the stdout
+-- stream of a streamed @collect, and a child that returns from the producer
+-- exits there instead of running the rest of the bracket.
+module main (seq, returns, raises, viaValue)
+
+import root-rust
+
+source Rust from "f.rs" ("seq_p" as seqP, "returns_p" as returnsP, "raises_p" as raisesP)
+
+seqP :: ([I64] -> <IO> ()) -> <IO> ()
+returnsP :: ([I64] -> <IO> ()) -> <IO> ()
+raisesP :: ([I64] -> <IO> ()) -> <IO> ()
+
+--' Stream batches, one put by a child that exits
+seq :: <IO> (Collect I64)
+seq = @collect seqP
+
+--' Stream batches, one put by a child that returns
+returns :: <IO> (Collect I64)
+returns = @collect returnsP
+
+--' Stream batches, one put by a child that raises
+raises :: <IO> (Collect I64)
+raises = @collect raisesP
+
+apply :: (a -> b) -> a -> b
+apply f x = f x
+
+--' Stream batches, the producer reached through a function value
+viaValue :: <IO> (Collect I64)
+viaValue = @collect (apply returnsP)

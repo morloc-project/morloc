@@ -1,0 +1,52 @@
+== py seq
+[1,2,5,3]
+ exit 0
+== py returns
+[1,5,3]
+ exit 0
+== py raises
+[1,5,3]
+ exit 0
+== py viaValue
+[1,5,3]
+ exit 0
+== r seq
+[1,2,5,3]
+ exit 0
+== r returns
+[1,5,3]
+ exit 0
+== r raises
+[1,5,3]
+ exit 0
+== r viaValue
+[1,5,3]
+ exit 0
+== cpp seq
+[1,2,5,3]
+ exit 0
+== cpp returns
+[1,5,3]
+ exit 0
+== cpp raises
+[1,5,3]
+ exit 0
+== cpp viaValue
+[1,5,3]
+ exit 0
+== rs seq
+[1,2,5,3]
+ exit 0
+== rs returns
+[1,5,3]
+ exit 0
+== rs raises
+[1,5,3]
+ exit 0
+== rs viaValue
+[1,5,3]
+ exit 0
+== py pool
+1,2,3,4
+== r pool
+1,2,3,4

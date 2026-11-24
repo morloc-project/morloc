@@ -35,6 +35,9 @@ pub(crate) struct ParsedStreamFile {
     /// DATA_PACKET files (which inherently have no footer concept; see
     /// `is_data_packet` for that signal).
     pub(crate) final_footer: bool,
+    /// A footer is present but corrupt, or a final footer's index fails the
+    /// checks made at open (SLOT-30); the file was read by forward scan.
+    pub(crate) footer_damaged: bool,
     /// True iff the file is a single DATA_PACKET (the `@save` shape),
     /// false for STREAM_PACKET. DATA-packet files are self-contained
     /// and inherently complete: they have no header / footer concept,
@@ -47,6 +50,22 @@ pub(crate) struct ParsedStreamFile {
     pub(crate) body_start: u64,
     /// End of the last complete sub-packet: where a reader stops.
     pub(crate) data_end: u64,
+    /// The status of a final footer (`FOOTER_STATUS_*`); None without one.
+    pub(crate) footer_status: Option<u8>,
+}
+
+impl ParsedStreamFile {
+    /// SLOT-29: a stream file whose final footer says its writer failed is
+    /// not read.
+    pub(crate) fn refuse_failed(&self, path: &str) -> Result<(), MorlocError> {
+        if self.footer_status != Some(morloc_runtime_types::packet::FOOTER_STATUS_FAILED) {
+            return Ok(());
+        }
+        Err(MorlocError::Other(format!(
+            "stream file '{path}' is not read: its writer failed (the final footer says FAILED). \
+             `morloc-nexus file --repair {path}` keeps its complete batches and marks it repaired"
+        )))
+    }
 }
 
 /// Parse a mmap'd stream or data packet file into a `ParsedStreamFile`.
@@ -69,6 +88,8 @@ pub(crate) fn parse_stream_file(
 
     let is_data_packet = outer_header.is_data();
     let mut footer_start: Option<u64> = None;
+    let mut footer_status: Option<u8> = None;
+    let mut footer_damaged = false;
     let mut scanned_end: Option<u64> = None;
     let (schema_str, subpacket_entries, element_count, final_footer, body_start):
         (String, Vec<morloc_runtime_types::packet::SubpacketEntry>, u64, bool, u64) = if is_data_packet {
@@ -96,13 +117,25 @@ pub(crate) fn parse_stream_file(
                 }
             }
         }
-        // IStream walks forward from body_start without needing an
-        // index, so an empty subpacket_entries on temp-footer files is
-        // fine here; IFile's open path enforces final_footer separately.
+        // IStream walks forward from body_start without an index; IFile's
+        // open path refuses a file without a final footer.
+        let footer = match try_read_footer(mmap_ptr, mmap_size) {
+            Ok(Some(f)) if f.final_footer => morloc_runtime_types::packet::check_subpacket_index(
+                &f.subpacket_entries,
+                body_start,
+                f.footer_start,
+                f.element_count,
+                |off| read_subpacket_size(mmap_ptr, mmap_size, off),
+            )
+            .map(|()| Some(f)),
+            other => other,
+        };
+        footer_damaged = footer.is_err();
         let (subpacket_entries, element_count, final_footer) =
-            match try_read_footer(mmap_ptr, mmap_size) {
+            match footer {
                 Ok(Some(parsed)) => {
                     footer_start = Some(parsed.footer_start);
+                    footer_status = parsed.final_footer.then_some(parsed.footer_status);
                     (
                     parsed.subpacket_entries,
                     parsed.element_count,
@@ -110,10 +143,8 @@ pub(crate) fn parse_stream_file(
                     )
                 }
                 Ok(None) | Err(_) => {
-                    // Writer crashed before any footer. Forward-scan
-                    // recovers offsets only; the file will resolve as
-                    // IStream (IFile open refuses on !final_footer) so
-                    // per-entry counts are never read.
+                    // No footer, or a corrupt one: scanned offsets only, so
+                    // the file reads as an IStream.
                     let scanned = forward_scan_subpackets(mmap_ptr, mmap_size, body_start)?;
                     scanned_end = Some(body_start + scanned.bytes_scanned);
                     let entries = scanned.subpacket_offsets.into_iter().map(|offset|
@@ -163,9 +194,11 @@ pub(crate) fn parse_stream_file(
         subpacket_entries,
         element_count,
         final_footer,
+        footer_damaged,
         is_data_packet,
         body_start,
         data_end,
+        footer_status,
     })
 }
 
@@ -232,14 +265,13 @@ pub(crate) fn mmap_file_readonly(path: &str) -> Result<(AbsPtr, u64), MorlocErro
 
 /// 'mmap_file_readonly', also returning the open file.
 pub(crate) fn mmap_file_readonly_keep(path: &str) -> Result<(std::fs::File, AbsPtr, u64), MorlocError> {
+    let named = |e: std::io::Error| MorlocError::Other(format!("cannot open '{}': {}", path, e));
     let f = OpenOptions::new()
         .read(true)
         .open(Path::new(path))
-        .map_err(|e| MorlocError::Io(e))?;
+        .map_err(named)?;
     let fd = f.as_raw_fd();
-    let size = f.metadata()
-        .map_err(|e| MorlocError::Io(e))?
-        .len();
+    let size = f.metadata().map_err(named)?.len();
     if size == 0 {
         return Err(MorlocError::Packet(format!(
             "file '{}' is empty (cannot be a stream packet)", path
@@ -498,10 +530,6 @@ pub(crate) struct ParsedFooter {
     pub(crate) final_footer: bool,
     /// Status byte from `METADATA_TYPE_FOOTER_STATUS` if present, or
     /// `FOOTER_STATUS_CLOSED` when the block is absent (legacy footer).
-    /// Parsed here so downstream tooling (`morloc-nexus file`, a
-    /// future `@fstatus` intrinsic) can surface it without re-reading
-    /// the footer.
-    #[allow(dead_code)]
     pub(crate) footer_status: u8,
 }
 
@@ -534,11 +562,6 @@ pub(crate) fn try_read_footer(
         .ok_or_else(|| MorlocError::Packet(
             "footer length tail is past file start".into(),
         ))?;
-    if footer_start + 32 > size {
-        return Err(MorlocError::Packet(
-            "footer header extends past file end".into(),
-        ));
-    }
     // SAFETY: footer_start + footer_len + STREAM_TAIL_SIZE <= size.
     let footer_slice = unsafe {
         std::slice::from_raw_parts(
@@ -546,13 +569,9 @@ pub(crate) fn try_read_footer(
             footer_len as usize,
         )
     };
-    let footer_hdr = PacketHeader::from_bytes(
-        footer_slice[..32].try_into().unwrap(),
-    )?;
+    let footer_hdr = PacketHeader::from_prefix(footer_slice)
+        .map_err(|e| MorlocError::Packet(format!("stream footer: {e}")))?;
     if !footer_hdr.is_footer() {
-        // Tail-magic matched but the packet header isn't a footer; treat
-        // as no footer (defensive: tail magic could collide with random
-        // data on a truncated write).
         return Ok(None);
     }
 
@@ -684,25 +703,83 @@ pub(crate) fn read_subpacket_size(
         .ok_or_else(|| MorlocError::Packet("sub-packet runs past EOF".into()))
 }
 
-/// The sub-packet index and element count of a stream with no final
-/// footer, from its complete sub-packets up to `data_end`.
-pub(crate) fn index_unclosed_stream(
+/// The index of a stream, read from its sub-packets.
+pub(crate) struct WalkedIndex {
+    pub(crate) entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
+    pub(crate) element_count: u64,
+    /// Where the last complete sub-packet ends.
+    pub(crate) end: u64,
+    /// The file has a final footer and its index and count equal these.
+    pub(crate) footer_agrees: bool,
+}
+
+/// Walk the complete sub-packets of a parsed stream, up to its footer when
+/// it has a final one and otherwise to the end of its data, counting each
+/// sub-packet's elements, and compare a final footer's index with the walk.
+/// The footer's index is the writer's claim; the walk is what the file holds.
+pub(crate) fn walked_index(
+    path: &str,
+    parsed: &ParsedStreamFile,
+    mmap_ptr: AbsPtr,
+    mmap_size: u64,
+) -> Result<WalkedIndex, MorlocError> {
+    if parsed.is_data_packet {
+        return Ok(WalkedIndex {
+            entries: parsed.subpacket_entries.clone(),
+            element_count: parsed.element_count,
+            end: parsed.data_end,
+            footer_agrees: false,
+        });
+    }
+    let (entries, element_count, end) =
+        walk_subpackets(mmap_ptr, mmap_size, parsed.body_start, parsed.data_end)
+            .map_err(|e| MorlocError::Packet(format!("file '{path}': {e}")))?;
+    let footer_agrees = parsed.final_footer
+        && end == parsed.data_end
+        && element_count == parsed.element_count
+        && entries == parsed.subpacket_entries;
+    Ok(WalkedIndex { entries, element_count, end, footer_agrees })
+}
+
+/// `walked_index` for a reader that trusts the index: a final footer that
+/// disagrees with the sub-packets is a corrupt file.
+pub(crate) fn verified_index(
+    path: &str,
+    parsed: &ParsedStreamFile,
+    mmap_ptr: AbsPtr,
+    mmap_size: u64,
+) -> Result<WalkedIndex, MorlocError> {
+    let w = walked_index(path, parsed, mmap_ptr, mmap_size)?;
+    if parsed.footer_damaged || (parsed.final_footer && !w.footer_agrees) {
+        return Err(MorlocError::Packet(format!(
+            "file '{path}' has a corrupt sub-packet index: its footer does not match its \
+             sub-packets. Open it as IStream to drain forward."
+        )));
+    }
+    Ok(w)
+}
+
+/// The complete sub-packets in `[body_start, data_end)` with their element
+/// counts, and where the last of them ends.
+fn walk_subpackets(
     mmap_ptr: AbsPtr,
     mmap_size: u64,
     body_start: u64,
     data_end: u64,
-) -> Result<(Vec<morloc_runtime_types::packet::SubpacketEntry>, u64), MorlocError> {
-    let scan = forward_scan_subpackets(mmap_ptr, data_end.min(mmap_size), body_start)?;
+) -> Result<(Vec<morloc_runtime_types::packet::SubpacketEntry>, u64, u64), MorlocError> {
+    let data_end = data_end.min(mmap_size);
+    let scan = forward_scan_subpackets(mmap_ptr, data_end, body_start)?;
     // SAFETY: the mapping covers mmap_size bytes; reads stop at data_end.
-    let file = unsafe { std::slice::from_raw_parts(mmap_ptr as *const u8, data_end.min(mmap_size) as usize) };
+    let file = unsafe { std::slice::from_raw_parts(mmap_ptr as *const u8, data_end as usize) };
     let mut total = 0u64;
     let mut entries = Vec::with_capacity(scan.subpacket_offsets.len());
     for offset in scan.subpacket_offsets {
         let elem_count = morloc_runtime_types::compression::subpacket_elem_count(file, offset)?;
-        total += elem_count;
+        total = total.checked_add(elem_count)
+            .ok_or_else(|| MorlocError::Packet("the sub-packets' element counts overflow".into()))?;
         entries.push(morloc_runtime_types::packet::SubpacketEntry { offset, elem_count });
     }
-    Ok((entries, total))
+    Ok((entries, total, body_start + scan.bytes_scanned))
 }
 
 /// Push a sub-packet offset into the diag's tail-window. The window is
@@ -1064,5 +1141,22 @@ pub(crate) fn sendfile_range(
             remaining = remaining.saturating_sub(got as u64);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod footer_bounds_tests {
+    use super::*;
+    use morloc_runtime_types::packet::encode_stream_tail;
+
+    /// A tail naming a footer shorter than a packet header is a corrupt file.
+    #[test]
+    fn a_footer_shorter_than_a_header_is_refused() {
+        for footer_len in [1u32, 24, 31] {
+            let mut file = vec![0u8; 40 + footer_len as usize];
+            file.extend_from_slice(&encode_stream_tail(footer_len));
+            let r = try_read_footer(file.as_mut_ptr(), file.len() as u64);
+            assert!(r.is_err(), "footer length {footer_len}: {:?}", r.map(|f| f.is_some()));
+        }
     }
 }

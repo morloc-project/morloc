@@ -1,6 +1,6 @@
 [package]
 name = "morloc-runtime"
-version = "0.112.0"
+version = "0.113.0"
 edition = "2021"
 description = "Morloc runtime library: shared memory, serialization, IPC, packet protocol"
 # Version is intentionally synchronized with the morloc compiler version
@@ -32,7 +32,6 @@ rmp = "0.8"
 base64 = "0.22"
 ryu = "1"
 twox-hash = { workspace = true }
-nix = { workspace = true }
 thiserror = { workspace = true }
 arrow-array = { version = "58", features = ["ffi"] }
 arrow-buffer = "58"
@@ -47,11 +46,8 @@ bytes = "1"
 chrono = "0.4"
 anstream = "1"
 
-[build-dependencies]
-cbindgen = "0.28"
-# cc crate no longer needed -- all C files ported to Rust
-
 [dev-dependencies]
+morloc-runtime-types = { path = "../morloc-runtime-types", features = ["test-hooks"] }
 # Generates prototypes the C-header agreement test compiles against morloc.h.
 cbindgen = "0.28"
 # Parse the workspace's sources for the process-wide state registry test.

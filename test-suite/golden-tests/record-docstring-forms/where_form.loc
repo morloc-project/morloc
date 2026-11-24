@@ -17,8 +17,6 @@ record Config where
   a :: Int
   b :: Str
 
-record Py => Config = "dict"
-
 --' Take a config
 f :: Config -> Int
 f _ = 1

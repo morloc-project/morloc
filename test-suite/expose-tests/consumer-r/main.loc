@@ -1,6 +1,6 @@
 module main (result)
 
-import morloc-test-expose-r
+import exposetest/morloc-test-expose-r
 import root-r
 
 source R from "src.R" ("compute")

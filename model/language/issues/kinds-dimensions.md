@@ -15,19 +15,63 @@
   from_voidstar on the payload), R (rmorloc.c) and Rust (rustmorloc
   lib.rs, MorlocSpace::payload). A value passed by reference is not walked
   either.
-- [read, 2026-10-31] A debug build's `MORLOC_CODE_CHECKS=1`
-  (data/rust/morloc-runtime/src/origin.rs) is inherited by any morloc
-  program a sourced function starts, which then runs code-level checks
-  although it was built for release. Cost only; nothing goes unchecked.
+- [speculative, 2026-11-14] A release nexus started by a sourced function of
+  a debug build inherits `MORLOC_CODE_CHECKS=1`. It clears the variable for
+  its pools (morloc-nexus/src/main.rs:476-480), but if its own runtime
+  config is loaded before that line (morloc-runtime/src/packet.rs:108-119,
+  read once), the nexus itself runs code-level checks. Cost only; nothing
+  goes unchecked.
 - [speculative, 2026-10-31] An `@unpack` argument is built by the nexus as
   the parent command loads it (morloc-nexus/src/dispatch.rs, the Embed
   arm), checked against the parent's schema; the entry decodes it as a
   value the program built. If the entry's schema could differ from the
   parent's, its fixed lengths would never be checked. Not reproduced.
+- [read, 2026-11-05] Open ruling, DIM-10: a length an instance head
+  introduces (`pack :: [a] -> f a` at `instance Pack (Vector n)`) is the
+  caller's: it is solved at the use, and a morloc instance body must hold
+  for every n (a probe was refused), so a sourced instance claims any length
+  the caller asks for. A class signature's own lengths are observed as a
+  function's. Ruling needed: head lengths are the caller's (as now) or the
+  method's (observed at each use, which instance resolution would have to
+  report).
+- [read, 2026-11-05] Open ruling, DIM-10: polarity stops at a type head, so
+  `newtype P (n :: Nat) = V n -> Int` makes `run :: Int -> P n` the
+  function's while `run :: Int -> (V n -> Int)` is the caller's. Options:
+  each parameter's variance from its declaration (NEWT-9), or heads are
+  opaque, stated and tested.
+- [read, 2026-11-05] Open ruling, DIM-10: one length per body for a callback
+  argument the function chooses, so `apply f = f v3 + f v4` with `apply ::
+  (V n -> Int) -> Int` is refused though every legal callback takes both.
+  Incomplete, not unsound. The same holds for branches: `g k = ? isZero k =
+  mk k : mk 0` (and its recursive form `... : g 0`) is refused, as each
+  branch chooses its own length and the body has one.
+- [read, 2026-11-05] DIM-10: a recursive call's label arguments are never
+  read (Frontend/Typecheck.hs resolveNatLabels matches only VarS), so its
+  labelled lengths are observed even for a literal argument: `g k = ... g
+  0` with `g :: k@Int -> V k` cannot use that its call returns `V 0`.
+  Incomplete, not unsound.
+- [read, 2026-11-05] DIM-10: the call side does not assume the callee's
+  domain for an observed length (Frontend/Typecheck.hs adds it for the body
+  only), so a correct caller of a function choosing `V (n + 1)` may be refused.
+- [reproduced, 2026-11-05] A caller refused under DIM-10 (`apply g3`, `dot
+  (mk 1) v3`) is told "The body does not hold for every value of the Nat and
+  Int variables of its signature (POLY-7)", naming a `?n` variable; the
+  error is about the call, not a signature.
 - [read, 2026-10-31] Gap in DIM-10: a Table's row count is not among the
   lengths a command's input gives (Frontend/Typecheck.hs `runTimeVars`
   matches only Vector), so the main pass of an unsigned export may solve
   it rather than hold it for every value.
+- [reproduced, 2026-11-05] Violates POLY-3 (a label binds the argument's
+  value): a signed morloc wrapper whose result depends on a Str label
+  cannot be specialized. `colOf :: f@Str -> Table n r -> Vector n
+  (ProjectField r f); colOf f t = getCol f t`, used as `colOf "qual" t`,
+  fails at the definition: "Cannot compare types {chrom=Str, pos=Int,
+  qual=Real}.f@s4 and Real". The definition is checked at the use's type
+  (Frontend/Specialize.hs elaborate, typecheckRootAt), which has lost
+  that `f` is "qual"; an Int label survives because its length equation
+  can be solved back, a field name cannot be recovered from a field type.
+  Candidate: carry literal label arguments in the specialization key.
+  Reproduction: /work/plans/error-clusters/repro/str-label-wrapper.
 - [read, 2026-10-31] Gap in DIM-10: a `f@Str` or `l@[Str]` label whose
   argument is not a literal leaves its variable to the Str and Rec solvers
   (`getCol name t`), which may solve it; only Int labels are observed.
@@ -86,6 +130,13 @@
   type error (Frontend/Typecheck.hs checkRigidNats, the DIM-6 check after
   inference) where DIM-7 makes it a run-time check with a warning. Waits
   on the DIM-3 run-time checks.
+- [reproduced, 2026-11-05] Violates DIM-7: NatDecide returns Holds with a
+  witness that does not satisfy the condition. QuickCheck property
+  `prop_int_holds_sound` (NatDecideTests.hs, "with Int variables, a holds
+  verdict is satisfied") failed once after 33 tests on
+  `0 - (2 + 1) + (b*i + (j + i)) = (i*b + a*c) + ((c + j) + (b - 1))` over
+  Nat a, b, c with Int i, j; witness a = b = c = 3. Not yet rerun with the
+  seed; the property passes on most runs, so the suite is intermittently red.
 - [read] DIM-7 has no complete procedure for linear arithmetic: a group
   of linear conditions over several inferred variables, beyond one
   equation with lower bounds, is decided by a bounded search, so a
@@ -107,10 +158,10 @@
 - [read] Gap in POLY-4: an annotation in a body (`(x :: a)`) still means
   the enclosing signature's variable, while a `where` signature's `a` is
   its own.
-- [read] Violates POLY-7 and POLY-4. Only a signed top-level definition of the root
-  module is checked against its signature (Frontend/Treeify.hs
-  Validation); a `where` signature inside an unsigned definition, or in an
-  imported module, never has its Nat and Int variables held rigid, so
+- [reproduced, 2026-11-14] Violates POLY-7 and POLY-4. A `where` signature
+  inside an unsigned definition never has its Nat and Int variables held
+  rigid (only signed definitions are checked; Frontend/Treeify.hs
+  Validation), so
   `f x = g x where g :: Vector k Int -> Int; g y = h y` with `h ::
   Vector (m + 1) Int -> Int` is accepted.
 - [read] The POLY-7 check locates a refutation at the innermost condition
@@ -157,3 +208,15 @@
   types a slice of `Vector n a` (COLL-3 covers `[T]`). Repro: /work/plans/model-audit-2026-10-21/repro/C/dim/sl.loc,
   conv.loc.
 
+
+- [read, 2026-11-20] DIM-10: the typechecker joins the lengths of copies of
+  a parameterless where-binding by a rule that restates the one
+  Frontend/Share.hs uses to bind those copies once (Typecheck.hs
+  `shareWhereLengths`), meant to be stricter but not checked against it. Share should confirm that each joined pair ended up under one binder
+  and report a compiler bug otherwise, or both should call one predicate.
+- [read, 2026-11-20] DIM-10: some copies of a where-binding that Share binds
+  once are not joined, so a correct program using the value twice is
+  refused: uses inside an `if` arm (even with another use in the
+  condition), under a pattern or an intrinsic, of a binding whose type
+  holds a type variable, and the Int labels a call chooses (only Nat
+  lengths are joined). Incomplete, not unsound.

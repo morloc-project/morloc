@@ -17,7 +17,6 @@ effect IO
 
 data Box a = Empty | Full a
 
-record Py => R = "dict"
 record R where
   tag :: Int
   b :: Box Int

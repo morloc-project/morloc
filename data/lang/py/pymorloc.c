@@ -2,7 +2,9 @@
 #include "morloc.h"
 #include "Python.h"
 #include <errno.h>
+#include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -235,8 +237,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
     }
 
 // PyTRY with the GIL released around the call, for a libmorloc call that
-// may wait on another worker (a channel read or write). `out` receives the
-// result.
+// may wait on another worker (a channel read or write) or on a stream's
+// slot lock (SLOT-37). `out` receives the result.
 #define PyTRY_NOGIL(out, fun, ...) \
     Py_BEGIN_ALLOW_THREADS \
     out = fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
@@ -546,26 +548,6 @@ static bool bytes_fit_elements(const Schema* elem) {
             || elem->type == MORLOC_BOOL || elem->type == MORLOC_ENUM);
 }
 
-// Resolve a constructor name against a variant schema's key list, yielding
-// its tag. The tag is the constructor's position in the declaration, which
-// is what the wire carries; the keys arrive in that same order.
-static ssize_t variant_tag_of(const Schema* schema, PyObject* name) {
-    if (!PyUnicode_Check(name)) {
-        PyErr_SetString(PyExc_RuntimeError,
-            "a `data` value's first element must be its constructor name");
-        return -1;
-    }
-    const char* want = PyUnicode_AsUTF8(name);
-    if (!want) return -1;
-    for (size_t i = 0; i < schema->size; i++) {
-        if (schema->keys[i] && strcmp(schema->keys[i], want) == 0) {
-            return (ssize_t)i;
-        }
-    }
-    PyErr_Format(PyExc_RuntimeError, "'%s' is not a constructor of this type", want);
-    return -1;
-}
-
 // -- Marshalling walks ------------------------------------------------------
 //
 // A value is marshalled in three passes -- size, write, read -- and each is
@@ -593,7 +575,8 @@ typedef enum {
     PY_SLOT_TUPLE,  // PyTuple_SET_ITEM(parent, index, obj)
     PY_SLOT_LIST,   // PyList_SET_ITEM(parent, index, obj)
     PY_SLOT_DICT,   // PyDict_SetItemString(parent, key, obj)
-    PY_SLOT_NPY     // PyArray_SETITEM(parent, index, obj)
+    PY_SLOT_NPY,    // PyArray_SETITEM(parent, index, obj)
+    PY_SLOT_OFFSET  // the slot at byte offset `slot` of a dataclass instance
 } py_slot_kind_t;
 
 typedef struct {
@@ -613,6 +596,10 @@ typedef struct {
 typedef struct py_keyset {
     const Schema* schema;
     PyObject** keys;
+    PyTypeObject* cls;      // the record's generated class (GEN-11), or NULL for a dict
+    int kind;               // 0 dataclass, 1 pydantic
+    Py_ssize_t* offsets;    // dataclass: each field's slot offset, by field index
+    PyObject* given;        // pydantic: the frozenset of field names a model holds
 } py_keyset_t;
 
 typedef struct {
@@ -629,11 +616,26 @@ typedef struct {
     ssize_t total;          // size pass
     void** cursor;          // write pass
     void* end;              // write pass: the end of the block the size pass measured
-    struct py_keyset* keysets; // record key objects made by this walk
+    struct py_keyset** keysets; // record key objects made by this walk, each allocated alone
     size_t n_keysets;
     morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
     PyObject* keep;         // references the walk holds until it ends
+    // SLOT-36: in a stream's buffer, offsets are relative to `base` and
+    // parts aligned relative to `origin`; NULL for shared-memory relptrs.
+    char* base;
+    char* origin;
+    // SLOT-36: deferred child frames, for the layout in a stream's buffer.
+    py_frame_t* later;
+    size_t later_len;
+    size_t later_cap;
+    int in_step;
+    int deferring;
+    // The registered classes of the `data` schemas the walk has met
+    // (GEN-12), each looked up once per walk.
+    const Schema* data_schemas[32];
+    struct py_data* data_found[32];
+    size_t n_data;
 } py_walk_t;
 
 // True iff a back-reference occurs anywhere under `schema`.
@@ -667,15 +669,18 @@ static void py_walk_init(py_walk_t* w, const Schema* root) {
     w->env_base = recur_env_depth;
 }
 
+static void py_keyset_free(py_keyset_t* ks);
+
 static void py_walk_free(py_walk_t* w) {
     free(w->frames);
     w->frames = NULL;
+    free(w->later);
+    w->later = NULL;
+    w->later_len = 0;
+    w->later_cap = 0;
     Py_CLEAR(w->keep);
     for (size_t i = 0; i < w->n_keysets; i++) {
-        for (size_t k = 0; k < w->keysets[i].schema->size; k++) {
-            Py_XDECREF(w->keysets[i].keys[k]);
-        }
-        free(w->keysets[i].keys);
+        py_keyset_free(w->keysets[i]);
     }
     free(w->keysets);
     w->keysets = NULL;
@@ -683,41 +688,371 @@ static void py_walk_free(py_walk_t* w) {
     recur_env_depth = w->env_base;
 }
 
-// The key objects of a record schema, made once per walk rather than once
-// per record. NULL with a Python error set.
-static PyObject** py_record_keys(py_walk_t* w, const Schema* schema) {
-    for (size_t i = 0; i < w->n_keysets; i++) {
-        if (w->keysets[i].schema == schema) return w->keysets[i].keys;
+// Generated record classes (GEN-11), by schema hint: the hint of a record
+// of a class kind is the class's qualified name. Each entry is a tuple
+// (class, kind, slot offsets), kind 0 a frozen slotted dataclass whose
+// offsets map each field name to its slot, kind 1 a pydantic v2 model.
+static PyObject* py_class_registry = NULL;
+
+// The classes of each `data` type (GEN-12), by schema hint, the type's
+// qualified class name: an enumeration's members, or per constructor its
+// class and, for one with fields, each field's slot offset.
+typedef struct py_data {
+    int kind;               // 0 an enum.Enum, 1 a class per constructor
+    size_t n;
+    PyObject** items;       // members, or classes (fields) and instances (none)
+    PyTypeObject** types;   // each constructor's class
+    size_t* nfields;
+    Py_ssize_t** offsets;   // each field's slot offset, per constructor with fields
+} py_data_t;
+
+static PyObject* py_data_registry = NULL;
+
+// The registered classes of a `data` schema, or NULL with a Python error
+// set: every hint of a `data` type names a class the pool registered.
+static py_data_t* py_data_of(py_walk_t* w, const Schema* schema) {
+    for (size_t i = 0; i < w->n_data; i++) {
+        if (w->data_schemas[i] == schema) return w->data_found[i];
     }
-    py_keyset_t* grown = (py_keyset_t*)realloc(w->keysets, (w->n_keysets + 1) * sizeof(py_keyset_t));
-    if (grown == NULL) {
-        PyErr_NoMemory();
+    PyObject* cap = (schema->hint != NULL && py_data_registry != NULL)
+        ? PyDict_GetItemString(py_data_registry, schema->hint) : NULL;
+    if (cap == NULL) {
+        PyErr_Format(PyMorlocInternalError, "the `data` type %s has no registered class",
+                     schema->hint ? schema->hint : "(unnamed)");
         return NULL;
     }
-    w->keysets = grown;
-    PyObject** keys = (PyObject**)calloc(schema->size ? schema->size : 1, sizeof(PyObject*));
-    if (keys == NULL) {
-        PyErr_NoMemory();
+    py_data_t* d = (py_data_t*)PyCapsule_GetPointer(cap, NULL);
+    if (d == NULL) return NULL;
+    if (d->n != schema->size) {
+        PyErr_Format(PyMorlocInternalError, "the `data` type %s has %zu registered constructors, its schema %zu",
+                     schema->hint, d->n, schema->size);
         return NULL;
     }
-    w->keysets[w->n_keysets].schema = schema;
-    w->keysets[w->n_keysets].keys = keys;
-    w->n_keysets++;
-    for (size_t k = 0; k < schema->size; k++) {
-        keys[k] = PyUnicode_InternFromString(schema->keys[k]);
-        if (keys[k] == NULL) return NULL;
+    if (w->n_data < 32) {
+        w->data_schemas[w->n_data] = schema;
+        w->data_found[w->n_data] = d;
+        w->n_data++;
     }
-    return keys;
+    return d;
 }
 
-// A record field's value, or NULL with a Python error set when the dict
-// lacks the field.
-static PyObject* py_record_field(const Schema* schema, PyObject** keys, PyObject* dict, size_t i) {
-    PyObject* value = PyDict_GetItemWithError(dict, keys[i]);
-    if (value == NULL && !PyErr_Occurred()) {
-        PyErr_Format(PyExc_KeyError, "record field '%s' is missing", schema->keys[i]);
+// The tag of a `data` value: the position of its member, or of its
+// constructor's class, or -1 with a Python error set for any other value.
+static ssize_t py_data_tag(py_data_t* d, const Schema* schema, PyObject* obj) {
+    if (d->n > 16) {
+        // Many constructors: read the tag the member or class carries.
+        PyObject* t = d->kind == 0 ? PyObject_GetAttrString(obj, "_value_")
+                                   : PyObject_GetAttrString((PyObject*)Py_TYPE(obj), "_mlc_tag");
+        if (t != NULL) {
+            long tag = PyLong_Check(t) ? PyLong_AsLong(t) : -1;
+            Py_DECREF(t);
+            if (tag >= 0 && (size_t)tag < d->n
+                && (d->kind == 0 ? obj == d->items[tag] : Py_TYPE(obj) == d->types[tag])) {
+                return (ssize_t)tag;
+            }
+        }
+        PyErr_Clear();
+    } else {
+        for (size_t i = 0; i < d->n; i++) {
+            if (d->kind == 0 ? obj == d->items[i] : Py_TYPE(obj) == d->types[i]) return (ssize_t)i;
+        }
+    }
+    PyErr_Format(PyExc_TypeError, "Expected a value of the `data` type %s, but got %s",
+                 schema->hint ? schema->hint : "(unnamed)", Py_TYPE(obj)->tp_name);
+    return -1;
+}
+
+// A field of a `data` value's constructor, borrowed.
+static PyObject* py_data_field(py_data_t* d, size_t tag, PyObject* obj, size_t j) {
+    PyObject* value = *(PyObject**)((char*)obj + d->offsets[tag][j]);
+    if (value == NULL) {
+        PyErr_Format(PyExc_AttributeError, "field f%zu of a `data` value is unset", j);
     }
     return value;
+}
+
+static void py_data_free(py_data_t* d) {
+    if (d == NULL) return;
+    for (size_t i = 0; i < d->n; i++) {
+        if (d->items != NULL) Py_XDECREF(d->items[i]);
+        if (d->offsets != NULL) free(d->offsets[i]);
+    }
+    free(d->items);
+    free(d->types);
+    free(d->nfields);
+    free(d->offsets);
+    free(d);
+}
+
+static void py_data_capsule_free(PyObject* cap) {
+    py_data_free((py_data_t*)PyCapsule_GetPointer(cap, NULL));
+}
+
+static PyObject* pybinding__register_data(PyObject* self, PyObject* args) {
+    (void)self;
+    const char* hint;
+    int kind;
+    PyObject* items;
+    if (!PyArg_ParseTuple(args, "siO!", &hint, &kind, &PyTuple_Type, &items)) return NULL;
+    if (kind != 0 && kind != 1) {
+        PyErr_Format(PyExc_ValueError, "register_data: unknown kind %d", kind);
+        return NULL;
+    }
+    size_t n = (size_t)PyTuple_GET_SIZE(items);
+    py_data_t* d = (py_data_t*)calloc(1, sizeof(py_data_t));
+    if (d == NULL) return PyErr_NoMemory();
+    d->kind = kind;
+    d->n = n;
+    d->items = (PyObject**)calloc(n ? n : 1, sizeof(PyObject*));
+    d->types = (PyTypeObject**)calloc(n ? n : 1, sizeof(PyTypeObject*));
+    d->nfields = (size_t*)calloc(n ? n : 1, sizeof(size_t));
+    d->offsets = (Py_ssize_t**)calloc(n ? n : 1, sizeof(Py_ssize_t*));
+    if (!d->items || !d->types || !d->nfields || !d->offsets) {
+        py_data_free(d);
+        return PyErr_NoMemory();
+    }
+    for (size_t i = 0; i < n; i++) {
+        PyObject* item = PyTuple_GET_ITEM(items, (Py_ssize_t)i);
+        Py_INCREF(item);
+        d->items[i] = item;
+        if (kind == 1 && PyType_Check(item)) {
+            PyTypeObject* cls = (PyTypeObject*)item;
+            d->types[i] = cls;
+            size_t k = 0;
+            while (1) {
+                char name[32];
+                snprintf(name, sizeof name, "f%zu", k);
+                PyObject* descr = PyDict_GetItemString(cls->tp_dict, name);
+                if (descr == NULL) break;
+                if (!Py_IS_TYPE(descr, &PyMemberDescr_Type)) {
+                    PyErr_Format(PyExc_TypeError, "register_data: field %s of %s is not a slot", name, hint);
+                    py_data_free(d);
+                    return NULL;
+                }
+                k++;
+            }
+            d->nfields[i] = k;
+            d->offsets[i] = (Py_ssize_t*)calloc(k ? k : 1, sizeof(Py_ssize_t));
+            if (d->offsets[i] == NULL) {
+                py_data_free(d);
+                return PyErr_NoMemory();
+            }
+            for (size_t j = 0; j < k; j++) {
+                char name[32];
+                snprintf(name, sizeof name, "f%zu", j);
+                PyObject* descr = PyDict_GetItemString(cls->tp_dict, name);
+                d->offsets[i][j] = ((PyMemberDescrObject*)descr)->d_member->offset;
+            }
+        } else {
+            d->types[i] = Py_TYPE(item);
+        }
+    }
+    if (py_data_registry == NULL) {
+        py_data_registry = PyDict_New();
+        if (py_data_registry == NULL) {
+            py_data_free(d);
+            return NULL;
+        }
+    }
+    // The capsule owns the description, so registering a hint again frees
+    // the one it replaces.
+    PyObject* cap = PyCapsule_New(d, NULL, py_data_capsule_free);
+    if (cap == NULL) {
+        py_data_free(d);
+        return NULL;
+    }
+    int r = PyDict_SetItemString(py_data_registry, hint, cap);
+    Py_DECREF(cap);
+    if (r != 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+// A record schema's key objects and its generated class, if any, resolved
+// once per walk rather than once per record. NULL with a Python error set.
+static void py_keyset_free(py_keyset_t* ks) {
+    if (ks == NULL) return;
+    if (ks->keys != NULL) {
+        for (size_t k = 0; k < ks->schema->size; k++) Py_XDECREF(ks->keys[k]);
+    }
+    free(ks->keys);
+    free(ks->offsets);
+    Py_XDECREF(ks->given);
+    free(ks);
+}
+
+static py_keyset_t* py_record_set(py_walk_t* w, const Schema* schema) {
+    for (size_t i = 0; i < w->n_keysets; i++) {
+        if (w->keysets[i]->schema == schema) return w->keysets[i];
+    }
+    py_keyset_t* ks = (py_keyset_t*)calloc(1, sizeof(py_keyset_t));
+    if (ks == NULL) { PyErr_NoMemory(); return NULL; }
+    ks->schema = schema;
+    ks->keys = (PyObject**)calloc(schema->size ? schema->size : 1, sizeof(PyObject*));
+    if (ks->keys == NULL) { PyErr_NoMemory(); goto fail; }
+    for (size_t k = 0; k < schema->size; k++) {
+        ks->keys[k] = PyUnicode_InternFromString(schema->keys[k]);
+        if (ks->keys[k] == NULL) goto fail;
+    }
+    PyObject* entry = (schema->hint != NULL && py_class_registry != NULL)
+        ? PyDict_GetItemString(py_class_registry, schema->hint) : NULL;
+    // A hint in the generated namespace (lang.yaml's class prefix) names a
+    // class the pool registered (GEN-11); any other record is a dict.
+    if (entry == NULL && schema->hint != NULL && strncmp(schema->hint, "mlc_types.", 10) == 0) {
+        PyErr_Format(PyMorlocInternalError, "the record class %s is not registered", schema->hint);
+        goto fail;
+    }
+    if (entry != NULL) {
+        ks->cls = (PyTypeObject*)PyTuple_GET_ITEM(entry, 0);
+        ks->kind = (int)PyLong_AsLong(PyTuple_GET_ITEM(entry, 1));
+        if (ks->kind == 0) {
+            PyObject* offsets = PyTuple_GET_ITEM(entry, 2);
+            ks->offsets = (Py_ssize_t*)calloc(schema->size ? schema->size : 1, sizeof(Py_ssize_t));
+            if (ks->offsets == NULL) { PyErr_NoMemory(); goto fail; }
+            for (size_t k = 0; k < schema->size; k++) {
+                PyObject* off = PyDict_GetItemWithError(offsets, ks->keys[k]);
+                if (off == NULL) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_Format(PyExc_TypeError, "the class %s has no field '%s'", schema->hint, schema->keys[k]);
+                    }
+                    goto fail;
+                }
+                ks->offsets[k] = PyLong_AsSsize_t(off);
+            }
+        } else {
+            PyObject* names = PyTuple_New((Py_ssize_t)schema->size);
+            if (names == NULL) goto fail;
+            for (size_t k = 0; k < schema->size; k++) {
+                Py_INCREF(ks->keys[k]);
+                PyTuple_SET_ITEM(names, (Py_ssize_t)k, ks->keys[k]);
+            }
+            ks->given = PyFrozenSet_New(names);
+            Py_DECREF(names);
+            if (ks->given == NULL) goto fail;
+        }
+    }
+    {
+        py_keyset_t** grown = (py_keyset_t**)realloc(w->keysets, (w->n_keysets + 1) * sizeof(py_keyset_t*));
+        if (grown == NULL) { PyErr_NoMemory(); goto fail; }
+        w->keysets = grown;
+        w->keysets[w->n_keysets++] = ks;
+    }
+    return ks;
+fail:
+    py_keyset_free(ks);
+    return NULL;
+}
+
+static PyObject* pybinding__register_class(PyObject* self, PyObject* args) {
+    (void)self;
+    const char* hint;
+    PyObject* cls;
+    int kind;
+    if (!PyArg_ParseTuple(args, "sOi", &hint, &cls, &kind)) return NULL;
+    if (!PyType_Check(cls)) {
+        PyErr_Format(PyExc_TypeError, "register_class: %s is not a class", hint);
+        return NULL;
+    }
+    PyObject* offsets = PyDict_New();
+    if (offsets == NULL) return NULL;
+    if (kind == 0) {
+        PyObject* fields = PyObject_GetAttrString(cls, "__dataclass_fields__");
+        if (fields == NULL || !PyDict_Check(fields)) {
+            Py_XDECREF(fields);
+            Py_DECREF(offsets);
+            PyErr_Format(PyExc_TypeError, "register_class: %s is not a dataclass", hint);
+            return NULL;
+        }
+        Py_ssize_t pos = 0;
+        PyObject* name;
+        PyObject* field;
+        while (PyDict_Next(fields, &pos, &name, &field)) {
+            PyObject* descr = PyDict_GetItemWithError(((PyTypeObject*)cls)->tp_dict, name);
+            if (descr == NULL || !Py_IS_TYPE(descr, &PyMemberDescr_Type)) {
+                Py_DECREF(fields);
+                Py_DECREF(offsets);
+                if (!PyErr_Occurred()) {
+                    PyErr_Format(PyExc_TypeError, "register_class: field %S of %s is not a slot", name, hint);
+                }
+                return NULL;
+            }
+            PyObject* off = PyLong_FromSsize_t(((PyMemberDescrObject*)descr)->d_member->offset);
+            if (off == NULL || PyDict_SetItem(offsets, name, off) != 0) {
+                Py_XDECREF(off);
+                Py_DECREF(fields);
+                Py_DECREF(offsets);
+                return NULL;
+            }
+            Py_DECREF(off);
+        }
+        Py_DECREF(fields);
+    } else if (kind == 1) {
+        PyObject* pydantic = PyImport_ImportModule("pydantic");
+        if (pydantic == NULL) { Py_DECREF(offsets); return NULL; }
+        PyObject* version = PyObject_GetAttrString(pydantic, "VERSION");
+        Py_DECREF(pydantic);
+        if (version == NULL) { Py_DECREF(offsets); return NULL; }
+        const char* v = PyUnicode_AsUTF8(version);
+        int major = v ? atoi(v) : 0;
+        Py_DECREF(version);
+        if (major < 2) {
+            Py_DECREF(offsets);
+            PyErr_Format(PyExc_RuntimeError, "register_class: %s needs pydantic 2 or later", hint);
+            return NULL;
+        }
+    } else {
+        Py_DECREF(offsets);
+        PyErr_Format(PyExc_ValueError, "register_class: unknown class kind %d", kind);
+        return NULL;
+    }
+    if (py_class_registry == NULL) {
+        py_class_registry = PyDict_New();
+        if (py_class_registry == NULL) { Py_DECREF(offsets); return NULL; }
+    }
+    PyObject* entry = Py_BuildValue("(OiN)", cls, kind, offsets);
+    if (entry == NULL) return NULL;
+    int r = PyDict_SetItemString(py_class_registry, hint, entry);
+    Py_DECREF(entry);
+    if (r != 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+// A record field's value, borrowed, from a dict or an instance of the
+// record's generated class (GEN-11), or NULL with a Python error set when
+// the field is missing.
+static PyObject* py_set_field(py_keyset_t* ks, PyObject* obj, size_t i) {
+    PyObject* value = NULL;
+    if (ks->cls == NULL) {
+        value = PyDict_GetItemWithError(obj, ks->keys[i]);
+    } else if (ks->kind == 0) {
+        value = *(PyObject**)((char*)obj + ks->offsets[i]);
+    } else {
+        PyObject** dictptr = _PyObject_GetDictPtr(obj);
+        if (dictptr != NULL && *dictptr != NULL) {
+            value = PyDict_GetItemWithError(*dictptr, ks->keys[i]);
+        }
+    }
+    if (value == NULL && !PyErr_Occurred()) {
+        PyErr_Format(PyExc_KeyError, "record field '%s' is missing", ks->schema->keys[i]);
+    }
+    return value;
+}
+
+// The record value a schema node expects: an instance of exactly its
+// generated class, or a dict. Returns 0, or -1 with a Python error set.
+static int py_check_record(py_keyset_t* ks, const Schema* schema, PyObject* obj) {
+    if (ks->cls != NULL) {
+        if (Py_TYPE(obj) != ks->cls) {
+            PyErr_Format(PyExc_TypeError, "Expected an instance of %s for a record, but got %s",
+                         schema->hint, Py_TYPE(obj)->tp_name);
+            return -1;
+        }
+        return 0;
+    }
+    if (!PyDict_Check(obj)) {
+        PyErr_Format(PyExc_TypeError, "Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    return 0;
 }
 
 // An element the walk was about to visit is gone: Python code run during
@@ -733,7 +1068,10 @@ static int py_vanished(void) {
 // start; NULL with a Python error set, writing nothing, when they no longer
 // fit the space the size pass measured (the value changed between passes).
 static char* py_take(py_walk_t* w, size_t align, size_t n) {
-    char* at = (char*)ALIGN_UP((uintptr_t)*w->cursor, align);
+    uintptr_t c = (uintptr_t)*w->cursor;
+    char* at = w->origin != NULL
+        ? w->origin + ALIGN_UP(c - (uintptr_t)w->origin, align)
+        : (char*)ALIGN_UP(c, align);
     if (at > (char*)w->end || n > (size_t)((char*)w->end - at)) {
         PyErr_SetString(PyExc_RuntimeError,
             "the value changed while it was being written: it no longer fits the space measured for it");
@@ -741,6 +1079,44 @@ static char* py_take(py_walk_t* w, size_t align, size_t n) {
     }
     *w->cursor = at + n;
     return at;
+}
+
+// The relative pointer to `p`: an offset from the walk's base in a
+// stream's buffer, else a shared-memory relptr. -1 with a Python error set.
+static int py_rel(py_walk_t* w, void* p, relptr_t* out) {
+    if (w->base != NULL) {
+        *out = (relptr_t)((char*)p - w->base);
+        return 0;
+    }
+    char* err = NULL;
+    *out = abs2rel(p, &err);
+    if (err != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, err);
+        free(err);
+        return -1;
+    }
+    return 0;
+}
+
+// The data pointer of an empty array or string.
+static relptr_t py_empty_rel(py_walk_t* w) {
+    return w->base != NULL ? 0 : RELNULL;
+}
+
+// Hold a child's frame until the current step returns.
+static int py_defer(py_walk_t* w, const py_frame_t* f) {
+    if (w->later_len >= w->later_cap) {
+        size_t cap = w->later_cap ? w->later_cap * 2 : 16;
+        py_frame_t* grown = (py_frame_t*)realloc(w->later, cap * sizeof(py_frame_t));
+        if (grown == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        w->later = grown;
+        w->later_cap = cap;
+    }
+    w->later[w->later_len++] = *f;
+    return 0;
 }
 
 static int py_push(py_walk_t* w, const py_frame_t* f) {
@@ -844,6 +1220,23 @@ static int extract_ifile_handles_pylist(PyObject* list, int64_t* out, Py_ssize_t
 
 static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_t idx);
 
+// The 64-bit limbs of an Int's two's-complement form, as the runtime
+// counts them: one for any value an int64 holds. -1 with a Python error set.
+static ssize_t py_int_limbs(PyObject* obj) {
+    int overflow = 0;
+    PyLong_AsLongLongAndOverflow(obj, &overflow);
+    if (PyErr_Occurred()) return -1;
+    if (overflow == 0) return 1;
+    // bit_length(x) + 1 for x >= 0, bit_length(~x) + 1 for x < 0
+    // int's own invert: a subclass's __invert__ must not run here.
+    PyObject* mag = overflow < 0 ? PyLong_Type.tp_as_number->nb_invert(obj) : (Py_INCREF(obj), obj);
+    if (mag == NULL) return -1;
+    size_t nbits = _PyLong_NumBits(mag);
+    Py_DECREF(mag);
+    if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
+    return (ssize_t)((nbits + 1 + 63) / 64);
+}
+
 // Account for a child. `inline_slot` says the child's fixed width lies
 // inside the parent's (tuple and record fields), so only its tail is added.
 static int py_size_child(py_walk_t* w, const Schema* schema, PyObject* obj, int inline_slot) {
@@ -889,10 +1282,9 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
             if (!PyLong_Check(obj)) {
                 PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
             }
-            size_t nbits = _PyLong_NumBits(obj);
-            if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
-            size_t nbytes = (nbits + 8) / 8;
-            size_t nlimbs = (nbytes + 7) / 8;
+            ssize_t limbs = py_int_limbs(obj);
+            if (limbs < 0) return -1;
+            size_t nlimbs = (size_t)limbs;
             if (nlimbs <= 1) {
                 w->total += 16;  // inline
             } else {
@@ -942,7 +1334,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 size_t buf_align = (schema->type == MORLOC_STRING)
                     ? schema->parameters[0]->alignment
                     : element_schema->data_alignment;
-                w->total += (ssize_t)(sizeof(Array) + buf_align - 1);
+                // An empty array has no data region.
+                int nd0 = py_is_ndarray(obj);
+                if (nd0 < 0) return -1;
+                Py_ssize_t n0 = nd0 ? (Py_ssize_t)PyArray_SIZE((PyArrayObject*)obj) : PyObject_Length(obj);
+                if (n0 < 0) return -1;
+                w->total += (ssize_t)(sizeof(Array) + (n0 > 0 ? buf_align - 1 : 0));
 
                 if (PyList_Check(obj)) {
                     Py_ssize_t list_size = PyList_Size(obj);
@@ -1034,7 +1431,22 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                     return 0;
                 } else if (PyUnicode_Check(obj)) {
                     Py_ssize_t len = 0;
-                    if (PyUnicode_AsUTF8AndSize(obj, &len) == NULL) return -1;
+                    if (PyUnicode_AsUTF8AndSize(obj, &len) == NULL) {
+                        if (!PyErr_ExceptionMatches(PyExc_UnicodeEncodeError)) {
+                            return -1;
+                        }
+                        // FMT-10: the failure names the producing language.
+                        PyObject *et, *ev, *tb;
+                        PyErr_Fetch(&et, &ev, &tb);
+                        PyObject* why = ev ? PyObject_Str(ev) : NULL;
+                        PyErr_Format(PyExc_RuntimeError, "Python produced a Str that is not valid UTF-8: %S",
+                                     why ? why : Py_None);
+                        Py_XDECREF(why);
+                        Py_XDECREF(et);
+                        Py_XDECREF(ev);
+                        Py_XDECREF(tb);
+                        return -1;
+                    }
                     w->total += (ssize_t)len;
                     return 0;
                 } else {
@@ -1079,14 +1491,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
         }
 
         case MORLOC_MAP: {
-            if (!PyDict_Check(obj)) {
-                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-            }
+            py_keyset_t* ks = py_record_set(w, schema);
+            if (ks == NULL) return -1;
+            if (py_check_record(ks, schema, obj) != 0) goto error;
             w->total += (ssize_t)schema->width;
-            PyObject** keys = py_record_keys(w, schema);
-            if (keys == NULL) return -1;
             for (size_t i = 0; i < schema->size; ++i) {
-                PyObject* value = py_record_field(schema, keys, obj, i);
+                PyObject* value = py_set_field(ks, obj, i);
                 if (value == NULL) return -1;
                 if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
             }
@@ -1094,25 +1504,31 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
         }
 
         case MORLOC_VARIANT: {
-            // ("Circle", (fields...)): the 16-byte slot, worst-case padding
-            // before the payload, and the payload's own size. A nullary arm
-            // has no payload and needs only the slot.
-            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
-                PyErr_SetString(PyExc_RuntimeError,
-                    "expected a (constructor, fields) pair for a `data` value");
-                return -1;
-            }
-            ssize_t vtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            // An instance of a constructor's class (GEN-12): the 16-byte
+            // slot, worst-case padding before the payload, and the payload's
+            // fields, laid out as a tuple. A constructor with no fields
+            // needs only the slot.
+            py_data_t* vd = py_data_of(w, schema);
+            if (vd == NULL) return -1;
+            ssize_t vtag = py_data_tag(vd, schema, obj);
             if (vtag < 0) return -1;
-            PyObject* vfields = PyTuple_GetItem(obj, 1);
             const Schema* varm = schema->parameters[vtag];
             if (varm->size == 0) {
                 w->total += (ssize_t)schema->width;
                 return 0;
             }
+            if (vd->nfields[vtag] != varm->size) {
+                PyRAISE("the constructor %s has %zu fields in its class, %zu in its schema",
+                        schema->keys[vtag], vd->nfields[vtag], varm->size);
+            }
             size_t varm_align = varm->alignment;
-            w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1);
-            return py_size_child(w, varm, vfields, 0);
+            w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1) + (ssize_t)varm->width;
+            for (size_t j = 0; j < varm->size; j++) {
+                PyObject* value = py_data_field(vd, (size_t)vtag, obj, j);
+                if (value == NULL) return -1;
+                if (py_size_child(w, varm->parameters[j], value, 1) != 0) return -1;
+            }
+            return 0;
         }
 
         case MORLOC_OPTIONAL: {
@@ -1199,7 +1615,9 @@ static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObje
     if (obj == NULL) return py_vanished();
     const Schema* s = py_resolve(schema);
     if (s == NULL) return -1;
-    if (py_flat(w, s)) {
+    // A child that may write a tail waits behind a deferred sibling.
+    int later = w->deferring && !s->fixed_width;
+    if (!later && py_flat(w, s)) {
         Py_INCREF(obj);
         int r = py_write_step(w, s, dest, obj, 0);
         Py_DECREF(obj);
@@ -1212,6 +1630,11 @@ static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObje
     f.schema = s;
     f.obj = obj;
     f.dest = dest;
+    if (later) return py_defer(w, &f);
+    if (w->in_step && w->base != NULL) {
+        w->deferring = 1;
+        return py_defer(w, &f);
+    }
     return py_push(w, &f);
 }
 
@@ -1247,23 +1670,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, PyLong_AsUnsignedLongLong, UINT8_MAX);
             break;
-        // The bound is the constructor count, not UINT8_MAX: a tag no
-        // constructor claims is a type error, and saying which values are
-        // legal is possible because the schema carries their names.
         case MORLOC_ENUM: {
-            if (!PyLong_Check(obj)) {
-                PyErr_Format(PyExc_TypeError,
-                    "Expected an enum member (int) but got %s", Py_TYPE(obj)->tp_name);
-                goto error;
-            }
-            unsigned long long tag = PyLong_AsUnsignedLongLong(obj);
-            if (PyErr_Occurred() || tag >= (unsigned long long)schema->size) {
-                PyErr_Clear();
-                PyErr_Format(PyExc_ValueError,
-                    "enum tag %llu is out of range; the type has %zu constructors",
-                    tag, schema->size);
-                goto error;
-            }
+            // A member of the type's enum.Enum (GEN-12).
+            py_data_t* ed = py_data_of(w, schema);
+            if (ed == NULL) goto error;
+            ssize_t tag = py_data_tag(ed, schema, obj);
+            if (tag < 0) goto error;
             *(uint8_t*)dest = (uint8_t)tag;
             break;
         }
@@ -1297,7 +1709,9 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             {
                 *((double*)dest) = PyFloat_AsDouble(obj);
             } else if(PyLong_Check(obj)){
-                *((double*)dest) = (double)PyLong_AsLongLong(obj);
+                double d = PyLong_AsDouble(obj);
+                if (d == -1.0 && PyErr_Occurred()) { goto error; }
+                *((double*)dest) = d;
             } else {
                 PyRAISE("Expected float or int for MORLOC_FLOAT64, but got %s", Py_TYPE(obj)->tp_name);
             }
@@ -1308,35 +1722,22 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             if (!PyLong_Check(obj)) {
                 PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
             }
-            size_t nbits = _PyLong_NumBits(obj);
-            if (nbits == (size_t)-1 && PyErr_Occurred()) { goto error; }
-            size_t nbytes = (nbits + 8) / 8;
-            size_t nlimbs = (nbytes + 7) / 8;
-            if (nlimbs == 0) nlimbs = 1;
+            ssize_t limbs = py_int_limbs(obj);
+            if (limbs < 0) { goto error; }
+            size_t nlimbs = (size_t)limbs;
 
             int64_t* fields = (int64_t*)dest;
             if (nlimbs <= 1) {
                 // Inline: write value directly
                 fields[0] = 1;
-                int overflow = 0;
-                long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
-                if (overflow || PyErr_Occurred()) {
-                    PyErr_Clear();
-                    // Shouldn't happen for nlimbs<=1, but fallback
-                    fields[1] = 0;
-                } else {
-                    fields[1] = (int64_t)val;
-                }
+                fields[1] = (int64_t)PyLong_AsLongLong(obj);
+                if (PyErr_Occurred()) { goto error; }
             } else {
                 // Overflow: allocate limb array, store relptr
                 fields[0] = (int64_t)nlimbs;
                 char* limbs = py_take(w, _Alignof(uint64_t), nlimbs * sizeof(uint64_t));
                 if (limbs == NULL) goto error;
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)&fields[1] = abs2rel(limbs, &rel_err);
-                    if (rel_err) { free(rel_err); goto error; }
-                }
+                if (py_rel(w, limbs, (relptr_t*)&fields[1]) != 0) goto error;
                 memset(limbs, 0, nlimbs * sizeof(uint64_t));
                 // Python 3.13 added a trailing `with_exceptions` argument to
                 // _PyLong_AsByteArray; pass 1 to keep the exception-raising
@@ -1463,7 +1864,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 result->size = (size_t)size;
 
                 if(result->size == 0){
-                    result->data = RELNULL;
+                    result->data = py_empty_rel(w);
                     break;
                 }
 
@@ -1477,7 +1878,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 char* start = py_take(w, buf_align, (size_t)size * width);
                 if (start == NULL) goto error;
 
-                result->data = PyTRY(abs2rel, start);
+                if (py_rel(w, start, &result->data) != 0) goto error;
 
                 if (PyList_Check(obj) || numpy_per_element) {
                     // Per-element walk: works for Python lists and numpy
@@ -1550,6 +1951,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     }
 
                 } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)){
+                    if (schema->type == MORLOC_STRING) {
+                        int64_t bad = mlc_utf8_check((const uint8_t*)mutable_data, (size_t)size);
+                        if (bad >= 0) {
+                            PyRAISE("Python produced a Str that is not valid UTF-8 (byte %lld of %zd)", (long long)bad, size);
+                        }
+                    }
                     memcpy(start, mutable_data, size);
                 }
                 else if (np_route == NPY_ROUTE_CAST) {
@@ -1588,15 +1995,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             break;
 
         case MORLOC_MAP:
-            if (!PyDict_Check(obj)) {
-                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-            }
-
             {
-                PyObject** keys = py_record_keys(w, schema);
-                if (keys == NULL) goto error;
+                py_keyset_t* ks = py_record_set(w, schema);
+                if (ks == NULL) goto error;
+                if (py_check_record(ks, schema, obj) != 0) goto error;
                 for (size_t i = 0; i < schema->size; ++i) {
-                    PyObject* value = py_record_field(schema, keys, obj, i);
+                    PyObject* value = py_set_field(ks, obj, i);
                     if (value == NULL) goto error;
                     if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
                         goto error;
@@ -1609,30 +2013,31 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             // Tag byte, determined padding, then a relptr to the arm's
             // fields written at the cursor. A nullary arm writes RELNULL and
             // allocates nothing, matching the wire form.
-            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
-                PyErr_SetString(PyExc_RuntimeError,
-                    "expected a (constructor, fields) pair for a `data` value");
-                goto error;
-            }
-            ssize_t wtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            py_data_t* wd = py_data_of(w, schema);
+            if (wd == NULL) goto error;
+            ssize_t wtag = py_data_tag(wd, schema, obj);
             if (wtag < 0) goto error;
-            PyObject* wfields = PyTuple_GetItem(obj, 1);
             const Schema* warm = schema->parameters[wtag];
             *((uint8_t*)dest) = (uint8_t)wtag;
             memset((char*)dest + 1, 0, 7);
             if (warm->size == 0) {
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
+                if (wd->nfields[wtag] != warm->size) {
+                    PyErr_Format(PyMorlocInternalError, "the constructor %s has %zu fields in its class, %zu in its schema",
+                                 schema->keys[wtag], wd->nfields[wtag], warm->size);
+                    goto error;
+                }
                 size_t warm_align = warm->alignment;
                 void* arm_dest = py_take(w, warm_align, warm->width);
                 if (arm_dest == NULL) goto error;
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)((char*)dest + 8) = abs2rel(arm_dest, &rel_err);
-                    if (rel_err) { free(rel_err); goto error; }
-                }
-                if (py_write_child(w, warm, arm_dest, wfields) != 0) {
-                    goto error;
+                if (py_rel(w, arm_dest, (relptr_t*)((char*)dest + 8)) != 0) goto error;
+                for (size_t j = 0; j < warm->size; j++) {
+                    PyObject* value = py_data_field(wd, (size_t)wtag, obj, j);
+                    if (value == NULL) goto error;
+                    if (py_write_child(w, warm->parameters[j], (char*)arm_dest + warm->offsets[j], value) != 0) {
+                        goto error;
+                    }
                 }
             }
             break;
@@ -1652,11 +2057,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 size_t inner_align = inner_schema->alignment;
                 void* inner_dest = py_take(w, inner_align, inner_schema->width);
                 if (inner_dest == NULL) goto error;
-                {
-                    char* rel_err = NULL;
-                    *(relptr_t*)dest = abs2rel(inner_dest, &rel_err);
-                    if (rel_err) { free(rel_err); goto error; }
-                }
+                if (py_rel(w, inner_dest, (relptr_t*)dest) != 0) goto error;
                 if (py_write_child(w, inner_schema, inner_dest, obj) != 0) {
                     goto error;
                 }
@@ -1692,6 +2093,25 @@ int to_voidstar_inner(void* dest, void** cursor, void* end, const Schema* schema
 done:
     py_walk_free(&w);
     return result;
+}
+
+// Step the frames of a write walk to the end, laying out the children a
+// step deferred after it returns (SLOT-36). 0, or -1 with a Python error.
+static int py_write_run(py_walk_t* w) {
+    for (;;) {
+        int r = py_next(w);
+        if (r < 0) return -1;
+        if (r == 0) return 0;
+        w->in_step = 1;
+        w->deferring = 0;
+        int s = py_write_step(w, w->cur.schema, w->cur.dest, w->cur.obj, w->cur.idx);
+        w->in_step = 0;
+        w->deferring = 0;
+        if (s != 0) return -1;
+        while (w->later_len > 0) {
+            if (py_push(w, &w->later[--w->later_len]) != 0) return -1;
+        }
+    }
 }
 
 void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
@@ -1730,6 +2150,34 @@ error:
 
 // -- read pass --------------------------------------------------------------
 
+// Give a freshly allocated pydantic v2 model the state model_construct
+// gives one: a field dict, the set of fields given (all of them), and no
+// extra or private attributes. Sets *fields to the field dict.
+static int py_pydantic_prepare(PyObject* obj, py_keyset_t* ks, PyObject** fields) {
+    PyObject* d = PyDict_New();
+    if (d == NULL) return -1;
+    PyObject* given = PySet_New(ks->given);
+    if (given == NULL) { Py_DECREF(d); return -1; }
+    static PyObject* names[4] = {NULL, NULL, NULL, NULL};
+    static const char* spelled[4] = {"__dict__", "__pydantic_fields_set__", "__pydantic_extra__", "__pydantic_private__"};
+    for (int j = 0; j < 4; j++) {
+        if (names[j] == NULL && (names[j] = PyUnicode_InternFromString(spelled[j])) == NULL) {
+            Py_DECREF(given);
+            Py_DECREF(d);
+            return -1;
+        }
+    }
+    int r = PyObject_GenericSetAttr(obj, names[0], d);
+    if (r == 0) r = PyObject_GenericSetAttr(obj, names[1], given);
+    if (r == 0) r = PyObject_GenericSetAttr(obj, names[2], Py_None);
+    if (r == 0) r = PyObject_GenericSetAttr(obj, names[3], Py_None);
+    Py_DECREF(given);
+    if (r != 0) { Py_DECREF(d); return -1; }
+    *fields = d;
+    Py_DECREF(d);
+    return 0;
+}
+
 // Store a finished node into its parent's slot (or as the root). Steals
 // `obj`; on failure it is released and -1 returned.
 static int py_store(py_walk_t* w, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key, PyObject* obj) {
@@ -1754,6 +2202,13 @@ static int py_store(py_walk_t* w, unsigned char slot_kind, PyObject* parent, Py_
             int r = PyArray_SETITEM((PyArrayObject*)parent, PyArray_GETPTR1((PyArrayObject*)parent, slot), obj);
             Py_DECREF(obj);
             return r;
+        }
+        case PY_SLOT_OFFSET: {
+            PyObject** field = (PyObject**)((char*)parent + slot);
+            PyObject* old = *field;
+            *field = obj;
+            Py_XDECREF(old);
+            return 0;
         }
     }
     Py_DECREF(obj);
@@ -1820,12 +2275,21 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
         case MORLOC_UINT8:
             obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
             break;
-        // The runtime hands back the ordinal and the generated pool code
-        // wraps it in the enum class. Keeping the Python class out of the
-        // C runtime is what lets a Vector of an enum stay a uint8 array.
-        case MORLOC_ENUM:
-            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
+        // A member of the type's enum.Enum (GEN-12). A Vector of an enum is
+        // read elsewhere, as a uint8 array.
+        case MORLOC_ENUM: {
+            py_data_t* ed = py_data_of(w, schema);
+            if (ed == NULL) goto error;
+            uint8_t etag = *(const uint8_t*)data;
+            if ((size_t)etag >= ed->n) {
+                PyErr_Format(reading_runtime_value ? PyMorlocInternalError : PyExc_RuntimeError,
+                    "enum tag %u is out of range; the type has %zu constructors", (unsigned)etag, ed->n);
+                goto error;
+            }
+            obj = ed->items[etag];
+            Py_INCREF(obj);
             break;
+        }
         case MORLOC_UINT16:
             obj = PyLong_FromUnsignedLong(*(uint16_t*)data);
             break;
@@ -2072,24 +2536,40 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             return 0;
         }
         case MORLOC_MAP: {
-            obj = PyDict_New();
-            if(obj == NULL){
-                PyRAISE("Failed in map");
+            py_keyset_t* ks = py_record_set(w, schema);
+            if (ks == NULL) goto error;
+            PyObject* fields_into = NULL;
+            unsigned char field_slot = PY_SLOT_DICT;
+            if (ks->cls == NULL) {
+                obj = PyDict_New();
+                if(obj == NULL){
+                    PyRAISE("Failed in map");
+                }
+                fields_into = obj;
+            } else {
+                obj = ks->cls->tp_alloc(ks->cls, 0);
+                if (obj == NULL) goto error;
+                if (ks->kind == 0) {
+                    fields_into = obj;
+                    field_slot = PY_SLOT_OFFSET;
+                } else if (py_pydantic_prepare(obj, ks, &fields_into) != 0) {
+                    goto error;
+                }
             }
             if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                if (py_read_child(w, schema->parameters[i], item_ptr, PY_SLOT_DICT, obj, 0, schema->keys[i]) != 0) return -1;
+                Py_ssize_t field_at = field_slot == PY_SLOT_OFFSET ? ks->offsets[i] : 0;
+                if (py_read_child(w, schema->parameters[i], item_ptr, field_slot, fields_into, field_at, schema->keys[i]) != 0) return -1;
             }
             return 0;
         }
         case MORLOC_VARIANT: {
             // A payload-bearing `data` value: a tag byte then a relptr to the
-            // arm's fields. It crosses as a STRUCTURAL pair -- the
-            // constructor's name and a tuple of its fields -- because the
-            // generic marshaller has no access to a pool-level class. See the
-            // note on the Python/R variant spelling in the code generator:
-            // this is a documented interim form, not the intended end state.
+            // constructor's fields, read into an instance of its class
+            // (GEN-12), stored before its fields are filled.
+            py_data_t* rd = py_data_of(w, schema);
+            if (rd == NULL) goto error;
             uint8_t tag = *(const uint8_t*)data;
             if ((size_t)tag >= schema->size) {
                 PyErr_Format(reading_runtime_value ? PyMorlocInternalError : PyExc_RuntimeError,
@@ -2098,28 +2578,30 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 goto error;
             }
             const Schema* arm = schema->parameters[tag];
-            PyObject* name = PyUnicode_FromString(schema->keys[tag]);
-            if (!name) goto error;
-            obj = PyTuple_New(2);
-            if (!obj) { Py_DECREF(name); goto error; }
-            PyTuple_SET_ITEM(obj, 0, name);
-            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
-            // The pair now belongs to its parent; the error path must not
-            // release it again.
-            PyObject* pair = obj;
-            obj = NULL;
-
-            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
-            if (vrelptr == RELNULL) {
-                PyObject* fields = PyTuple_New(0);
-                if (!fields) return -1;
-                PyTuple_SET_ITEM(pair, 1, fields);
-                return 0;
+            if (arm->size == 0) {
+                obj = rd->items[tag];
+                Py_INCREF(obj);
+                break;
             }
+            if (rd->nfields[tag] != arm->size) {
+                PyErr_Format(PyMorlocInternalError, "the constructor %s has %zu fields in its class, %zu in its schema",
+                             schema->keys[tag], rd->nfields[tag], arm->size);
+                goto error;
+            }
+            obj = rd->types[tag]->tp_alloc(rd->types[tag], 0);
+            if (obj == NULL) goto error;
+            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
+            // The instance now belongs to its parent; the error path must
+            // not release it again.
+            PyObject* inst = obj;
+            obj = NULL;
+            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
             const void* payload = PyTRY_READ(resolve_region, vrelptr, arm->width, space);
-            // The arm's schema describes its fields as a tuple, so the walk
-            // over that shape builds the field sequence.
-            return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
+            for (size_t j = 0; j < arm->size; j++) {
+                const void* field_ptr = (const char*)payload + arm->offsets[j];
+                if (py_read_child(w, arm->parameters[j], field_ptr, PY_SLOT_OFFSET, inst, rd->offsets[tag][j], NULL) != 0) return -1;
+            }
+            return 0;
         }
         case MORLOC_OPTIONAL: {
             // The Optional slot is a relptr (RELNULL = absent). Resolve and
@@ -2375,6 +2857,12 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+
+// WPOOL-11
+static PyObject* pybinding__available_cpus(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromSize_t(morloc_available_cpus());
+}
 
 static PyObject* pybinding__fork_generation(PyObject* self, PyObject* args) {
     (void)self; (void)args;
@@ -2695,6 +3183,91 @@ static relptr_t py_export_arrow_to_shm(PyObject* obj, const Schema* schema, char
 }
 
 
+// Parsed schemas by schema string (registry.tsv: schema_cache). Generated
+// pools pass a fixed set of schema strings, so the table stays small.
+typedef struct {
+    char** keys;
+    Schema** schemas;
+    size_t cap;
+    size_t count;
+} schema_cache_t;
+static schema_cache_t schema_cache = {NULL, NULL, 0, 0};
+
+static size_t schema_cache_hash(const char* s){
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return (size_t)h;
+}
+
+static bool schema_cache_insert(char* key, Schema* schema){
+    size_t i = schema_cache_hash(key) & (schema_cache.cap - 1);
+    while (schema_cache.keys[i] != NULL) {
+        i = (i + 1) & (schema_cache.cap - 1);
+    }
+    schema_cache.keys[i] = key;
+    schema_cache.schemas[i] = schema;
+    schema_cache.count++;
+    return true;
+}
+
+static bool schema_cache_grow(void){
+    size_t old_cap = schema_cache.cap;
+    char** old_keys = schema_cache.keys;
+    Schema** old_schemas = schema_cache.schemas;
+    size_t cap = old_cap ? old_cap * 2 : 64;
+    char** keys = (char**)calloc(cap, sizeof(char*));
+    Schema** schemas = (Schema**)calloc(cap, sizeof(Schema*));
+    if (keys == NULL || schemas == NULL) {
+        free(keys);
+        free(schemas);
+        return false;
+    }
+    schema_cache.keys = keys;
+    schema_cache.schemas = schemas;
+    schema_cache.cap = cap;
+    schema_cache.count = 0;
+    for (size_t i = 0; i < old_cap; i++) {
+        if (old_keys[i] != NULL) {
+            schema_cache_insert(old_keys[i], old_schemas[i]);
+        }
+    }
+    free(old_keys);
+    free(old_schemas);
+    return true;
+}
+
+// The parsed form of `schema_str`, from schema_cache.
+static Schema* cached_schema(const char* schema_str, char** errmsg){
+    *errmsg = NULL;
+    if (schema_cache.cap > 0) {
+        size_t i = schema_cache_hash(schema_str) & (schema_cache.cap - 1);
+        while (schema_cache.keys[i] != NULL) {
+            if (strcmp(schema_cache.keys[i], schema_str) == 0) {
+                return schema_cache.schemas[i];
+            }
+            i = (i + 1) & (schema_cache.cap - 1);
+        }
+    }
+    Schema* schema = parse_schema(schema_str, errmsg);
+    if (*errmsg != NULL) {
+        free_schema(schema);
+        return NULL;
+    }
+    if (schema == NULL) {
+        *errmsg = strdup("a schema string parsed to nothing");
+        return NULL;
+    }
+    char* key = strdup(schema_str);
+    if (key == NULL || ((schema_cache.count + 1) * 2 > schema_cache.cap && !schema_cache_grow())) {
+        free(key);
+        free_schema(schema);
+        *errmsg = strdup("out of memory caching a schema");
+        return NULL;
+    }
+    schema_cache_insert(key, schema);
+    return schema;
+}
+
 // Transforms a value into a message ready for the socket. With the
 // optional third argument true the packet is self-contained -- the value
 // travels inside it rather than as a reference to a shared-memory block
@@ -2713,7 +3286,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     PARSE_ARGS_OR_ABORT(args, "Os|p", &obj, &schema_str, &self_contained);
 
-    schema = PyTRY(parse_schema, schema_str);
+    schema = PyTRY(cached_schema, schema_str);
 
     // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through the
     // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
@@ -2722,13 +3295,11 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         char* errmsg = NULL;
         relptr_t relptr = py_export_arrow_to_shm(obj, schema, &errmsg);
         if (errmsg) {
-            free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, errmsg);
             free(errmsg);
             return NULL;
         }
         if (PyErr_Occurred()) {
-            free_schema(schema);
             return NULL;
         }
 
@@ -2748,8 +3319,6 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         } else {
             packet = make_arrow_data_packet(relptr, schema);
         }
-        // The `error:` label frees the schema; freeing it here as well
-        // would free it twice.
         if (!packet) {
             PyINTERNAL_ABORT("Failed to create arrow data packet");
         }
@@ -2757,7 +3326,6 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         packet_size = PyTRY(morloc_packet_size, packet);
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        free_schema(schema);
         return retval;
     }
 
@@ -2793,18 +3361,16 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        free_schema(schema);
         return retval;
     }
 
 error:
     FREE(packet)
-    if (!tracked && voidstar && schema) {
+    if (!tracked && voidstar) {
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
     }
-    free_schema(schema);
     return NULL;
 }
 
@@ -2814,7 +3380,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t* voidstar = NULL;
     Schema* schema = NULL;
     PyObject* obj = NULL;
-    bool tracked = false;
 
     const char* packet;
     size_t packet_size;
@@ -2829,14 +3394,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t source = header->command.data.source;
     uint8_t format = header->command.data.format;
 
-    schema = PyTRY(parse_schema, schema_str)
+    schema = PyTRY(cached_schema, schema_str);
 
     // Arrow dispatch: a table-typed value is a block. It arrives by
     // reference (an Arrow packet) or in a form the runtime materializes
     // into a block of this pool's own (a cached result read back from a
-    // file, a captured value carried inline). Every error below leaves
-    // `schema` to the `error:` label; freeing it here as well would free
-    // it twice.
+    // file, a captured value carried inline).
     if (schema->type == MORLOC_TABLE) {
         bool materialized = (source != PACKET_SOURCE_RPTR);
         // PANIC-13: a value read from a file or carried inline is input;
@@ -2905,7 +3468,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
         if (arrow_array.release) arrow_array.release(&arrow_array);
 
-        free_schema(schema);
         if (!obj) return NULL;
         return obj;
     }
@@ -2924,12 +3486,10 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
         if (header->length < schema->width) {
-            free_schema(schema);
             PyRAISE("a %zu-byte inline payload cannot hold its %zu-byte value", (size_t)header->length, schema->width);
         }
         obj = from_voidstar(schema, (const void*)payload, morloc_payload_space(payload, (size_t)header->length));
         PyTRACE(obj == NULL)
-        free_schema(schema);
         return obj;
     }
 
@@ -2942,7 +3502,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         size_t payload_len = header->length;
         char path[PATH_MAX];
         if (payload_len >= sizeof(path)) {
-            free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, "stream ingest: path exceeds PATH_MAX");
             return NULL;
         }
@@ -2986,15 +3545,20 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                 if (rc < 0) goto stream_error;
             }
             {
-                char* cerr = NULL; mlc_close(handle, &cerr);
+                char* cerr = NULL;
+                Py_BEGIN_ALLOW_THREADS
+                mlc_close(handle, &cerr);
+                Py_END_ALLOW_THREADS
                 if (cerr) free(cerr);
             }
-            free_schema(schema);
             return result;
 
         stream_error:
             {
-                char* cerr = NULL; mlc_close(handle, &cerr);
+                char* cerr = NULL;
+                Py_BEGIN_ALLOW_THREADS
+                mlc_close(handle, &cerr);
+                Py_END_ALLOW_THREADS
                 if (cerr) free(cerr);
             }
             Py_XDECREF(result);
@@ -3002,7 +3566,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                 PyErr_SetString(PyExc_RuntimeError, stream_err);
                 free(stream_err);
             }
-            free_schema(schema);
             return NULL;
         }
         // Not a stream file -- fall through to legacy FILE+DATA handling.
@@ -3044,16 +3607,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     }
     PyTRACE(obj == NULL)
 
-    if (!tracked) {
-        free_schema(schema);
-    }
-
     return obj;
 
 error:
-    if (!tracked) {
-        free_schema(schema);
-    }
     return NULL;
 }
 
@@ -3172,7 +3728,10 @@ static PyObject* pybinding__debug_flush_dispatch(PyObject* self, PyObject* args)
 // dispatch so a leaked @stdout claim does not wedge the next open.
 static PyObject* pybinding__reclaim_stdio_after_dispatch(PyObject* self, PyObject* args) {
     (void)self; (void)args;
+    // SLOT-37
+    Py_BEGIN_ALLOW_THREADS
     mlc_reclaim_stdio_after_dispatch();
+    Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 
@@ -3193,18 +3752,11 @@ static PyObject* pybinding__release_packet_shm(PyObject* self, PyObject* args) {
         Py_RETURN_NONE;
     }
 
-    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) {
-        Py_RETURN_NONE;
-    }
-
-    size_t relptr = *(size_t*)((const uint8_t*)packet
-        + sizeof(morloc_packet_header_t) + hdr->offset);
-    char* resolve_err = NULL;
-    void* voidstar = rel2abs(relptr, &resolve_err);
-    if (resolve_err) { free(resolve_err); }
-    if (voidstar) {
-        shm_tracker_release_one((absptr_t)voidstar);
+    if (((const morloc_packet_header_t*)packet)->command.data.source == PACKET_SOURCE_RPTR) {
+        absptr_t block = mlc_tracked_block((const uint8_t*)packet);
+        if (block) {
+            shm_tracker_release_one(block);
+        }
     }
 
     Py_RETURN_NONE;
@@ -3310,17 +3862,19 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     // Track the result's shared memory: the reference the callee donated
     // with it is this pool's now.
     {
-        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)((uint8_t*)result + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-            if (res_voidstar) {
-                // The callee took a reference before sending; it is ours
-                // now. Inherit it rather than adding another.
-                shm_tracker_push((absptr_t)res_voidstar);
-            }
+        char* refused = NULL;
+        absptr_t res_block = mlc_packet_block(result, &refused);
+        if (refused) {
+            morloc_exit_if_shared_memory_lost(refused);
+            PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s): %s", __func__, refused);
+            free(refused);
+            free(result);
+            result = NULL;
+            goto error;
+        }
+        if (res_block) {
+            // SHM-3, SHM-8
+            shm_tracker_push(res_block);
         }
     }
 
@@ -3905,6 +4459,117 @@ error:
     return NULL;
 }
 
+// Whether any part of `schema` may read as a value that views the bytes it
+// was read from (a NumPy array or an Arrow table); a schema nested deeper
+// than `depth` counts.
+static bool schema_has_view(const Schema* schema, int depth){
+    if (depth <= 0 || schema->type == MORLOC_TABLE) {
+        return true;
+    }
+    if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+        return true;
+    }
+    // An enum's size counts constructors and it has no parameters.
+    if (schema->type == MORLOC_ENUM) {
+        return false;
+    }
+    for (size_t i = 0; i < schema->size; i++) {
+        if (schema_has_view(schema->parameters[i], depth - 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A whole-list @load decoded one sub-packet at a time where it lies
+// (SLOT-25), into one Python list.
+typedef struct {
+    const Schema* schema;
+    PyObject* acc;
+    Py_ssize_t at;
+} py_slice_t;
+
+static int32_t py_slice_begin(void* c, uint64_t n){
+    py_slice_t* d = (py_slice_t*)c;
+    if (n > (uint64_t)PY_SSIZE_T_MAX) {
+        PyErr_SetString(PyExc_MemoryError, "@load: the list is longer than a Python list can be");
+        return 1;
+    }
+    d->acc = PyList_New((Py_ssize_t)n);
+    return d->acc == NULL ? 1 : 0;
+}
+
+static int32_t py_slice_decode(void* c, const void* data, morloc_space_t space){
+    py_slice_t* d = (py_slice_t*)c;
+    PyObject* run = from_voidstar(d->schema, data, space);
+    if (run == NULL) {
+        return 1;
+    }
+    if (!PyList_Check(run) || d->acc == NULL
+        || d->at + PyList_GET_SIZE(run) > PyList_GET_SIZE(d->acc)) {
+        Py_DECREF(run);
+        PyErr_SetString(PyExc_RuntimeError, "@load: a part of the list does not fit the list's length");
+        return 1;
+    }
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(run); i++) {
+        PyObject* x = PyList_GET_ITEM(run, i);
+        Py_INCREF(x);
+        PyList_SET_ITEM(d->acc, d->at++, x);
+    }
+    Py_DECREF(run);
+    return 0;
+}
+
+// The list stored in the stream file at `path`, read as its whole IFile
+// slice. Returns false, with no exception set, when the file does not open
+// as an IFile of `schema_str`; otherwise true, with `*out` the list or NULL
+// and an exception set.
+static bool py_load_in_place(const Schema* schema, const char* schema_str, const char* path, PyObject** out){
+    *out = NULL;
+    char* errmsg = NULL;
+    int64_t h;
+    Py_BEGIN_ALLOW_THREADS
+    h = mlc_open_ifile(schema_str, path, &errmsg);
+    Py_END_ALLOW_THREADS
+    if (errmsg != NULL || h < 0) {
+        free(errmsg);
+        if (h >= 0) {
+            char* close_err = NULL;
+            Py_BEGIN_ALLOW_THREADS
+            mlc_close(h, &close_err);
+            Py_END_ALLOW_THREADS
+            free(close_err);
+        }
+        return false;
+    }
+    py_slice_t ctx = {schema, NULL, 0};
+    mlc_ifile_walk_arg bounds[2];
+    memset(bounds, 0, sizeof(bounds));
+    int32_t rc = mlc_ifile_slice_with(h, bounds, py_slice_begin, py_slice_decode, &ctx, &errmsg);
+    char* close_err = NULL;
+    int close_rc;
+    Py_BEGIN_ALLOW_THREADS
+    close_rc = mlc_close(h, &close_err);
+    Py_END_ALLOW_THREADS
+    if (rc < 0 || (rc == 0 && (close_rc != 0 || close_err != NULL))) {
+        const char* why = rc < 0 ? errmsg : close_err;
+        PyErr_Format(PyMorlocException != NULL ? PyMorlocException : PyExc_RuntimeError,
+                     "@load: %s", why != NULL ? why : "reading the file failed");
+        Py_CLEAR(ctx.acc);
+    } else if (rc == 0 && ctx.acc != NULL && ctx.at != PyList_GET_SIZE(ctx.acc)) {
+        PyErr_SetString(PyExc_RuntimeError, "@load: the file held fewer elements than its index");
+        Py_CLEAR(ctx.acc);
+    } else if (rc == 0 && ctx.acc == NULL) {
+        ctx.acc = PyList_New(0);
+    } else if (rc != 0) {
+        Py_CLEAR(ctx.acc);
+    }
+    free(errmsg);
+    free(close_err);
+    *out = ctx.acc;
+    return true;
+}
+
 static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
@@ -3914,7 +4579,14 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
 
-    schema = PyTRY(parse_schema, schema_str);
+    schema = PyTRY(cached_schema, schema_str);
+
+    if (schema->type == MORLOC_ARRAY && schema->hint == NULL && !schema_has_view(schema, 64)) {
+        PyObject* loaded = NULL;
+        if (py_load_in_place(schema, schema_str, path, &loaded)) {
+            return loaded;
+        }
+    }
 
     voidstar = mlc_load(path, schema, &load_err);
 
@@ -3931,7 +4603,6 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
                             load_err);
         }
         if (load_err != NULL) free(load_err);
-        free_schema(schema);
         return NULL;
     }
     if (load_err != NULL) { free(load_err); load_err = NULL; }
@@ -3946,7 +4617,6 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
         }
-        free_schema(schema);
         if (obj == NULL) {
             return NULL;
         }
@@ -3959,7 +4629,6 @@ error:
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
-    free_schema(schema);
     return NULL;
 }
 
@@ -3998,6 +4667,53 @@ error:
     return NULL;
 }
 
+// The pool's function that renders a failure as text with its trace
+// (DIAG-5); NULL until the pool registers it.
+static PyObject* mlc_failure_message_fn = NULL;
+
+static PyObject* pybinding__set_failure_message(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* fn;
+    PARSE_ARGS_OR_ABORT(args, "O", &fn);
+    if (!PyCallable_Check(fn)) {
+        PyErr_SetString(PyExc_TypeError, "set_failure_message takes a function");
+        return NULL;
+    }
+    Py_INCREF(fn);
+    Py_XSETREF(mlc_failure_message_fn, fn);
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// A failure as text: the registered renderer's, else its str(), else a fixed
+// text. Never fails with an exception set; NULL only when out of memory.
+static PyObject* mlc_failure_text(PyObject* evalue) {
+    PyObject* msg = NULL;
+    if (mlc_failure_message_fn != NULL) {
+        msg = PyObject_CallFunctionObjArgs(mlc_failure_message_fn, evalue, NULL);
+        if (msg != NULL && !PyUnicode_Check(msg)) {
+            Py_CLEAR(msg);
+        }
+        PyErr_Clear();
+    }
+    if (msg == NULL) {
+        msg = PyObject_Str(evalue);
+        PyErr_Clear();
+    }
+    if (msg == NULL) {
+        msg = PyUnicode_FromString("a failure whose message cannot be read");
+    }
+    return msg;
+}
+
+static PyObject* pybinding__failure_message(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* e;
+    PARSE_ARGS_OR_ABORT(args, "O", &e);
+    return mlc_failure_text(e);
+error:
+    return NULL;
+}
+
 // @catch: evaluate fallible; on any Exception subclass, evaluate fallback.
 // Fallible-first order matches the intrinsic type `@catch fallible fallback`.
 // Narrows to Exception (not BaseException) so KeyboardInterrupt / SystemExit
@@ -4024,7 +4740,16 @@ static PyObject* pybinding__mlc_try(PyObject* self, PyObject* args) { MAYFAIL
     PyObject *etype, *evalue, *etrace;
     PyErr_Fetch(&etype, &evalue, &etrace);
     PyErr_NormalizeException(&etype, &evalue, &etrace);
-    PyObject* msg = evalue ? PyObject_Str(evalue) : PyUnicode_FromString("");
+    if (evalue != NULL && etrace != NULL) {
+        PyException_SetTraceback(evalue, etrace);
+    }
+    PyObject* msg;
+    if (evalue == NULL) {
+        msg = PyUnicode_FromString("");
+    } else {
+        msg = mlc_failure_text(evalue);
+        PyException_SetTraceback(evalue, Py_None);
+    }
     Py_XDECREF(etype); Py_XDECREF(evalue); Py_XDECREF(etrace);
     if (msg == NULL) {
         return NULL;
@@ -4239,7 +4964,8 @@ static PyObject* pybinding__mlc_open_istream(PyObject* self, PyObject* args) { M
     const char* schema_str;
     const char* path;
     PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
-    int64_t h = PyTRY(mlc_open_istream, schema_str, path);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_istream, schema_str, path);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4252,7 +4978,8 @@ error:
 static PyObject* pybinding__mlc_open_stdin(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
-    int64_t h = PyTRY(mlc_open_stdin, schema_str);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_stdin, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4261,7 +4988,8 @@ error:
 static PyObject* pybinding__mlc_open_stdout(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
-    int64_t h = PyTRY(mlc_open_stdout, schema_str);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_stdout, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
@@ -4270,15 +4998,298 @@ error:
 static PyObject* pybinding__mlc_open_stderr(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
-    int64_t h = PyTRY(mlc_open_stderr, schema_str);
+    int64_t h = 0;
+    PyTRY_NOGIL(h, mlc_open_stderr, schema_str);
     return PyLong_FromLongLong((long long)h);
 error:
     return NULL;
 }
 
+// The result of an mlc_write_* call: 0, or -1 with a Python error set.
+static int py_stream_result(int32_t rc, char* err) {
+    if (rc == MLC_RESULT_PIPE_CLOSED) {
+        free(err);
+        PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+        return -1;
+    }
+    if (err != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, err);
+        free(err);
+        return -1;
+    }
+    if (rc != 0) {
+        PyErr_SetString(PyMorlocInternalError, "an in-place @write call failed without a reason");
+        return -1;
+    }
+    return 0;
+}
+
+// Whether an Int element is written as its slot alone (one limb).
+// 1 or 0, or -1 with a Python error set.
+static int py_int_inline(PyObject* obj) {
+    if (!PyLong_Check(obj)) return 1; // the write pass reports the type
+    ssize_t limbs = py_int_limbs(obj);
+    return limbs < 0 ? -1 : limbs == 1;
+}
+
+// SLOT-37: before the first wait, a shallow copy of the batch's list
+// replaces it, so that a batch is one state of its list. 0, or -1 with a
+// Python error set.
+static int py_snapshot(PyObject** list, PyObject** snapshot) {
+    if (*snapshot != NULL) return 0;
+    *snapshot = PyList_GetSlice(*list, 0, PyList_GET_SIZE(*list));
+    if (*snapshot == NULL) return -1;
+    *list = *snapshot;
+    return 0;
+}
+
+// SLOT-37: wait, with the GIL released, for the queue room a placement
+// lacked. 0, or -1 with a Python error set (the batch is then aborted).
+static int py_write_wait(const uint8_t* reached) {
+    char* err = NULL;
+    int32_t rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = mlc_write_wait(reached, &err);
+    Py_END_ALLOW_THREADS
+    return py_stream_result(rc, err);
+}
+
+// Size one element with the batch's walk. -1 with a Python error set.
+static ssize_t py_size_element(py_walk_t* w, const Schema* elem, PyObject* obj) {
+    w->total = 0;
+    if (py_size_child(w, elem, obj, 0) != 0) return -1;
+    for (;;) {
+        int r = py_next(w);
+        if (r < 0) return -1;
+        if (r == 0) return w->total;
+        if (w->cur.inline_slot) w->total -= (ssize_t)w->cur.schema->width;
+        if (py_size_step(w, w->cur.schema, w->cur.obj, w->cur.idx) != 0) return -1;
+    }
+}
+
+// Whether a buffer's item format holds the wire number `t` byte for byte:
+// native or little-endian order, the same kind and width.
+static int py_format_holds(const char* format, Py_ssize_t itemsize, morloc_serial_type t) {
+    const char* f = format == NULL ? "B" : format;
+    if (*f == '@' || *f == '=' || *f == '<') f++;
+    if (f[0] == '\0' || f[1] != '\0') return 0;
+    const char c = f[0];
+    const int is_signed = c == 'b' || c == 'h' || c == 'i' || c == 'l' || c == 'q';
+    const int is_unsigned = c == 'B' || c == 'H' || c == 'I' || c == 'L' || c == 'Q';
+    switch (t) {
+        case MORLOC_SINT8: return is_signed && itemsize == 1;
+        case MORLOC_SINT16: return is_signed && itemsize == 2;
+        case MORLOC_SINT32: return is_signed && itemsize == 4;
+        case MORLOC_SINT64: return is_signed && itemsize == 8;
+        case MORLOC_UINT8: return is_unsigned && itemsize == 1;
+        case MORLOC_UINT16: return is_unsigned && itemsize == 2;
+        case MORLOC_UINT32: return is_unsigned && itemsize == 4;
+        case MORLOC_UINT64: return is_unsigned && itemsize == 8;
+        case MORLOC_FLOAT32: return c == 'f' && itemsize == 4;
+        case MORLOC_FLOAT64: return c == 'd' && itemsize == 8;
+        default: return 0;
+    }
+}
+
+// SLOT-36: write `x` as a leaf the runtime writes whole when it is one: a
+// str (known UTF-8) or a bytes or bytearray for a Str, or a bytes,
+// bytearray or one-dimensional C-contiguous ndarray whose items are exactly
+// the element's wire numbers, with the GIL held (SLOT-37). 1 when written,
+// 0 when `x` is not such a leaf, 2 when the placement would wait, -1 with a
+// Python error set (a Str that is not text has aborted the batch).
+static int py_place_leaf(const Schema* elem, PyObject* x, const uint8_t** reached) {
+    const uint8_t* src = NULL;
+    Py_ssize_t n = 0;
+    uint32_t flags = 0;
+    Py_buffer view;
+    int have_view = 0;
+    if (elem->type == MORLOC_STRING) {
+        if (PyUnicode_Check(x)) {
+            src = (const uint8_t*)PyUnicode_AsUTF8AndSize(x, &n);
+            if (src == NULL) {
+                // A lone surrogate: the walk reports it.
+                PyErr_Clear();
+                return 0;
+            }
+            flags = MLC_PLACE_VALID_TEXT;
+        } else if (PyBytes_Check(x) || PyByteArray_Check(x)) {
+            if (PyObject_GetBuffer(x, &view, PyBUF_SIMPLE) != 0) return -1;
+            have_view = 1;
+            src = (const uint8_t*)view.buf;
+            n = view.len;
+        } else {
+            return 0;
+        }
+    } else if (elem->type == MORLOC_ARRAY) {
+        const Schema* p = elem->parameters[0];
+        // Only what the walk takes as a list (py_check_list_value): a bytes,
+        // a bytearray, or a one-dimensional ndarray; anything else the walk
+        // takes or refuses.
+        int nd = PyBytes_Check(x) || PyByteArray_Check(x) ? 1 : py_is_ndarray(x);
+        if (nd < 0) return -1;
+        if (nd != 1) return 0;
+        if (PyObject_GetBuffer(x, &view, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) {
+            PyErr_Clear();
+            return 0;
+        }
+        have_view = 1;
+        if (view.ndim != 1 || view.itemsize != (Py_ssize_t)p->width || !py_format_holds(view.format, view.itemsize, p->type)) {
+            PyBuffer_Release(&view);
+            return 0;
+        }
+        src = (const uint8_t*)view.buf;
+        n = view.len / view.itemsize;
+    } else {
+        return 0;
+    }
+    const uint8_t* end = NULL;
+    int64_t bad = -1;
+    char* err = NULL;
+    int32_t rc = mlc_write_place_bytes(src, (uint64_t)n, flags, *reached, &end, &bad, &err);
+    if (have_view) PyBuffer_Release(&view);
+    if (rc == MLC_WRITE_WOULD_BLOCK) return 2;
+    if (rc == MLC_WRITE_NOT_TEXT) {
+        free(err);
+        PyErr_Format(PyExc_RuntimeError, "Python produced a Str that is not valid UTF-8 (byte %lld of %zd)", (long long)bad, n);
+        return -1;
+    }
+    if (py_stream_result(rc, err) != 0) return -1;
+    *reached = end;
+    return 1;
+}
+
+// SLOT-36, SLOT-37: write a list batch in place in an output file's
+// buffer. 1 when written, 0 when the stream takes a voidstar copy, -1 with
+// a Python error set.
+static int py_write_in_place(const Schema* schema, long long level, PyObject* list, int64_t handle) {
+    const Schema* elem = schema->parameters[0];
+    if (elem->type == MORLOC_TABLE) return 0;
+    if (mlc_write_open()) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "@write: a batch is already being written on this thread (a @write from code run while encoding one)");
+        return -1;
+    }
+    char* err = NULL;
+    int32_t rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = mlc_write_begin(level, handle, MLC_WRITE_NOWAIT, &err);
+    Py_END_ALLOW_THREADS
+    if (rc == MLC_WRITE_FALLBACK) return 0;
+    if (py_stream_result(rc, err) != 0) return -1;
+
+    py_walk_t w;
+    py_walk_init(&w, elem);
+    void* cursor = NULL;
+    w.cursor = &cursor;
+    const uint8_t* reached = NULL;
+    const size_t width = elem->width;
+    const int run = (elem->fixed_width || elem->type == MORLOC_INT) && width > 0;
+    PyObject* x = NULL;
+    // The list as it was at the first wait, which other threads may change.
+    PyObject* snapshot = NULL;
+    // The end of the stretch of inline Ints found at the last scan.
+    Py_ssize_t stretch_end = 0;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(list);) {
+        int inline_int = 1;
+        if (run && elem->type == MORLOC_INT && i >= stretch_end) {
+            stretch_end = i;
+            while (stretch_end < PyList_GET_SIZE(list)) {
+                int in = py_int_inline(PyList_GET_ITEM(list, stretch_end));
+                if (in < 0) goto error;
+                if (!in) break;
+                stretch_end++;
+            }
+            inline_int = stretch_end > i;
+        }
+        if (run && inline_int) {
+            // The stretch from i that the run may take.
+            Py_ssize_t k = (elem->type == MORLOC_INT ? stretch_end : PyList_GET_SIZE(list)) - i;
+            if (k < 1) k = 1;
+            uint8_t* slots = NULL;
+            uint64_t placed = 0;
+            rc = mlc_write_place_run((uint64_t)k, reached, &slots, &placed, &err);
+            if (rc == MLC_WRITE_WOULD_BLOCK) {
+                if (py_snapshot(&list, &snapshot) != 0 || py_write_wait(reached) != 0) goto error;
+                stretch_end = i;
+                continue;
+            }
+            if (py_stream_result(rc, err) != 0) goto error;
+            w.base = NULL;
+            w.origin = NULL;
+            w.end = NULL;
+            for (uint64_t j = 0; j < placed; j++) {
+                if (i + (Py_ssize_t)j >= PyList_GET_SIZE(list)) { py_vanished(); goto error; }
+                x = PyList_GET_ITEM(list, i + (Py_ssize_t)j);
+                Py_INCREF(x);
+                if (py_write_child(&w, elem, slots + j * width, x) != 0) goto error;
+                if (py_write_run(&w) != 0) goto error;
+                Py_CLEAR(x);
+                Py_CLEAR(w.keep);
+            }
+            reached = slots + placed * width;
+            i += (Py_ssize_t)placed;
+            continue;
+        }
+        if (i >= PyList_GET_SIZE(list)) { py_vanished(); goto error; }
+        x = PyList_GET_ITEM(list, i);
+        Py_INCREF(x);
+        int leaf = py_place_leaf(elem, x, &reached);
+        if (leaf < 0) goto error;
+        if (leaf == 2) {
+            Py_CLEAR(x);
+            if (py_snapshot(&list, &snapshot) != 0 || py_write_wait(reached) != 0) goto error;
+            stretch_end = i;
+            continue;
+        }
+        if (leaf == 1) {
+            Py_CLEAR(x);
+            i++;
+            continue;
+        }
+        ssize_t size = py_size_element(&w, elem, x);
+        if (size < 0) goto error;
+        mlc_room_t room;
+        rc = mlc_write_place((uint64_t)size, reached, &room, &err);
+        if (rc == MLC_WRITE_WOULD_BLOCK) {
+            Py_CLEAR(x);
+            Py_CLEAR(w.keep);
+            if (py_snapshot(&list, &snapshot) != 0 || py_write_wait(reached) != 0) goto error;
+            stretch_end = i;
+            continue;
+        }
+        if (py_stream_result(rc, err) != 0) goto error;
+        cursor = room.data;
+        w.end = room.end;
+        w.base = (char*)room.base;
+        w.origin = (char*)room.origin;
+        if (py_write_child(&w, elem, room.slot, x) != 0) goto error;
+        if (py_write_run(&w) != 0) goto error;
+        reached = (const uint8_t*)cursor;
+        Py_CLEAR(x);
+        Py_CLEAR(w.keep);
+        i++;
+    }
+    py_walk_free(&w);
+    Py_XDECREF(snapshot);
+    Py_BEGIN_ALLOW_THREADS
+    rc = mlc_write_commit(reached, &err);
+    Py_END_ALLOW_THREADS
+    if (py_stream_result(rc, err) != 0) return -1;
+    return 1;
+error:
+    Py_XDECREF(x);
+    Py_XDECREF(snapshot);
+    py_walk_free(&w);
+    // SLOT-37: the abort runs the closes deferred during the batch.
+    Py_BEGIN_ALLOW_THREADS
+    mlc_write_abort();
+    Py_END_ALLOW_THREADS
+    return -1;
+}
+
 // _mlc_write(schema_str, level, value_obj, handle) -> None
-// value_obj is serialised to voidstar via to_voidstar before being
-// passed to the runtime.
+// A list batch to an output file is written in place; any other value or
+// stream takes a voidstar copy, which the runtime lays out.
 static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     long long level_ll;
@@ -4289,6 +5300,14 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     PARSE_ARGS_OR_ABORT(args, "sLOL",
             &schema_str, &level_ll, &value_obj, &handle_ll);
     schema = PyTRY(parse_schema, schema_str);
+    if (schema->type == MORLOC_ARRAY && PyList_Check(value_obj)) {
+        int placed = py_write_in_place(schema, level_ll, value_obj, (int64_t)handle_ll);
+        if (placed < 0) goto error;
+        if (placed == 1) {
+            free_schema(schema);
+            Py_RETURN_NONE;
+        }
+    }
     ssize_t bytes = get_shm_size(schema, value_obj);
     if (bytes < 0) { goto error; }
     voidstar = PyTRY(shmalloc, (size_t)bytes);
@@ -4460,12 +5479,17 @@ error:
     return NULL;
 }
 
-// mlc_tell() -> int. Elements written to the @stdout OStream so far. Never
-// fails (returns 0 when no @stdout is open).
+// mlc_tell() -> int. Elements written to the @stdout OStream so far (0 when
+// no @stdout is open).
 static PyObject* pybinding__mlc_tell(PyObject* self, PyObject* args) {
     (void)self; (void)args;
     char* errmsg = NULL;
     uint64_t n = mlc_tell(&errmsg);
+    if (errmsg != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, errmsg);
+        free(errmsg);
+        return NULL;
+    }
     return PyLong_FromUnsignedLongLong((unsigned long long)n);
 }
 
@@ -4491,101 +5515,6 @@ static PyObject* pybinding__mlc_unlink_tmp(PyObject* self, PyObject* args) { MAY
 error:
     return NULL;
 }
-
-// -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; @cellreduce reads them all
-// (mlc_cell_slots) and merges them with the handler's `combine`.
-
-// mlc_cell_new(schema, init) -> handle
-static PyObject* pybinding__mlc_cell_new(PyObject* self, PyObject* args) { MAYFAIL
-    const char* schema_str;
-    PyObject* init_obj;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-    PARSE_ARGS_OR_ABORT(args, "sO", &schema_str, &init_obj);
-    schema = PyTRY(parse_schema, schema_str);
-    voidstar = to_voidstar(schema, init_obj);
-    PyTRACE(voidstar == NULL)
-    int64_t handle = PyTRY(mlc_cell_new, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return PyLong_FromLongLong((long long)handle);
-error:
-    if (voidstar) {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return NULL;
-}
-
-// Shared tail for the two accumulator readers.
-static PyObject* cell_value_to_py(Schema* schema, void* voidstar) {
-    // Any view of the block holds it through its owner; the block's own
-    // reference is released as soon as the value is read.
-    PyObject* obj = from_voidstar_owned(schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    if (obj == NULL) {
-        return NULL;
-    }
-    return obj;
-}
-
-// mlc_cell_get(handle, schema) -> value
-static PyObject* pybinding__mlc_cell_get(PyObject* self, PyObject* args) { MAYFAIL
-    long long handle_ll;
-    const char* schema_str;
-    Schema* schema = NULL;
-    PARSE_ARGS_OR_ABORT(args, "Ls", &handle_ll, &schema_str);
-    schema = PyTRY(parse_schema, schema_str);
-    void* voidstar = PyTRY(mlc_cell_get, (int64_t)handle_ll, schema);
-    return cell_value_to_py(schema, voidstar);
-error:
-    free_schema(schema);
-    return NULL;
-}
-
-// mlc_cell_put(handle, schema, value) -> None
-static PyObject* pybinding__mlc_cell_put(PyObject* self, PyObject* args) { MAYFAIL
-    long long handle_ll;
-    const char* schema_str;
-    PyObject* value_obj;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-    PARSE_ARGS_OR_ABORT(args, "LsO", &handle_ll, &schema_str, &value_obj);
-    schema = PyTRY(parse_schema, schema_str);
-    voidstar = to_voidstar(schema, value_obj);
-    PyTRACE(voidstar == NULL)
-    PyTRY(mlc_cell_put, (int64_t)handle_ll, schema, voidstar);
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    Py_RETURN_NONE;
-error:
-    if (voidstar) {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return NULL;
-}
-
-
-
 
 // mlc_replay(schema, handle, fn) -> None. Call `fn` on every frame
 // (sub-packet) of the stream, in order, each as the list it holds. An empty
@@ -4624,70 +5553,437 @@ error:
     return NULL;
 }
 
-// mlc_cell_slots(schema, handle) -> list. Every accumulator of a cell, in
-// its wire form; with mlc_reduce_list it runs @cellreduce.
-static PyObject* pybinding__mlc_cell_slots(PyObject* self, PyObject* args) { MAYFAIL
-    const char* schema_str;
-    long long handle_ll = -1;
-    Schema* schema = NULL;
-    PyObject* xs = NULL;
-    PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
-    int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
-    if (n < 1) {
-        PyINTERNAL_ABORT("mlc_cell_slots: fold accumulator holds nothing to merge");
+// -- Native gathers (model/runtime/side.md) ------------------------------
+// A gather keeps the batches put into it in one Python list. Each batch is
+// first given the form @load would give it (NATIVE-9): a batch already in
+// that form is kept as it is, and any other is packed and decoded.
+
+#define PY_GATHER_DEPTH 64
+
+static int py_int_in(PyObject* x, long long lo, unsigned long long hi) {
+#if PY_VERSION_HEX >= 0x030C0000
+    if (PyUnstable_Long_IsCompact((PyLongObject*)x)) {
+        Py_ssize_t c = PyUnstable_Long_CompactValue((PyLongObject*)x);
+        return c >= lo && (c < 0 || (unsigned long long)c <= hi);
     }
-    xs = PyList_New(0);
-    if (xs == NULL) { goto error; }
-    for (int64_t i = 0; i < n; i++) {
-        schema = PyTRY(parse_schema, schema_str);
-        void* voidstar = PyTRY(mlc_cell_slot, (int64_t)handle_ll, i, schema);
-        PyObject* v = cell_value_to_py(schema, voidstar);
-        schema = NULL;
-        if (v == NULL) { goto error; }
-        int r = PyList_Append(xs, v);
-        Py_DECREF(v);
-        if (r != 0) { goto error; }
+#endif
+    int overflow = 0;
+    long long v = PyLong_AsLongLongAndOverflow(x, &overflow);
+    if (overflow > 0) {
+        if (hi < ULLONG_MAX) return 0;
+        unsigned long long u = PyLong_AsUnsignedLongLong(x);
+        if (u == (unsigned long long)-1 && PyErr_Occurred()) { PyErr_Clear(); return 0; }
+        return 1;
     }
-    PyTRY(mlc_cell_free, (int64_t)handle_ll);
-    return xs;
+    if (overflow < 0) return 0;
+    if (v == -1 && PyErr_Occurred()) { PyErr_Clear(); return 0; }
+    if (v < lo) return 0;
+    return v < 0 || (unsigned long long)v <= hi;
+}
+
+// 1 when `x` is exactly what decoding a value of `schema` gives, 0 when it
+// is not (it may still encode).
+static int py_exact(const Schema* schema, PyObject* x, int depth) {
+    if (depth > PY_GATHER_DEPTH) return 0;
+    if (schema->hint != NULL
+        && !(schema->type == MORLOC_ARRAY && strcmp(schema->hint, "list") == 0)
+        && !(schema->type == MORLOC_MAP && strcmp(schema->hint, "dict") == 0)) return 0;
+    switch (schema->type) {
+        case MORLOC_NIL: return x == Py_None;
+        case MORLOC_BOOL: return PyBool_Check(x);
+        case MORLOC_SINT8: return PyLong_CheckExact(x) && py_int_in(x, INT8_MIN, INT8_MAX);
+        case MORLOC_SINT16: return PyLong_CheckExact(x) && py_int_in(x, INT16_MIN, INT16_MAX);
+        case MORLOC_SINT32: return PyLong_CheckExact(x) && py_int_in(x, INT32_MIN, INT32_MAX);
+        case MORLOC_SINT64: return PyLong_CheckExact(x) && py_int_in(x, INT64_MIN, INT64_MAX);
+        case MORLOC_UINT8: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT8_MAX);
+        case MORLOC_UINT16: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT16_MAX);
+        case MORLOC_UINT32: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT32_MAX);
+        case MORLOC_UINT64: return PyLong_CheckExact(x) && py_int_in(x, 0, UINT64_MAX);
+        case MORLOC_INT: return PyLong_CheckExact(x);
+        case MORLOC_FLOAT64: return PyFloat_CheckExact(x);
+        case MORLOC_FLOAT32: {
+            if (!PyFloat_CheckExact(x)) return 0;
+            double d = PyFloat_AS_DOUBLE(x);
+            return d != d || isinf(d) || (fabs(d) <= FLT_MAX && (double)(float)d == d);
+        }
+        case MORLOC_STRING: {
+            if (!PyUnicode_CheckExact(x)) return 0;
+            int kind = PyUnicode_KIND(x);
+            if (kind == PyUnicode_1BYTE_KIND) return 1;
+            const void* data = PyUnicode_DATA(x);
+            Py_ssize_t n = PyUnicode_GET_LENGTH(x);
+            for (Py_ssize_t i = 0; i < n; i++) {
+                Py_UCS4 c = PyUnicode_READ(kind, data, i);
+                if (c >= 0xD800 && c <= 0xDFFF) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_ARRAY: {
+            if (!PyList_CheckExact(x)) return 0;
+            const Schema* e = schema->parameters[0];
+            Py_ssize_t n = PyList_GET_SIZE(x);
+            for (Py_ssize_t i = 0; i < n; i++) {
+                if (!py_exact(e, PyList_GET_ITEM(x, i), depth + 1)) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_TUPLE: {
+            if (!PyTuple_CheckExact(x) || (size_t)PyTuple_GET_SIZE(x) != schema->size) return 0;
+            for (size_t i = 0; i < schema->size; i++) {
+                if (!py_exact(schema->parameters[i], PyTuple_GET_ITEM(x, (Py_ssize_t)i), depth + 1)) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_MAP: {
+            if (!PyDict_CheckExact(x) || (size_t)PyDict_GET_SIZE(x) != schema->size) return 0;
+            Py_ssize_t pos = 0;
+            PyObject* k;
+            PyObject* v;
+            for (size_t i = 0; i < schema->size; i++) {
+                if (!PyDict_Next(x, &pos, &k, &v)) return 0;
+                if (!PyUnicode_CheckExact(k) || PyUnicode_CompareWithASCIIString(k, schema->keys[i]) != 0) return 0;
+                if (!py_exact(schema->parameters[i], v, depth + 1)) return 0;
+            }
+            return 1;
+        }
+        case MORLOC_OPTIONAL:
+            return x == Py_None || py_exact(schema->parameters[0], x, depth + 1);
+        default:
+            return 0;
+    }
+}
+
+// mlc_gather_new(acc) -> handle. `acc` is the list batches are added to
+// (SIDE-5).
+static PyObject* pybinding__mlc_gather_new(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* acc;
+    PARSE_ARGS_OR_ABORT(args, "O!", &PyList_Type, &acc);
+    int64_t h = PyTRY(mlc_side_new, (void*)acc);
+    return PyLong_FromLongLong((long long)h);
 error:
-    {
-        char* free_errmsg = NULL;
-        mlc_cell_free((int64_t)handle_ll, &free_errmsg);
-        free(free_errmsg);
-    }
-    Py_XDECREF(xs);
-    free_schema(schema);
     return NULL;
 }
 
-// mlc_reduce_list(combine, xs) -> value. A non-empty list folded with
-// `combine`.
-static PyObject* pybinding__mlc_reduce_list(PyObject* self, PyObject* args) {
-    PyObject* combine;
-    PyObject* xs;
-    if (!PyArg_ParseTuple(args, "OO", &combine, &xs)) return NULL;
-    PyObject* items = PySequence_Fast(xs, "mlc_reduce_list: not a sequence");
-    if (items == NULL) return NULL;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(items);
-    if (n < 1) {
-        Py_DECREF(items);
-        PyErr_SetString(PyExc_RuntimeError, "mlc_reduce_list: nothing to reduce");
+typedef struct {
+    PyObject* batch;
+    int failed;
+} py_gather_item_t;
+
+// SIDE-5
+static void py_gather_append(void* container, void* item) {
+    py_gather_item_t* it = (py_gather_item_t*)item;
+    PyObject* acc = (PyObject*)container;
+    Py_ssize_t n = PyList_GET_SIZE(acc);
+    if (PyList_SetSlice(acc, n, n, it->batch) != 0) it->failed = 1;
+}
+
+// The batch in the form @load would give it: itself when it is already in
+// that form, else packed and decoded.
+static PyObject* py_gather_form(const Schema* schema, PyObject* batch) {
+    if (py_exact(schema, batch, 0)) {
+        Py_INCREF(batch);
+        return batch;
+    }
+    void* voidstar = to_voidstar(schema, batch);
+    if (voidstar == NULL) return NULL;
+    PyObject* obj = from_voidstar_owned(schema, voidstar);
+    char* shfree_errmsg = NULL;
+    shfree(voidstar, &shfree_errmsg);
+    free(shfree_errmsg);
+    return obj;
+}
+
+// mlc_gather_put(handle, schema, batch) -> None. SIDE-4: a gather id puts
+// to its record, a stream handle to its stream.
+static PyObject* py_gather_put(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    const char* schema_str;
+    PyObject* batch;
+    PyObject* formed = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LsO", &h_ll, &schema_str, &batch);
+    if (h_ll >= 0) {
+        PyObject* wargs = Py_BuildValue("(sLOL)", schema_str, 0LL, batch, h_ll);
+        if (wargs == NULL) goto error;
+        PyObject* written = pybinding__mlc_write(self, wargs);
+        Py_DECREF(wargs);
+        return written;
+    }
+    Schema* schema = PyTRY(cached_schema, schema_str);
+    int32_t r = PyTRY(mlc_side_route, (int64_t)h_ll);
+    if (r == 1) {
+        formed = py_gather_form(schema, batch);
+        if (formed == NULL) goto error;
+        py_gather_item_t item = {formed, 0};
+        r = PyTRY(mlc_side_with_native, (int64_t)h_ll, 0, py_gather_append, (void*)&item);
+        if (item.failed) goto error;
+    }
+    if (r == 0) {
+        voidstar = to_voidstar(schema, batch);
+        PyTRACE(voidstar == NULL)
+        PyTRY(mlc_side_put, (int64_t)h_ll, schema, voidstar);
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        voidstar = NULL;
+    }
+    Py_XDECREF(formed);
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    Py_XDECREF(formed);
+    return NULL;
+}
+
+// mlc_gather_take(handle, schema, acc) -> acc, with every batch forked
+// children sent added after the native ones, in order.
+static PyObject* pybinding__mlc_gather_take(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    const char* schema_str;
+    PyObject* acc;
+    void* reader = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LsO!", &h_ll, &schema_str, &PyList_Type, &acc);
+    Schema* schema = PyTRY(cached_schema, schema_str);
+    reader = PyTRY(mlc_side_take, (int64_t)h_ll);
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_side_next, reader, schema, &eof);
+        if (eof) break;
+        PyObject* batch = from_voidstar_owned(schema, voidstar);
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        if (batch == NULL) goto error;
+        Py_ssize_t n = PyList_GET_SIZE(acc);
+        int rc = PyList_SetSlice(acc, n, n, batch);
+        Py_DECREF(batch);
+        if (rc != 0) goto error;
+    }
+    mlc_side_reader_free(reader);
+    Py_INCREF(acc);
+    return acc;
+error:
+    if (reader) mlc_side_reader_free(reader);
+    return NULL;
+}
+
+// mlc_side_drop(handle) -> None: end a gather without reading it.
+static PyObject* pybinding__mlc_side_drop(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    mlc_side_drop((int64_t)h_ll);
+    Py_RETURN_NONE;
+}
+
+// -- Native folds (model/runtime/fold.md) --------------------------------
+// FOLD-1, FOLD-6
+
+static void* py_fold_fresh(void* init) {
+    Py_INCREF((PyObject*)init);
+    return init;
+}
+
+static void py_fold_release(void** values, size_t n) {
+    for (size_t i = 0; i < n; i++) Py_DECREF((PyObject*)values[i]);
+    free(values);
+}
+
+// mlc_fold_new(init) -> handle. FOLD-6, FOLD-10
+static PyObject* pybinding__mlc_fold_new(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* init;
+    PARSE_ARGS_OR_ABORT(args, "O", &init);
+    int64_t h = PyTRY(mlc_fold_new, (void*)init, py_fold_fresh);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// mlc_fold_checkout(h) -> (True, value, fresh) with this thread's value
+// (fresh: init itself, to be copied), or (False, None, False) for the side
+// file.
+static PyObject* pybinding__mlc_fold_checkout(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    void* value = NULL;
+    int32_t fresh = 0;
+    PARSE_ARGS_OR_ABORT(args, "L", &h_ll);
+    int32_t r = PyTRY(mlc_fold_checkout, (int64_t)h_ll, &value, &fresh);
+    if (r == 0) return Py_BuildValue("(OOO)", Py_False, Py_None, Py_False);
+    PyObject* out = Py_BuildValue("(OOO)", Py_True, (PyObject*)value, fresh ? Py_True : Py_False);
+    Py_DECREF((PyObject*)value);
+    return out;
+error:
+    return NULL;
+}
+
+// mlc_fold_store(h, value) -> None
+static PyObject* pybinding__mlc_fold_store(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    PyObject* value;
+    PARSE_ARGS_OR_ABORT(args, "LO", &h_ll, &value);
+    Py_INCREF(value);
+    char* errmsg = NULL;
+    if (mlc_fold_store((int64_t)h_ll, (void*)value, &errmsg) != 0) {
+        Py_DECREF(value);
+        PyErr_SetString(PyMorlocException, errmsg ? errmsg : "@fold: storing a step failed");
+        free(errmsg);
         return NULL;
     }
-    PyObject* acc = PySequence_Fast_GET_ITEM(items, 0);
-    Py_INCREF(acc);
-    for (Py_ssize_t i = 1; i < n; i++) {
-        PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, PySequence_Fast_GET_ITEM(items, i), NULL);
-        Py_DECREF(acc);
-        acc = merged;
-        if (acc == NULL) break;
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// SIDE-12: a put that raised fails its sink, so a producer that catches the
+// error cannot finish with the batch missing.
+static void py_sink_failed_on_error(PyObject* args) {
+    PyObject *type, *value, *tb;
+    PyErr_Fetch(&type, &value, &tb);
+    if (PyTuple_Check(args) && PyTuple_GET_SIZE(args) > 0) {
+        long long h = PyLong_AsLongLong(PyTuple_GET_ITEM(args, 0));
+        if (!(h == -1 && PyErr_Occurred())) mlc_sink_failed((int64_t)h);
+        PyErr_Clear();
     }
-    Py_DECREF(items);
-    return acc;
+    PyErr_Restore(type, value, tb);
+}
+
+static PyObject* pybinding__mlc_gather_put(PyObject* self, PyObject* args) {
+    PyObject* r = py_gather_put(self, args);
+    if (r == NULL) py_sink_failed_on_error(args);
+    return r;
+}
+
+// FORK-17: exit_forked()
+static PyObject* pybinding__exit_forked(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    mlc_exit_forked();
+    Py_RETURN_NONE;
+}
+
+// mlc_sink_failed(h) -> None
+static PyObject* pybinding__mlc_sink_failed(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    mlc_sink_failed((int64_t)h_ll);
+    Py_RETURN_NONE;
+}
+
+// mlc_fold_failed(h) -> None
+static PyObject* pybinding__mlc_fold_failed(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    mlc_fold_failed((int64_t)h_ll);
+    Py_RETURN_NONE;
+}
+
+// mlc_fold_take(h, schema, k) -> the stored values, after k is applied to
+// each side batch in order. With a schema of None, a batch in the side
+// file fails the take.
+static PyObject* pybinding__mlc_fold_take(PyObject* self, PyObject* args) { MAYFAIL
+    long long h_ll;
+    PyObject* schema_obj;
+    PyObject* k;
+    Schema* schema = NULL;
+    void* reader = NULL;
+    void** values = NULL;
+    size_t n = 0;
+    PyObject* out = NULL;
+    char* errmsg = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LOO", &h_ll, &schema_obj, &k);
+    reader = mlc_fold_take((int64_t)h_ll, &values, &n, &errmsg);
+    out = PyList_New((Py_ssize_t)n);
+    if (out == NULL) {
+        py_fold_release(values, n);
+        free(errmsg);
+        if (reader) mlc_side_reader_free(reader);
+        return NULL;
+    }
+    for (size_t i = 0; i < n; i++) PyList_SET_ITEM(out, (Py_ssize_t)i, (PyObject*)values[i]);
+    free(values);
+    if (reader == NULL) {
+        PyErr_SetString(PyMorlocException, errmsg ? errmsg : "@fold: the take failed");
+        free(errmsg);
+        Py_DECREF(out);
+        return NULL;
+    }
+    if (schema_obj != Py_None) {
+        const char* schema_str = PyUnicode_AsUTF8(schema_obj);
+        if (schema_str == NULL) goto error;
+        schema = PyTRY(cached_schema, schema_str);
+    }
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_side_next, reader, schema, &eof);
+        if (eof) break;
+        PyObject* v = from_voidstar_owned(schema, voidstar);
+        {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+        }
+        if (v == NULL) goto error;
+        PyObject* r = PyObject_CallFunctionObjArgs(k, v, NULL);
+        Py_DECREF(v);
+        if (r == NULL) goto error;
+        Py_DECREF(r);
+    }
+    mlc_side_reader_free(reader);
+    return out;
+error:
+    if (reader) mlc_side_reader_free(reader);
+    Py_XDECREF(out);
+    return NULL;
+}
+
+// mlc_fold_drop(h) -> None: end a fold unread.
+static PyObject* pybinding__mlc_fold_drop(PyObject* self, PyObject* args) {
+    long long h_ll;
+    if (!PyArg_ParseTuple(args, "L", &h_ll)) return NULL;
+    void** values = NULL;
+    size_t n = 0;
+    mlc_fold_drop((int64_t)h_ll, &values, &n);
+    py_fold_release(values, n);
+    Py_RETURN_NONE;
+}
+
+// mlc_side_put(id, schema, batch) -> None. A schema of None (no wire form)
+// fails the fold (SIDE-10).
+static PyObject* pybinding__mlc_side_put(PyObject* self, PyObject* args) { MAYFAIL
+    long long id_ll;
+    PyObject* schema_obj;
+    PyObject* value_obj;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LOO", &id_ll, &schema_obj, &value_obj);
+    if (schema_obj != Py_None) {
+        const char* schema_str = PyUnicode_AsUTF8(schema_obj);
+        if (schema_str == NULL) goto error;
+        schema = PyTRY(cached_schema, schema_str);
+        voidstar = to_voidstar(schema, value_obj);
+        PyTRACE(voidstar == NULL)
+    }
+    PyTRY(mlc_side_put, (int64_t)id_ll, schema, voidstar);
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    return NULL;
 }
 
 static PyMethodDef Methods[] = {
+    {"register_class", pybinding__register_class, METH_VARARGS, "Register a generated record class by its schema hint"},
+    {"register_data", pybinding__register_data, METH_VARARGS, "Register a generated `data` type's classes by its schema hint"},
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
     {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},
@@ -4701,6 +5997,7 @@ static PyMethodDef Methods[] = {
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"fork_generation", pybinding__fork_generation, METH_NOARGS, "This process's fork generation"},
+    {"available_cpus", pybinding__available_cpus, METH_NOARGS, "The CPUs this process may run on, read at most once a second"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
     // The name pools built by earlier compilers call.
@@ -4719,6 +6016,7 @@ static PyMethodDef Methods[] = {
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
     {"exit_if_forked", pybinding__exit_if_forked, METH_NOARGS, "Exit if this process was forked during the current call"},
+    {"exit_forked", pybinding__exit_forked, METH_NOARGS, "FORK-17"},
     {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
@@ -4757,14 +6055,23 @@ static PyMethodDef Methods[] = {
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
-    {"mlc_cell_new", pybinding__mlc_cell_new, METH_VARARGS, "Create a fold accumulator"},
-    {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
-    {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
-    {"mlc_cell_slots", pybinding__mlc_cell_slots, METH_VARARGS, "Every fold accumulator, and the cell released"},
-    {"mlc_reduce_list", pybinding__mlc_reduce_list, METH_VARARGS, "Fold a non-empty list with a function"},
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
+    {"mlc_gather_new", pybinding__mlc_gather_new, METH_VARARGS, "Start a native gather"},
+    {"mlc_gather_put", pybinding__mlc_gather_put, METH_VARARGS, "Add a batch to a native gather"},
+    {"mlc_sink_failed", pybinding__mlc_sink_failed, METH_VARARGS, "Fail a sink whose put raised"},
+    {"mlc_gather_take", pybinding__mlc_gather_take, METH_VARARGS, "End a native gather"},
+    {"mlc_side_drop", pybinding__mlc_side_drop, METH_VARARGS, "End a gather without reading it"},
+    {"mlc_side_put", pybinding__mlc_side_put, METH_VARARGS, "Send a fold batch to the side file"},
+    {"mlc_fold_new", pybinding__mlc_fold_new, METH_VARARGS, "Start a native fold"},
+    {"mlc_fold_checkout", pybinding__mlc_fold_checkout, METH_VARARGS, "Check this thread's fold slot out"},
+    {"mlc_fold_store", pybinding__mlc_fold_store, METH_VARARGS, "Store this thread's stepped fold slot"},
+    {"mlc_fold_failed", pybinding__mlc_fold_failed, METH_VARARGS, "Mark this thread's fold step failed"},
+    {"mlc_fold_take", pybinding__mlc_fold_take, METH_VARARGS, "End a native fold"},
+    {"mlc_fold_drop", pybinding__mlc_fold_drop, METH_VARARGS, "End a native fold unread"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
+    {"set_failure_message", pybinding__set_failure_message, METH_VARARGS, "Register the function that renders a failure as text"},
+    {"failure_message", pybinding__failure_message, METH_VARARGS, "A failure as text, with its trace"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 
@@ -4776,7 +6083,11 @@ static struct PyModuleDef pymorloc = {
     Methods
 };
 
+#ifndef MORLOC_BINDING_BUILD_ID
+#error "MORLOC_BINDING_BUILD_ID is set by morloc init (LIFE-6)"
+#endif
 PyMODINIT_FUNC PyInit_pymorloc(void) {
+    morloc_require_build(MORLOC_BINDING_BUILD_ID);
     morloc_install_panic_hook(NULL);
     PyObject* m = PyModule_Create(&pymorloc);
     if (m == NULL) return NULL;

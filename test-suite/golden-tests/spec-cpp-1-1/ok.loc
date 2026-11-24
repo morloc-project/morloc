@@ -1,16 +1,19 @@
 -- CPP-1: a sourced C++ function takes each argument by value or by const
 -- reference, and one that takes `T&` is rejected at build. Generated code
--- passes every named value through `std::as_const`, so a `T&` parameter
--- cannot bind (bad-*.loc, each rejected: a let, a field, a parameter, an
+-- passes a named value through `std::as_const`, or moves it at its last
+-- read where the call accepts the moved value, so a `T&` parameter cannot
+-- bind (bad-*.loc, each rejected: a let, a field, a parameter, an
 -- operator operand, a newtype cast, a scalar beside a class operand, a
 -- function value, and a source passed to the stdlib's fold and sortBy). Every other argument shape
 -- still builds and runs here: let-bound and parameter values to `const T&`,
 -- by-value and forwarding parameters, a field, a loop slot, literals, an enum
 -- constructor, function values (also to a `const F&` template), sourced operators, a newtype cast, and
--- sources passed to fold and sortBy. `ovl` has a const and a non-const
--- overload; the const one must be chosen.
+-- sources passed to fold and sortBy, a `T&` template given a value at its
+-- last read (it deduces a const reference), and a by-value parameter given
+-- one. `ovl` has a const and a non-const overload; the const one must be
+-- chosen.
 module ok
-  (letConst, forward, overload, literals, getter, loop, param, op, lambda, folded, sorted, newtyped, mixedOp, fnConst)
+  (letConst, forward, overload, literals, getter, loop, param, op, lambda, folded, sorted, newtyped, mixedOp, fnConst, tmplLast, byValLast)
 
 import .common
 
@@ -66,3 +69,9 @@ useC f = applyFnConst f 1 + applyFnConst f 2
 
 fnConst :: Int -> Int
 fnConst n = useC (\x -> x + n)
+
+tmplLast :: Int -> Int
+tmplLast n = tmplSize (mk n)
+
+byValLast :: Int -> Int
+byValLast n = let v = mk n in takeV v

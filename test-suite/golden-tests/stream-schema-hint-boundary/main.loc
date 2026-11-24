@@ -2,8 +2,8 @@
 -- concrete-type hints.
 --
 -- A type whose general name is not a builtin base type gets a `<hint>`
--- prefix in the pool's schema string: a record declared `record py => T
--- = "dict"` becomes `a<dict>m...`, and `type Tag = Str` becomes
+-- prefix in the pool's schema string: a record with Python form dict
+-- becomes `a<dict>m...`, and `type Tag = Str` becomes
 -- `a<str>s`. Every packet writer stores the hint-free form, so any
 -- comparison that is a raw string equality against the pool's schema can
 -- never match for such a type.
@@ -33,13 +33,9 @@ record Ev where
   kind :: Str
   id :: Int
 
-record py => Ev = "dict"
-
 record Other where
   alpha :: Str
   beta :: Int
-
-record py => Other = "dict"
 
 type Tag = Str
 

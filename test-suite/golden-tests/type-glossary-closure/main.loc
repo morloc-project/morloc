@@ -23,9 +23,6 @@ record Db where
   nextId :: Int
   items :: [Todo]
 
-record py => Todo = "dict"
-record py => Db = "dict"
-
 --' A command whose return is unit
 touch :: Int -> <IO> ()
 touch x = do

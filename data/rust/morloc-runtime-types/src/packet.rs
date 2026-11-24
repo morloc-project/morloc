@@ -3,7 +3,6 @@
 
 use crate::error::MorlocError;
 use crate::schema::Schema;
-use crate::shm_types::RelPtr;
 
 // ── Magic & version constants ──────────────────────────────────────────────
 
@@ -17,6 +16,10 @@ pub const DEFAULT_MODE: u16 = 0;
 /// connection for its next call. On the reply: the callee keeps it (NET-7).
 /// The caller clears it from every reply it hands on.
 pub const MODE_KEEP: u16 = 1;
+
+/// Mode bit on a header-only reply on a kept connection: the callee let the
+/// connection go and did not run whatever request it carried (NET-7).
+pub const MODE_NOT_RUN: u16 = 2;
 
 // ── Command type discriminants ─────────────────────────────────────────────
 
@@ -186,6 +189,9 @@ pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 /// cache, or a value one pool hands another), so it is not outside data.
 /// The entry body is empty.
 pub const METADATA_TYPE_PROGRAM_FILE: u8 = 0x09;
+/// A `METADATA_TYPE_PROGRAM_FILE` entry taken back from a packet read from
+/// a file, which readers skip (FMT-10).
+pub const METADATA_TYPE_UNMARKED: u8 = 0x0A;
 
 // ── Stream-footer metadata block types ────────────────────────────────────
 //
@@ -266,7 +272,7 @@ pub fn encode_frame_index_entry(frames: &[FrameEntry]) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         FRAME_INDEX_HEADER_BYTES + frames.len() * FRAME_ENTRY_BYTES,
     );
-    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    out.extend_from_slice(&meta_len_u32(frames.len()).to_le_bytes());
     for f in frames {
         out.extend_from_slice(&f.uncompressed_size.to_le_bytes());
         out.extend_from_slice(&f.compressed_size.to_le_bytes());
@@ -352,8 +358,17 @@ pub struct CommandData {
     pub encryption: u8,
     pub status: u8,
     /// SHM-13: for a reference packet, the generation of the block it names
-    /// (little endian); 0 means unchecked.
+    /// (little endian); never 0, which is refused.
     pub generation: [u8; 2],
+}
+
+impl CommandData {
+    /// SHM-13: the payload now travels inside the packet, which therefore
+    /// records no generation.
+    pub fn set_inline(&mut self) {
+        self.source = PACKET_SOURCE_MESG;
+        self.generation = [0; 2];
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -521,7 +536,29 @@ impl PacketHeader {
         )
     }
 
-    /// Create a data packet header for relative pointer (shared memory).
+    /// Create a data packet header for a file reference, whose payload is
+    /// the file's path.
+    pub fn data_file(format: u8, metadata_len: u32, path_len: u64) -> Self {
+        Self::new(
+            PacketCommand {
+                data: CommandData {
+                    cmd_type: PACKET_TYPE_DATA,
+                    source: PACKET_SOURCE_FILE,
+                    format,
+                    compression: PACKET_COMPRESSION_NONE,
+                    encryption: PACKET_ENCRYPTION_NONE,
+                    status: PACKET_STATUS_PASS,
+                    generation: [0; 2],
+                },
+            },
+            metadata_len,
+            path_len,
+        )
+    }
+
+    /// Create a data packet header for relative pointer (shared memory),
+    /// with no generation: such a packet is refused when read (SHM-13), so
+    /// this serves tests of that refusal and of loaders that reject it.
     pub fn data_rptr(format: u8, payload_len: u64) -> Self {
         Self::new(
             PacketCommand {
@@ -585,10 +622,6 @@ impl PacketHeader {
             0,
             error_msg_len,
         )
-    }
-
-    pub fn total_size(&self) -> u64 {
-        self.offset as u64 + self.length
     }
 
     pub fn is_valid(&self) -> bool {
@@ -656,6 +689,32 @@ impl PacketHeader {
         }
         Ok(header)
     }
+
+    /// The header at the start of `bytes`, refusing a slice shorter than one.
+    pub fn from_prefix(bytes: &[u8]) -> Result<Self, MorlocError> {
+        match bytes.get(..32) {
+            Some(h) => Self::from_bytes(h.try_into().unwrap()),
+            None => Err(MorlocError::Packet(format!(
+                "{} bytes is shorter than a 32-byte packet header",
+                bytes.len()
+            ))),
+        }
+    }
+}
+
+/// A length for a 32-bit length field.
+pub fn len_u32(n: usize) -> Result<u32, MorlocError> {
+    u32::try_from(n).map_err(|_| MorlocError::Packet(format!(
+        "{n} bytes is longer than a 4 GiB length field"
+    )))
+}
+
+/// `len_u32` for metadata the runtime builds from a program's schemas and
+/// from indexes bounded by a payload in memory, where a longer one is a
+/// defect (PANIC-13). The stream footer, whose index grows with the stream,
+/// uses `len_u32`.
+pub(crate) fn meta_len_u32(n: usize) -> u32 {
+    len_u32(n).expect("packet metadata longer than its 4 GiB length field")
 }
 
 /// The hint given with every error that finds bytes not shaped like a packet.
@@ -695,45 +754,6 @@ pub fn validate_packet(bytes: &[u8]) -> Result<PacketHeader, MorlocError> {
 
 // ── Full packet construction (header + metadata + payload) ─────────────────
 
-/// Build a complete data packet with schema metadata and relptr payload.
-pub fn make_standard_data_packet(relptr: RelPtr, schema: &Schema) -> Vec<u8> {
-    let schema_str = crate::schema::schema_to_string(schema);
-    let schema_bytes = schema_str.as_bytes();
-    let schema_len = schema_bytes.len() + 1; // +1 for null terminator
-
-    let meta_header_size = std::mem::size_of::<MetadataHeader>();
-    let raw_meta_len = meta_header_size + schema_len;
-    let padded_meta_len = ((raw_meta_len + 31) / 32) * 32;
-
-    let payload_len = std::mem::size_of::<RelPtr>();
-
-    let total = 32 + padded_meta_len + payload_len;
-    let mut packet = vec![0u8; total];
-
-    let header = PacketHeader::data_rptr(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
-    let mut hdr = header;
-    hdr.offset = padded_meta_len as u32;
-    let hdr_bytes = hdr.to_bytes();
-    packet[..32].copy_from_slice(&hdr_bytes);
-
-    let meta_start = 32;
-    packet[meta_start] = b'm';
-    packet[meta_start + 1] = b'm';
-    packet[meta_start + 2] = b'h';
-    packet[meta_start + 3] = METADATA_TYPE_SCHEMA_STRING;
-    let meta_size_bytes = (schema_len as u32).to_le_bytes();
-    packet[meta_start + 4..meta_start + 8].copy_from_slice(&meta_size_bytes);
-
-    let schema_data_start = meta_start + meta_header_size;
-    packet[schema_data_start..schema_data_start + schema_bytes.len()].copy_from_slice(schema_bytes);
-
-    let payload_start = 32 + padded_meta_len;
-    let relptr_bytes = relptr.to_ne_bytes();
-    packet[payload_start..payload_start + relptr_bytes.len()].copy_from_slice(&relptr_bytes);
-
-    packet
-}
-
 /// Build an inline MESG+MSGPACK data packet with schema metadata.
 pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {
     let schema_str = crate::schema::schema_to_string(schema);
@@ -748,7 +768,7 @@ pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {
     let mut packet = vec![0u8; total];
 
     let mut header = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, mpk_data.len() as u64);
-    header.offset = padded_meta_len as u32;
+    header.offset = meta_len_u32(padded_meta_len);
     let hdr_bytes = header.to_bytes();
     packet[..32].copy_from_slice(&hdr_bytes);
 
@@ -757,7 +777,7 @@ pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {
     packet[meta_start + 1] = b'm';
     packet[meta_start + 2] = b'h';
     packet[meta_start + 3] = METADATA_TYPE_SCHEMA_STRING;
-    let meta_size_bytes = (schema_len as u32).to_le_bytes();
+    let meta_size_bytes = meta_len_u32(schema_len).to_le_bytes();
     packet[meta_start + 4..meta_start + 8].copy_from_slice(&meta_size_bytes);
 
     let schema_data_start = meta_start + meta_header_size;
@@ -812,7 +832,7 @@ pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
     let mut out = vec![0u8; total];
 
     let mut hdr = PacketHeader::stream();
-    hdr.offset = padded_meta_len as u32;
+    hdr.offset = meta_len_u32(padded_meta_len);
     let hdr_bytes = hdr.to_bytes();
     out[..32].copy_from_slice(&hdr_bytes);
 
@@ -820,7 +840,7 @@ pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
     out[meta_start..meta_start + 3].copy_from_slice(&METADATA_HEADER_MAGIC);
     out[meta_start + 3] = METADATA_TYPE_SCHEMA_STRING;
     out[meta_start + 4..meta_start + 8]
-        .copy_from_slice(&(schema_len as u32).to_le_bytes());
+        .copy_from_slice(&meta_len_u32(schema_len).to_le_bytes());
     let schema_data_start = meta_start + meta_header_size;
     out[schema_data_start..schema_data_start + schema_bytes.len()]
         .copy_from_slice(schema_bytes);
@@ -829,11 +849,12 @@ pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
 }
 
 /// A FOOTER packet holding `blocks` as unpadded metadata entries.
-pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
+pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Result<Vec<u8>, MorlocError> {
     let payload_len: usize = blocks
         .iter()
         .map(|(_, body)| std::mem::size_of::<MetadataHeader>() + body.len())
         .sum();
+    let payload_u32 = len_u32(payload_len)?;
 
     let total = 32 + payload_len;
     let mut out = vec![0u8; total];
@@ -841,7 +862,7 @@ pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
 // `iter_packet_metadata` reads entries from `32..32 + offset`, so `offset`
 // covers the blocks even though they are also the payload.
     let mut hdr = PacketHeader::footer(payload_len as u64);
-    hdr.offset = payload_len as u32;
+    hdr.offset = payload_u32;
     let hdr_bytes = hdr.to_bytes();
     out[..32].copy_from_slice(&hdr_bytes);
 
@@ -849,14 +870,13 @@ pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
     for &(kind, body) in blocks {
         out[cur..cur + 3].copy_from_slice(&METADATA_HEADER_MAGIC);
         out[cur + 3] = kind;
-        out[cur + 4..cur + 8]
-            .copy_from_slice(&(body.len() as u32).to_le_bytes());
+        out[cur + 4..cur + 8].copy_from_slice(&len_u32(body.len())?.to_le_bytes());
         cur += 8;
         out[cur..cur + body.len()].copy_from_slice(body);
         cur += body.len();
     }
 
-    out
+    Ok(out)
 }
 
 // ── Stream diagnostic block (StreamDiag) ──────────────────────────────────
@@ -1003,11 +1023,12 @@ pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
     let diag_bytes = diag.as_bytes();
     let footer_packet = make_footer_packet(&[
         (METADATA_TYPE_STREAM_DIAG, &diag_bytes),
-    ]);
+    ])
+    .expect("a footer holding one diagnostics block fits its length field");
     debug_assert_eq!(footer_packet.len(), 32 + 8 + 160);
     let mut out = Vec::with_capacity(STREAM_TEMP_FOOTER_BYTES);
     out.extend_from_slice(&footer_packet);
-    let tail = encode_stream_tail(footer_packet.len() as u32);
+    let tail = encode_stream_tail(meta_len_u32(footer_packet.len()));
     out.extend_from_slice(&tail);
     debug_assert_eq!(out.len(), STREAM_TEMP_FOOTER_BYTES);
     out
@@ -1019,7 +1040,28 @@ pub fn make_final_footer_packet(
     diag: &StreamDiag,
     subpacket_entries: &[SubpacketEntry],
     status: u8,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, MorlocError> {
+    let total = subpacket_entries.iter().try_fold(0u64, |n, e| n.checked_add(e.elem_count));
+    let ordered = subpacket_entries.windows(2).all(|w| w[0].offset < w[1].offset);
+    if total != Some(diag.element_count) || !ordered {
+        return Err(MorlocError::Packet(format!(
+            "a stream footer was built with an inconsistent index: {} entries counting {:?} \
+             elements (ordered: {ordered}) for a stream of {} elements",
+            subpacket_entries.len(),
+            total,
+            { diag.element_count },
+        )));
+    }
+    final_footer_packet_as_given(diag, subpacket_entries, status)
+}
+
+/// A final footer holding the index as given, unchecked: what a damaged
+/// writer would produce. Writers use `make_final_footer_packet`.
+pub fn final_footer_packet_as_given(
+    diag: &StreamDiag,
+    subpacket_entries: &[SubpacketEntry],
+    status: u8,
+) -> Result<Vec<u8>, MorlocError> {
     let mut idx_body = Vec::with_capacity(
         SUBPACKET_INDEX_HEADER_BYTES + subpacket_entries.len() * SUBPACKET_ENTRY_BYTES,
     );
@@ -1036,12 +1078,12 @@ pub fn make_final_footer_packet(
         (METADATA_TYPE_SUBPACKET_INDEX, &idx_body),
         (METADATA_TYPE_FOOTER_FINAL, &[]),
         (METADATA_TYPE_FOOTER_STATUS, &status_body),
-    ]);
+    ])?;
+    let footer_len = len_u32(footer_packet.len())?;
     let mut out = Vec::with_capacity(footer_packet.len() + STREAM_TAIL_SIZE);
     out.extend_from_slice(&footer_packet);
-    let tail = encode_stream_tail(footer_packet.len() as u32);
-    out.extend_from_slice(&tail);
-    out
+    out.extend_from_slice(&encode_stream_tail(footer_len));
+    Ok(out)
 }
 
 /// The status in a FOOTER_STATUS body; an empty body reads as `FOOTER_STATUS_CLOSED`.
@@ -1051,6 +1093,48 @@ pub fn decode_footer_status(data: &[u8]) -> u8 {
     } else {
         data[0]
     }
+}
+
+/// Check a final footer's index against the file: entries in file order,
+/// each at least a header apart and inside `[body_start, footer_start)`, the
+/// last one's whole extent (`last_size`) before the footer, and their counts
+/// adding up to the footer's `element_count`. These checks read no other
+/// sub-packet, so an index that passes may still disagree with the file.
+pub fn check_subpacket_index(
+    entries: &[SubpacketEntry],
+    body_start: u64,
+    footer_start: u64,
+    element_count: u64,
+    last_size: impl FnOnce(u64) -> Result<u64, MorlocError>,
+) -> Result<(), MorlocError> {
+    let corrupt = |why: String| MorlocError::Packet(format!("corrupt sub-packet index: {why}"));
+    let mut next = body_start;
+    let mut total = 0u64;
+    for (i, e) in entries.iter().enumerate() {
+        if e.offset < next {
+            return Err(corrupt(format!(
+                "entry {i} at offset {} overlaps the previous entry or the stream header", e.offset
+            )));
+        }
+        next = e.offset.checked_add(32).filter(|&end| end <= footer_start).ok_or_else(|| corrupt(format!(
+            "entry {i} at offset {} is past the footer at {footer_start}", e.offset
+        )))?;
+        total = total.checked_add(e.elem_count).ok_or_else(|| corrupt("element counts overflow".into()))?;
+    }
+    if let Some(last) = entries.last() {
+        let end = last_size(last.offset)?.checked_add(last.offset);
+        if end.map_or(true, |end| end > footer_start) {
+            return Err(corrupt(format!(
+                "the last sub-packet, at offset {}, runs into the footer at {footer_start}", last.offset
+            )));
+        }
+    }
+    if total != element_count {
+        return Err(corrupt(format!(
+            "entries count {total} elements but the footer reports {element_count}"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse a SUBPACKET_INDEX body (without the 8-byte entry header).
@@ -1123,6 +1207,130 @@ pub fn get_error_message(packet: &[u8]) -> Result<Option<String>, MorlocError> {
     }
     let payload = get_data_payload(packet)?;
     Ok(Some(String::from_utf8_lossy(payload).into_owned()))
+}
+
+/// The argument packets of a call packet, as byte ranges within it. Each
+/// argument's header is checked and its extent kept inside the call
+/// packet; one that runs past it ends the walk with an error.
+pub struct CallArgs<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    index: usize,
+}
+
+impl<'a> CallArgs<'a> {
+    /// The arguments of `call`, whose header is `header`; `call` holds the
+    /// whole packet and nothing after it.
+    pub fn over(call: &'a [u8], header: &PacketHeader) -> Self {
+        CallArgs { bytes: call, pos: 32usize.saturating_add(header.offset as usize), index: 0 }
+    }
+}
+
+impl Iterator for CallArgs<'_> {
+    type Item = Result<std::ops::Range<usize>, MorlocError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let end = self.bytes.len();
+        if self.pos >= end {
+            return None;
+        }
+        let past_end = MorlocError::Packet(format!(
+            "argument #{} of a call packet runs past the packet's end", self.index
+        ));
+        let rest = &self.bytes[self.pos..];
+        let size = if rest.len() < 32 {
+            Err(past_end)
+        } else {
+            PacketHeader::from_prefix(rest).and_then(|arg| {
+                32usize
+                    .checked_add({ arg.offset } as usize)
+                    .and_then(|n| n.checked_add(usize::try_from(arg.length).ok()?))
+                    .filter(|&n| n <= rest.len())
+                    .ok_or(past_end)
+            })
+        };
+        Some(match size {
+            Ok(n) => {
+                let span = self.pos..self.pos + n;
+                self.pos += n;
+                self.index += 1;
+                Ok(span)
+            }
+            Err(e) => {
+                self.pos = end;
+                Err(e)
+            }
+        })
+    }
+}
+
+/// The call packet `call`, read from a file, rewritten so that the pool
+/// reads every argument as data from outside (FMT-10). An inline argument
+/// is handed to `spill`, which writes it to a file of the caller's and
+/// returns its path, and is passed by that name; a file argument loses its
+/// program-file mark; an argument in shared memory is refused. A failed
+/// argument, which carries no value, is passed as it is.
+pub fn call_as_outside(
+    call: &[u8],
+    spill: &mut dyn FnMut(usize, &[u8]) -> Result<String, MorlocError>,
+) -> Result<Vec<u8>, MorlocError> {
+    let header = validate_packet(call)?;
+    if header.command_type() != PACKET_TYPE_CALL {
+        return Err(MorlocError::Packet("a call packet file holds a packet that is not a call".into()));
+    }
+    let mut args: Vec<u8> = Vec::new();
+    for (i, span) in CallArgs::over(call, &header).enumerate() {
+        let arg = &call[span?];
+        let h = PacketHeader::from_prefix(arg)?;
+        if !h.is_data() {
+            return Err(MorlocError::Packet(format!("argument #{i} of a call packet is not a data packet")));
+        }
+        let d = unsafe { h.command.data };
+        let meta_end = 32 + h.offset as usize;
+        if d.status != PACKET_STATUS_PASS {
+            args.extend_from_slice(arg);
+        } else if d.source == PACKET_SOURCE_MESG {
+            let path = spill(i, arg)?;
+            let mut meta: Vec<u8> = Vec::new();
+            for (kind, body) in iter_metadata(&arg[32..meta_end]).filter(|(k, _)| *k == METADATA_TYPE_SCHEMA_STRING) {
+                meta = append_metadata_entry(&meta, kind, body);
+            }
+            let file = PacketHeader::data_file(PACKET_FORMAT_DATA, meta_len_u32(meta.len()), path.len() as u64);
+            args.extend_from_slice(&file.to_bytes());
+            args.extend_from_slice(&meta);
+            args.extend_from_slice(path.as_bytes());
+        } else if d.source == PACKET_SOURCE_FILE {
+            let start = args.len();
+            args.extend_from_slice(arg);
+            unmark(&mut args[start + 32..start + meta_end]);
+        } else {
+            return Err(MorlocError::Packet(format!(
+                "argument #{i} of a call packet names shared memory, which a call read from a file cannot hold"
+            )));
+        }
+    }
+    let mut out = header;
+    out.length = args.len() as u64;
+    let mut bytes = out.to_bytes().to_vec();
+    bytes.extend_from_slice(&call[32..32 + header.offset as usize]);
+    bytes.extend_from_slice(&args);
+    Ok(bytes)
+}
+
+/// Turn every program-file mark in the metadata block `meta` into an entry
+/// readers skip.
+fn unmark(meta: &mut [u8]) {
+    let mut cur = 0usize;
+    while cur + 8 <= meta.len() && meta[cur..cur + 3] == METADATA_HEADER_MAGIC {
+        let size = u32::from_le_bytes([meta[cur + 4], meta[cur + 5], meta[cur + 6], meta[cur + 7]]) as usize;
+        if meta[cur + 3] == METADATA_TYPE_PROGRAM_FILE {
+            meta[cur + 3] = METADATA_TYPE_UNMARKED;
+        }
+        match cur.checked_add(8).and_then(|n| n.checked_add(size)) {
+            Some(next) if next <= meta.len() => cur = next,
+            _ => break,
+        }
+    }
 }
 
 /// Iterator over the entries of a metadata block, yielding
@@ -1209,7 +1417,7 @@ pub fn append_metadata_entry(existing: &[u8], kind: u8, body: &[u8]) -> Vec<u8> 
     out.extend_from_slice(&existing[..entries_end]);
     out.extend_from_slice(&METADATA_HEADER_MAGIC);
     out.push(kind);
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&meta_len_u32(body.len()).to_le_bytes());
     out.extend_from_slice(body);
     let padded = out.len().div_ceil(METADATA_BLOCK_ALIGNMENT) * METADATA_BLOCK_ALIGNMENT;
     out.resize(padded, 0);
@@ -1307,6 +1515,76 @@ pub fn forward_scan_subpackets(
     forward_scan_subpackets_capped(mmap, body_start, u64::MAX)
 }
 
+/// How to close a stream file by repair: keep its first `data_end` bytes
+/// (the header and every complete sub-packet) and append `footer`, a final
+/// footer marked REPAIRED (SLOT-28).
+pub struct RepairPlan {
+    pub data_end: u64,
+    pub footer: Vec<u8>,
+    pub subpackets: u64,
+    pub elements: u64,
+}
+
+/// Plan the repair of a stream file whatever state it ended in. A footer
+/// the tail still points at bounds the data, so bytes of a torn last
+/// sub-packet under it are not taken for one.
+pub fn repair_plan(file: &[u8]) -> Result<RepairPlan, MorlocError> {
+    if file.len() < 32 {
+        return Err(MorlocError::Packet("file too short for a packet header".into()));
+    }
+    let header = PacketHeader::from_bytes(file[..32].try_into().expect("32-byte slice"))?;
+    if !header.is_stream() {
+        return Err(MorlocError::Packet("not a stream file: only a stream has a footer to repair".into()));
+    }
+    let body_start = 32u64
+        .checked_add(header.offset as u64)
+        .filter(|&end| end <= file.len() as u64)
+        .ok_or_else(|| MorlocError::Packet("stream metadata block extends past file end".into()))?;
+    let bound = footer_start(file).filter(|&f| f >= body_start).unwrap_or(file.len() as u64);
+    let body = &file[..bound as usize];
+    let scan = forward_scan_subpackets(body, body_start)?;
+    let data_end = body_start + scan.bytes_scanned;
+    let mut entries = Vec::with_capacity(scan.subpacket_offsets.len());
+    let mut elements = 0u64;
+    for offset in scan.subpacket_offsets {
+        let elem_count = crate::compression::subpacket_elem_count(&file[..data_end as usize], offset)?;
+        elements = elements
+            .checked_add(elem_count)
+            .ok_or_else(|| MorlocError::Packet("the sub-packets' element counts overflow".into()))?;
+        entries.push(SubpacketEntry { offset, elem_count });
+    }
+    let mut diag = StreamDiag::new();
+    diag.subpacket_count = entries.len() as u64;
+    diag.element_count = elements;
+    let footer = make_final_footer_packet(&diag, &entries, FOOTER_STATUS_REPAIRED)?;
+    Ok(RepairPlan { data_end, footer, subpackets: entries.len() as u64, elements })
+}
+
+/// Where the footer the stream tail points at begins, when the tail is
+/// intact and a footer packet sits there.
+fn footer_start(file: &[u8]) -> Option<u64> {
+    let tail_at = file.len().checked_sub(STREAM_TAIL_SIZE)?;
+    let footer_len = decode_stream_tail(file[tail_at..].try_into().ok()?)? as usize;
+    let start = tail_at.checked_sub(footer_len)?;
+    let hdr = PacketHeader::from_bytes(file.get(start..start + 32)?.try_into().ok()?).ok()?;
+    hdr.is_footer().then_some(start as u64)
+}
+
+/// A stream file closed by repair, built in memory: `repair_plan` applied.
+pub struct RepairedStream {
+    pub bytes: Vec<u8>,
+    pub subpackets: u64,
+    pub elements: u64,
+}
+
+pub fn repair_stream(file: &[u8]) -> Result<RepairedStream, MorlocError> {
+    let plan = repair_plan(file)?;
+    let mut bytes = Vec::with_capacity(plan.data_end as usize + plan.footer.len());
+    bytes.extend_from_slice(&file[..plan.data_end as usize]);
+    bytes.extend_from_slice(&plan.footer);
+    Ok(RepairedStream { bytes, subpackets: plan.subpackets, elements: plan.elements })
+}
+
 /// `forward_scan_subpackets`, stopping after `cap` sub-packets with `scan_capped` set.
 pub fn forward_scan_subpackets_capped(
     mmap: &[u8],
@@ -1350,7 +1628,7 @@ pub fn forward_scan_subpackets_capped(
             .ok_or_else(|| MorlocError::Packet(
                 "forward_scan: sub-packet total-size overflow".into(),
             ))?;
-        if cur + total > size {
+        if cur.checked_add(total).map_or(true, |end| end > size) {
             out.partial = true;
             break;
         }
@@ -1386,6 +1664,70 @@ pub fn forward_scan_subpackets_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arg(source: u8, payload: &[u8]) -> Vec<u8> {
+        let h = PacketHeader::new(
+            PacketCommand {
+                data: CommandData {
+                    cmd_type: PACKET_TYPE_DATA,
+                    source,
+                    format: PACKET_FORMAT_MSGPACK,
+                    compression: PACKET_COMPRESSION_NONE,
+                    encryption: PACKET_ENCRYPTION_NONE,
+                    status: PACKET_STATUS_PASS,
+                    generation: [0; 2],
+                },
+            },
+            0,
+            payload.len() as u64,
+        );
+        let mut p = h.to_bytes().to_vec();
+        p.extend_from_slice(payload);
+        p
+    }
+
+    fn no_spill(_: usize, _: &[u8]) -> Result<String, MorlocError> {
+        Ok("/spilled".into())
+    }
+
+    #[test]
+    fn a_call_argument_that_runs_past_the_packet_is_refused() {
+        let good = arg(PACKET_SOURCE_MESG, b"\x01");
+        for (what, patch) in [
+            ("length", 24usize..32usize),
+            ("metadata length", 20..24),
+        ] {
+            let mut call = make_local_call_packet(0, &[good.clone(), good.clone()]);
+            let second = 32 + good.len();
+            for b in &mut call[second + patch.start..second + patch.end] {
+                *b = 0xff;
+            }
+            let header = validate_packet(&call).unwrap();
+            let spans: Vec<_> = CallArgs::over(&call, &header).collect();
+            assert!(spans[0].is_ok() && spans[1].is_err() && spans.len() == 2, "{what}: {spans:?}");
+            assert!(call_as_outside(&call, &mut no_spill).is_err(), "{what}");
+        }
+        let mut call = make_local_call_packet(0, &[good.clone()]);
+        call.extend_from_slice(&[0u8; 8]);
+        let n = call.len() - 32;
+        call[24..32].copy_from_slice(&(n as u64).to_le_bytes());
+        assert!(call_as_outside(&call, &mut no_spill).is_err(), "a short tail");
+    }
+
+    #[test]
+    fn a_call_read_from_a_file_refuses_shared_memory_and_spills_inline_values() {
+        let call = make_local_call_packet(0, &[arg(PACKET_SOURCE_RPTR, &[0; 8])]);
+        assert!(call_as_outside(&call, &mut no_spill).is_err());
+        let call = make_local_call_packet(3, &[arg(PACKET_SOURCE_MESG, b"\x01")]);
+        let out = call_as_outside(&call, &mut no_spill).unwrap();
+        let header = validate_packet(&out).unwrap();
+        let spans: Vec<_> = CallArgs::over(&out, &header).map(|s| s.unwrap()).collect();
+        let a = PacketHeader::from_prefix(&out[spans[0].clone()]).unwrap();
+        let d = unsafe { a.command.data };
+        assert_eq!((d.source, d.format), (PACKET_SOURCE_FILE, PACKET_FORMAT_DATA));
+        assert_eq!(&out[spans[0].end - 8..spans[0].end], b"/spilled");
+        assert_eq!(unsafe { header.command.call.midx }, 3);
+    }
 
     #[test]
     fn test_header_size() {
@@ -1607,11 +1949,67 @@ mod tests {
         for sp in build_subpackets(schema_str, n) {
             file.extend_from_slice(&sp);
         }
-        let footer = make_footer_packet(&[]);
+        let footer = make_footer_packet(&[]).unwrap();
         file.extend_from_slice(&footer);
         let tail = encode_stream_tail(footer.len() as u32);
         file.extend_from_slice(&tail);
         file
+    }
+
+    fn final_status(file: &[u8]) -> (bool, u8) {
+        let footer_len = decode_stream_tail(file[file.len() - STREAM_TAIL_SIZE..].try_into().unwrap()).unwrap() as usize;
+        let start = file.len() - STREAM_TAIL_SIZE - footer_len;
+        let (mut fin, mut status) = (false, FOOTER_STATUS_CLOSED);
+        for (kind, data) in iter_packet_metadata(&file[start..file.len() - STREAM_TAIL_SIZE]).unwrap() {
+            match kind {
+                METADATA_TYPE_FOOTER_FINAL => fin = true,
+                METADATA_TYPE_FOOTER_STATUS => status = decode_footer_status(data),
+                _ => {}
+            }
+        }
+        (fin, status)
+    }
+
+    // SLOT-28
+    #[test]
+    fn repair_keeps_every_complete_sub_packet_and_marks_the_footer_repaired() {
+        let schema = crate::schema::parse_schema("i8").unwrap();
+        let mut whole = make_stream_header_block(&list_schema(&schema));
+        for n in [2u64, 0, 1] {
+            whole.extend_from_slice(&build_uncompressed_subpacket(n, n as usize * 8));
+        }
+        let footer = make_footer_packet(&[]).unwrap();
+        whole.extend_from_slice(&footer);
+        whole.extend_from_slice(&encode_stream_tail(footer.len() as u32));
+        let subs = enumerate_subpackets(&whole);
+        let body_end = subs.last().unwrap().1;
+        // A temporary footer, no footer, and a cut inside the last sub-packet.
+        let mut torn_under_footer = whole[..body_end - 1].to_vec();
+        torn_under_footer.extend_from_slice(&footer);
+        torn_under_footer.extend_from_slice(&encode_stream_tail(footer.len() as u32));
+        let cuts: [(&str, Vec<u8>, usize); 4] = [
+            ("temporary footer", whole.clone(), 3),
+            ("no footer", whole[..body_end].to_vec(), 3),
+            ("cut sub-packet", whole[..body_end - 1].to_vec(), 2),
+            ("torn sub-packet under a footer", torn_under_footer, 2),
+        ];
+        for (name, file, kept) in cuts {
+            let r = repair_stream(&file).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(r.subpackets, kept as u64, "{name}");
+            assert_eq!(r.elements, [2u64, 0, 1][..kept].iter().sum::<u64>(), "{name}");
+            assert_eq!(enumerate_subpackets(&r.bytes).len(), kept, "{name}");
+            assert_eq!(&r.bytes[..subs[kept - 1].1], &whole[..subs[kept - 1].1], "{name}: data changed");
+            assert_eq!(final_status(&r.bytes), (true, FOOTER_STATUS_REPAIRED), "{name}");
+        }
+    }
+
+    #[test]
+    fn repair_refuses_a_file_that_is_not_a_stream() {
+        let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 8);
+        header.offset = 0;
+        let mut packet = header.to_bytes().to_vec();
+        packet.extend_from_slice(&[0u8; 8]);
+        assert!(repair_stream(&packet).is_err());
     }
 
     /// Walk forward through a stream file's body, returning the byte
@@ -1739,7 +2137,7 @@ mod tests {
         let footer = make_footer_packet(&[
             (0x10, block_a),
             (0x11, block_b),
-        ]);
+        ]).unwrap();
         let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
         assert!(hdr.is_footer());
 
@@ -1922,14 +2320,15 @@ mod tests {
 
     #[test]
     fn final_footer_packet_carries_all_blocks_including_status() {
-        let diag = StreamDiag::new();
         let entries: Vec<SubpacketEntry> = (0..5)
             .map(|i| SubpacketEntry {
                 offset: (i as u64) * (16 << 20),
                 elem_count: 1024 + (i as u64) * 7,
             })
             .collect();
-        let bytes = make_final_footer_packet(&diag, &entries, FOOTER_STATUS_PAUSED);
+        let mut diag = StreamDiag::new();
+        diag.element_count = entries.iter().map(|e| e.elem_count).sum();
+        let bytes = make_final_footer_packet(&diag, &entries, FOOTER_STATUS_PAUSED).unwrap();
 
         let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
         let footer = &bytes[..footer_packet_len];
@@ -2096,5 +2495,32 @@ mod tests {
     fn forward_scan_rejects_out_of_range_body_start() {
         let mmap = vec![0u8; 32];
         assert!(forward_scan_subpackets(&mmap, 64).is_err());
+    }
+}
+
+#[cfg(test)]
+mod final_footer_index_tests {
+    use super::*;
+
+    fn entries(counts: &[u64]) -> Vec<SubpacketEntry> {
+        counts.iter().enumerate().map(|(i, &c)| SubpacketEntry { offset: 64 + 100 * i as u64, elem_count: c }).collect()
+    }
+
+    #[test]
+    fn a_writer_cannot_build_a_footer_whose_counts_disagree_with_its_total() {
+        let mut diag = StreamDiag::new();
+        diag.element_count = 4;
+        assert!(make_final_footer_packet(&diag, &entries(&[1, 2]), FOOTER_STATUS_CLOSED).is_err());
+        diag.element_count = 3;
+        assert!(make_final_footer_packet(&diag, &entries(&[1, 2]), FOOTER_STATUS_CLOSED).is_ok());
+    }
+
+    #[test]
+    fn a_writer_cannot_build_a_footer_whose_entries_are_out_of_order() {
+        let mut diag = StreamDiag::new();
+        diag.element_count = 3;
+        let mut e = entries(&[1, 2]);
+        e.swap(0, 1);
+        assert!(make_final_footer_packet(&diag, &e, FOOTER_STATUS_CLOSED).is_err());
     }
 }

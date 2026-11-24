@@ -23,7 +23,6 @@ record Node where
   --' @arg -n/--next
   --' @default null
   next :: ?Node
-record Py => Node = "dict"
 
 --' Count the links
 depth :: Node -> Int

@@ -23,7 +23,7 @@ use crate::cli::{OutputForm, ViewArgs};
 use crate::dispatch::{print_result_c, NexusConfig};
 use crate::file::{classify_path, Classification, DataArg, DEFAULT_PROBE_BYTES};
 use crate::loader::load_with_parsed_schema;
-use crate::process::{self, redirect_stdout_to, take_c_errmsg};
+use crate::process::{self, redirect_stdout_in_place, take_c_errmsg};
 
 /// One runtime argument to `mlc_ifile_walk`. Must match the runtime's
 /// `IFileWalkArg` layout byte-for-byte.
@@ -317,13 +317,21 @@ fn stdin_stream_should_dispatch(
 /// block (element schema), then loops sub-packets until footer/EOF,
 /// materialising each into a fresh SHM voidstar and handing it to the
 /// appropriate emitter. Never returns.
+/// Fill `b` from `r`: false when the input ends first.
+fn fill_from(r: &mut impl std::io::Read, b: &mut [u8]) -> std::io::Result<bool> {
+    match std::io::Read::read_exact(r, b) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 fn stream_stdin_dispatch(
     args: &ViewArgs,
     selection: &OutputSelection,
     header_prefix: &[u8; 32],
     stdin: &mut std::io::StdinLock<'_>,
 ) -> ! {
-    use std::io::Read;
     use morloc_runtime_types::packet::{
         iter_metadata, METADATA_TYPE_SCHEMA_STRING, decode_schema_entry,
     };
@@ -336,11 +344,17 @@ fn stream_stdin_dispatch(
         }
     };
     // Read the stream header's metadata block.
-    let meta_len = { stream_hdr.offset } as usize;
-    let mut meta = vec![0u8; meta_len];
-    if let Err(e) = stdin.read_exact(&mut meta) {
-        eprintln!("Error: stdin stream header metadata read: {}", e);
-        process::clean_exit(1);
+    let mut meta = Vec::new();
+    match morloc_runtime_types::net_limits::read_declared(&mut meta, { stream_hdr.offset } as u64, |b| fill_from(stdin, b)) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("Error: stdin ended inside the stream header's metadata");
+            process::clean_exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: stdin stream header metadata read: {}", e);
+            process::clean_exit(1);
+        }
     }
     // Value schema string from the first SCHEMA_STRING entry. Streams
     // are list-shaped so this is the full `[T]` schema.
@@ -428,7 +442,11 @@ fn stream_stdin_dispatch(
         // Read the next sub-packet's 32-byte header.
         match read_exact_or_eof(stdin, &mut hdr_buf) {
             Ok(true) => {}
-            Ok(false) => break, // clean EOF
+            // SLOT-29: a pipe that ends before a final footer was not finished.
+            Ok(false) => {
+                eprintln!("Error: the stream ended without a final footer, so its writer did not finish it");
+                process::clean_exit(1);
+            }
             Err(e) => {
                 eprintln!("Error: sub-packet header read: {}", e);
                 process::clean_exit(1);
@@ -441,9 +459,24 @@ fn stream_stdin_dispatch(
                 process::clean_exit(1);
             }
         };
-        // Footer packet: end of stream. Consume its body + EOF tail
-        // for cleanliness, but the exact bytes don't matter for us.
+        // SLOT-29: the footer says whether the stream ended cleanly.
         if sub_hdr.is_footer() {
+            use std::io::Read;
+            let mut footer = hdr_buf.to_vec();
+            let read = morloc_runtime_types::net_limits::read_declared(&mut footer, sub_hdr.length, |b| {
+                stdin.read_exact(b).map(|()| true).or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof { Ok(false) } else { Err(e) }
+                })
+            });
+            let ended = match read {
+                Ok(true) => crate::stdio_server::piped_footer_ends(&footer),
+                Ok(false) => Err("the stream was cut inside its footer".into()),
+                Err(e) => Err(format!("footer read: {e}")),
+            };
+            if let Err(e) = ended {
+                eprintln!("Error: {e}");
+                process::clean_exit(1);
+            }
             break;
         }
         if !sub_hdr.is_data() {
@@ -453,16 +486,24 @@ fn stream_stdin_dispatch(
             );
             process::clean_exit(1);
         }
-        let sub_meta_len = { sub_hdr.offset } as usize;
-        let sub_payload_len = { sub_hdr.length } as usize;
-        let sub_total = 32 + sub_meta_len + sub_payload_len;
-        // Assemble the full sub-packet bytes for the materialiser.
-        let mut full = Vec::with_capacity(sub_total);
-        full.extend_from_slice(&hdr_buf);
-        full.resize(sub_total, 0);
-        if let Err(e) = stdin.read_exact(&mut full[32..]) {
-            eprintln!("Error: sub-packet body read: {}", e);
+        // The declared lengths are only a claim: the body is read as it
+        // arrives, so a length past the input ends at its end (NET-10).
+        let body_len = ({ sub_hdr.offset } as u64).checked_add(sub_hdr.length);
+        let Some(body_len) = body_len else {
+            eprintln!("Error: sub-packet length overflows");
             process::clean_exit(1);
+        };
+        let mut full = hdr_buf.to_vec();
+        match morloc_runtime_types::net_limits::read_declared(&mut full, body_len, |b| fill_from(stdin, b)) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("Error: stdin ended inside a sub-packet body of {} bytes", body_len);
+                process::clean_exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: sub-packet body read: {}", e);
+                process::clean_exit(1);
+            }
         }
 
         // Materialise into an SHM Array<T> voidstar. The guard shfrees
@@ -642,7 +683,7 @@ fn drain_stdin_to_temp_with_prefix(
 /// truncation/oversize gate), resolves the schema, loads via the
 /// shared loader, and hands a voidstar to [`print_result_c`].
 pub fn run(args: &ViewArgs) -> ! {
-    redirect_stdout_to(args.output_path.as_deref());
+    redirect_stdout_in_place(args.output_path.as_deref());
 
     let selection = match resolve_output_selection(args) {
         Ok(s) => s,
@@ -902,7 +943,7 @@ fn dispatch_pattern(
         }
     };
 
-    redirect_stdout_to(args.output_path.as_deref());
+    redirect_stdout_in_place(args.output_path.as_deref());
 
     let config = NexusConfig {
         output_format: selection.form.to_internal(),

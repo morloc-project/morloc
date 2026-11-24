@@ -1,9 +1,12 @@
-# A mapped form in Python is a hint on the wire and nothing more: the value
-# is the structural (constructor, fields) pair whatever the mapping says.
+# A Python form of a `data` type is not used: the value is an instance of
+# the type's generated class whatever the mapping says (GEN-12).
+from mlc_types._local.types import Box
+
+
 def grow(b):
     match b:
-        case ("Full", (x,)):
-            return ("Full", (x + 100,))
+        case Box.Full(x):
+            return Box.Full(x + 100)
         case _:
             return b
 

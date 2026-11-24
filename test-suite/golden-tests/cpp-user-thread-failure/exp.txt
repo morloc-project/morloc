@@ -1,0 +1,8 @@
+--- throws ---
+OK
+1
+0
+--- calleeDies ---
+OK
+1
+0

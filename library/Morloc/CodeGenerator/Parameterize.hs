@@ -16,6 +16,8 @@ module Morloc.CodeGenerator.Parameterize
   ( parameterize
   ) where
 
+import Data.Foldable (toList)
+import Morloc.Data.Zip (zipPrefix)
 import Data.Text (Text)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -32,18 +34,13 @@ parameterize ::
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]))
 parameterize (AnnoS m@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   MM.sayVVV "Entering parameterize LamS"
-  ids <- MM.takeFromCounter (length inputs)
-  recordArgTypes midx ids inputs
-  let args0 = fromJust $ safeZipWith Arg ids vs
+  args0 <- bindParams midx inputs vs
   markHostArgs args0
   x' <- parameterize' args0 x
   return $ AnnoS m (c, args0) (LamS vs x')
 parameterize (AnnoS m@(Idx midx (FunT inputs _)) c@(Idx _ lang) (BndS v)) = do
   MM.sayVVV $ "Entering parameterize VarS function - " <> pretty v <> "@" <> pretty lang
-  ids <- MM.takeFromCounter (length inputs)
-  recordArgTypes midx ids inputs
-  let vs = map EV (freshVarsAZ [])
-      args0 = fromJust $ safeZipWith Arg ids vs
+  args0 <- bindParams midx inputs (take (length inputs) (map EV (freshVarsAZ [unEVar v])))
   return $ AnnoS m (c, args0) (BndS v)
 parameterize x = do
   MM.sayVVV "Entering parameterize Other"
@@ -78,10 +75,8 @@ parameterize' args (AnnoS g c (ConS tv n i xs)) = do
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)
-parameterize' _ (AnnoS m c (ExeS (SrcCall src))) =
-  return $ AnnoS m (c, []) (ExeS (SrcCall src))
-parameterize' _ (AnnoS g c (ExeS (PatCall x))) =
-  return (AnnoS g (c, []) (ExeS (PatCall x)))
+parameterize' _ (AnnoS m c (ExeS x@(SrcCall _))) =
+  return $ AnnoS m (c, []) (ExeS x)
 parameterize' args (AnnoS g c (LstS xs)) = do
   xs' <- mapM (parameterize' args) xs
   let args' = pruneArgs args xs'
@@ -91,18 +86,16 @@ parameterize' args (AnnoS g c (TupS xs)) = do
   let args' = pruneArgs args xs'
   return $ AnnoS g (c, args') (TupS xs')
 parameterize' args (AnnoS g c (NamS entries)) = do
-  xs' <- mapM (parameterize' args . snd) entries
-  let args' = pruneArgs args xs'
-  return $ AnnoS g (c, args') (NamS (zip (map fst entries) xs'))
+  entries' <- mapM (traverse (parameterize' args)) entries
+  let args' = pruneArgs args (map snd entries')
+  return $ AnnoS g (c, args') (NamS entries')
 parameterize' args (AnnoS g@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   -- Bind exactly the lambda's own parameters. A lambda may bind FEWER params
   -- than its (right-flattened) function type has inputs when its body returns a
   -- function, e.g. @\y -> mul base y@ at type @Int -> Int -> Int@ -- the surplus
   -- inputs belong to the nested returned closure, not to this lambda.
-  ids <- MM.takeFromCounter (length vs)
-  recordArgTypes midx ids inputs
+  boundArgs <- bindParams midx inputs vs
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
-      boundArgs = fromJust $ safeZipWith Arg ids vs
   markHostArgs boundArgs
   x' <- parameterize' (contextArgs <> boundArgs) x
   let contextArgs' = pruneArgs contextArgs [x']
@@ -114,6 +107,9 @@ parameterize' args (AnnoS g c (AppS x xs)) = do
   xs' <- mapM (parameterize' args) xs
   let args' = pruneArgs args (x' : xs')
   return $ AnnoS g (c, args') (AppS x' xs')
+parameterize' args (AnnoS g c (PatS fg fc ev app)) = do
+  app' <- mapM (parameterize' args) app
+  return $ AnnoS g (c, pruneArgs args (toList app')) (PatS fg (fc, []) ev app')
 parameterize' args (AnnoS g c (LetBndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (LetBndS v)
@@ -179,7 +175,18 @@ freshVarsAZ exclude =
     (`notElem` exclude)
     ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
 
+-- | Each parameter name with a fresh argument id, the parameter types recorded
+-- against those ids. A lambda may bind fewer parameters than its type has
+-- inputs; the rest belong to the function it returns.
+bindParams :: Int -> [Type] -> [EVar] -> MorlocMonad [Arg EVar]
+bindParams midx inputs vs = do
+  when (length vs > length inputs) $
+    MM.throwCompilerBugAt midx "a lambda binds more parameters than its function type has inputs"
+  args <- mapM (\v -> (`Arg` v) <$> MM.getCounter) vs
+  recordArgTypes midx [i | Arg i _ <- args] inputs
+  return args
+
 -- | Remember each minted argument's declared type (see 'stateArgTypes').
 recordArgTypes :: Int -> [Int] -> [Type] -> MorlocMonad ()
 recordArgTypes midx ids ts =
-  MM.modify' (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zip ids ts)})
+  MM.modify' (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zipPrefix ids ts)})

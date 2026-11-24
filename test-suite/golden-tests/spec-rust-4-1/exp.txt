@@ -1,0 +1,14 @@
+1000
+1
+{"Add":[{"Num":[3.5]},{"Shared":[{"Neg":[{"Num":[1]}]},"s"]}]}
+1
+{"Shared":[{"Maybe1":[null]},"t"]}
+{"Num":[4]}
+{"Num":[2]}
+{"Num":[5]}
+null
+{"Num":[6]}
+"u"
+1001
+refused old
+refused width

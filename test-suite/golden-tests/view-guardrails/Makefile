@@ -6,6 +6,8 @@ NEXUS := $(MHOME)/bin/morloc-nexus
 #   * Stream -> data size gate (`-d` on stream).
 #   * Binary-to-tty refusal (`-f voidstar` piped through a fake tty).
 #   * CLI mutex / -f-vs-packet-flag / -p-on-non-packet errors.
+#   * A stdin sub-packet whose declared length is past the input, or
+#     overflows, is refused without allocating it (exit 1).
 # Each refusal is checked twice: bare (exit 1 + refusal message) and
 # with `--force` (exit 0). Size thresholds are shrunk via
 # `MORLOC_VIEW_MAX_BUFFER_BYTES` so a small stream trips the gate.
@@ -17,6 +19,13 @@ all:
 	./prog mkStream stream.packet 2>> obs.err
 	./prog mkData   data.packet   2>> obs.err
 
+	for n in 1099511627776 18446744073709551592; do \
+	  python3 -c 'import struct,sys; b=bytearray(open("stream.packet","rb").read()); off,=struct.unpack_from("<I",b,20); struct.pack_into("<Q",b,32+off+24,int(sys.argv[1])); open("lying.packet","wb").write(b)' $$n; \
+	  printf 'lying length exit: ' >> obs.txt; \
+	  $(NEXUS) view - -f jsonl < lying.packet > /dev/null 2>tmp.err; printf '%s\n' "$$?" >> obs.txt; \
+	  grep -oE 'stdin ended inside a sub-packet body|sub-packet length overflows' tmp.err >> obs.txt; \
+	done
+	rm -f tmp.err lying.packet
 	# === Size gate: -f json on stream (buffered path) ===
 	printf 'size gate -f json exit: ' >> obs.txt
 	MORLOC_VIEW_MAX_BUFFER_BYTES=8 $(NEXUS) view stream.packet -f json > /dev/null 2>tmp.err; \

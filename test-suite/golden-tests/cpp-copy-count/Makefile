@@ -10,6 +10,8 @@ all:
 	  echo "write-allocs-per-batch=$$(( (b - a) / ($(N2) - $(N1)) )) rem=$$(( (b - a) % ($(N2) - $(N1)) ))" >> obs.txt
 	a=$$(./nexus runParts 1 $(N1) 2>> obs.err); b=$$(./nexus runParts 1 $(N2) 2>> obs.err); \
 	  echo "parts-allocs-per-batch=$$(( (b - a) / ($(N2) - $(N1)) )) rem=$$(( (b - a) % ($(N2) - $(N1)) ))" >> obs.txt
+	a=$$(./nexus runSingle 1 $(N1) 2>> obs.err); b=$$(./nexus runSingle 1 $(N2) 2>> obs.err); \
+	  echo "single-allocs-per-batch=$$(( (b - a) / ($(N2) - $(N1)) )) rem=$$(( (b - a) % ($(N2) - $(N1)) ))" >> obs.txt
 
 clean:
 	rm -rf nexus pools *.err w.dat

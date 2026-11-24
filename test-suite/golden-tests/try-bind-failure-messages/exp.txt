@@ -1,0 +1,9 @@
+--- bareOnErr 0 ---
+not positive
+--- errOnOk 3 ---
+{"Ok":[3]}
+--- litOnOk 4 ---
+{"Ok":[4]}
+--- nestedOnOk 2 ---
+{"Ok":[[2,2]]}
+1

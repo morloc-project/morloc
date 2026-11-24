@@ -1027,12 +1027,7 @@ unsafe fn morloc_eval_r(
                         shadowed.push((var, bndvars.insert(var, arg_results[i])));
                     }
                     let result = morloc_eval_r((*lam).body, dest, width, bndvars);
-                    for (var, prev) in shadowed.into_iter().rev() {
-                        match prev {
-                            Some(p) => { bndvars.insert(var, p); }
-                            None => { bndvars.remove(var); }
-                        }
-                    }
+                    unbind_lets(shadowed, bndvars);
                     result?;
                 }
 
@@ -1897,20 +1892,55 @@ unsafe fn morloc_eval_r(
         }
         MorlocExpressionType::If => {
             let ifx = (*expr).expr.if_expr;
-            let cond_ptr = morloc_eval_r((*ifx).cond, ptr::null_mut(), 0, bndvars)?;
-            let taken = if *(cond_ptr as *const u8) != 0 {
+            let taken = if eval_bool((*ifx).cond, bndvars)? {
                 (*ifx).then_branch
             } else {
                 (*ifx).else_branch
             };
-            // An @throw arm has a width-0 schema, so check against the arm's own width.
-            let taken_width = (*(*taken).schema).width;
-            let src = morloc_eval_r(taken, dest, taken_width, bndvars)?;
-            // Some handlers return a pointer other than dest (e.g. a voidstar
-            // Dat); copy through so the value lands in the caller's slot.
-            if !src.is_null() && src != dest && width > 0 {
-                ptr::copy_nonoverlapping(src as *const u8, dest, width);
-            }
+            eval_arm(taken, dest, width, bndvars)?;
+        }
+
+        MorlocExpressionType::Cond => {
+            let cx = (*expr).expr.cond_expr;
+            let mut shadowed = Vec::new();
+            let result = (|| -> Result<(), MorlocError> {
+                let mut taken = (*cx).else_branch;
+                for i in 0..(*cx).n as usize {
+                    bind_lets(*(*cx).binds.add(i), bndvars, &mut shadowed)?;
+                    if eval_bool(*(*cx).conds.add(i), bndvars)? {
+                        taken = *(*cx).thens.add(i);
+                        break;
+                    }
+                }
+                eval_arm(taken, dest, width, bndvars)
+            })();
+            unbind_lets(shadowed, bndvars);
+            result?;
+        }
+        MorlocExpressionType::Chain => {
+            let chx = (*expr).expr.chain_expr;
+            let is_and = (*chx).is_and != 0;
+            let mut shadowed = Vec::new();
+            let result = (|| -> Result<bool, MorlocError> {
+                for i in 0..(*chx).n as usize {
+                    bind_lets(*(*chx).binds.add(i), bndvars, &mut shadowed)?;
+                    let v = eval_bool(*(*chx).args.add(i), bndvars)?;
+                    if v != is_and {
+                        return Ok(v);
+                    }
+                }
+                Ok(is_and)
+            })();
+            unbind_lets(shadowed, bndvars);
+            *dest = u8::from(result?);
+        }
+        MorlocExpressionType::Lets => {
+            let lx = (*expr).expr.lets_expr;
+            let mut shadowed = Vec::new();
+            let result = bind_lets((*lx).binds, bndvars, &mut shadowed)
+                .and_then(|_| eval_arm((*lx).body, dest, width, bndvars));
+            unbind_lets(shadowed, bndvars);
+            result?;
         }
 
         other => {
@@ -1927,6 +1957,57 @@ unsafe fn morloc_eval_r(
     }
 
     Ok(dest)
+}
+
+// Evaluate lets in order and bind each, recording the binding of the same
+// name it shadows so that 'unbind_lets' restores it, as a lambda does.
+unsafe fn bind_lets<'a>(
+    binds: *mut MorlocBinds,
+    bndvars: &mut BndVars<'a>,
+    shadowed: &mut Vec<(&'a str, Option<AbsPtr>)>,
+) -> Result<(), MorlocError> {
+    if binds.is_null() {
+        return Ok(());
+    }
+    for i in 0..(*binds).n as usize {
+        let value = morloc_eval_r(*(*binds).values.add(i), ptr::null_mut(), 0, bndvars)?;
+        let var = CStr::from_ptr(*(*binds).names.add(i)).to_str().unwrap_or("");
+        shadowed.push((var, bndvars.insert(var, value)));
+    }
+    Ok(())
+}
+
+unsafe fn unbind_lets<'a>(shadowed: Vec<(&'a str, Option<AbsPtr>)>, bndvars: &mut BndVars<'a>) {
+    for (var, prev) in shadowed.into_iter().rev() {
+        match prev {
+            Some(p) => {
+                bndvars.insert(var, p);
+            }
+            None => {
+                bndvars.remove(var);
+            }
+        }
+    }
+}
+
+// A Bool-valued expression, evaluated into a local byte.
+unsafe fn eval_bool(expr: *mut MorlocExpression, bndvars: &mut BndVars) -> Result<bool, MorlocError> {
+    let mut b: u8 = 0;
+    let p = morloc_eval_r(expr, &mut b as *mut u8 as AbsPtr, 1, bndvars)?;
+    Ok(*(p as *const u8) != 0)
+}
+
+// The taken arm of a conditional, materialized into the caller's dest. An
+// @throw arm has a width-0 schema, so it is checked against its own width;
+// a handler that returns a pointer other than dest (a voidstar Dat) is
+// copied through.
+unsafe fn eval_arm(taken: *mut MorlocExpression, dest: AbsPtr, width: usize, bndvars: &mut BndVars) -> Result<(), MorlocError> {
+    let taken_width = (*(*taken).schema).width;
+    let src = morloc_eval_r(taken, dest, taken_width, bndvars)?;
+    if !src.is_null() && src != dest && width > 0 {
+        ptr::copy_nonoverlapping(src as *const u8, dest, width);
+    }
+    Ok(())
 }
 
 // FAIL-4, PANIC-13: a throw, or a failed check of input bytes.

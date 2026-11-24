@@ -1,0 +1,20 @@
+-- Spec NATIVE-1: a specialized form fills its slots from the arguments in
+-- the declaration's positions, whichever parameter is specialized. The
+-- specialized forms are `std::pair`, the general one `std::tuple`, and the
+-- sourced functions are defined for only the form each type should get.
+module main (sndReal, sndStr, fstStr, sndGen)
+
+import root-cpp
+
+newtype P a b = (a, b)
+
+type Cpp => (P a b) = "std::tuple<$1,$2>" a b
+type Cpp => (P Int b) = "std::pair<$1,$2>" Int b
+type Cpp => (P a Real) = "std::pair<$1,$2>" a Real
+
+source Cpp from "lib.hpp" ("snd2" as sndReal, "snd2" as sndStr, "fst2" as fstStr, "sndT" as sndGen)
+
+sndReal :: P Int Real -> Real
+sndStr :: P Int Str -> Str
+fstStr :: P Str Real -> Str
+sndGen :: P Str Str -> Str

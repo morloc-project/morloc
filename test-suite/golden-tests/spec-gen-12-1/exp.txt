@@ -1,0 +1,9 @@
+"Base G 2 True Shape.Empty True True"
+"Base C 1 True Shape.Rect True False"
+["circle 1.5","empty True","rect 8.0"]
+3
+"some 7"
+"none"
+["circle 2.0","empty True"]
+"g"
+1

@@ -1,0 +1,84 @@
+-- RUST-4: a user-written Rust enum is mapped in its idiomatic shape: tuple variants
+-- with one field per morloc field, each field holding its morloc type as it
+-- is, in a Box or in an Arc, and an optional field in an Option of one of
+-- those. Sources build and read it; morloc code builds it and takes its
+-- fields apart; it crosses through Python and back.
+module main
+  ( evalRs
+  , deep
+  , roundTrip
+  , viaPy
+  , built
+  , negOf
+  , addRight
+  , maybeOf
+  , sharedOf
+  , sharedTag
+  , chainDepth
+  )
+
+import root-rust
+import root-py
+
+data Expr
+  = Num Real
+  | Neg Expr
+  | Add Expr Expr
+  | Maybe1 ?Expr
+  | Shared Expr Str
+data Rust => Expr = "Expr"
+
+source Rust from "expr.rs"
+  ( "eval" as evalRs
+  , "build" as buildRs
+  , "depth" as depthRs
+  , "maybes" as maybesRs
+  )
+
+evalRs :: Expr -> Real
+buildRs :: Int -> Expr
+depthRs :: Expr -> Int
+maybesRs :: Int -> Expr
+
+source Py from "expr.py" ("pyId")
+pyId :: Expr -> Expr
+
+deep :: Int -> Int
+deep n = depthRs (idrust (buildRs n))
+
+roundTrip :: Expr -> Expr
+roundTrip e = idrust e
+
+viaPy :: Int -> Real
+viaPy n = evalRs (pyId (buildRs n))
+
+built :: Real -> Expr
+built x = idrust (Add (Num x) (Shared (Neg (Num 1.0)) "s"))
+
+negOf :: Expr -> Expr
+negOf | (Neg e) = e
+      | e = e
+
+addRight :: Expr -> Expr
+addRight | (Add _ r) = r
+         | e = e
+
+maybeOf :: Expr -> ?Expr
+maybeOf | (Maybe1 m) = m
+        | _ = Null
+
+sharedOf :: Expr -> Expr
+sharedOf | (Shared e _) = e
+         | e = e
+
+sharedTag :: Expr -> Str
+sharedTag | (Shared _ s) = s
+          | _ = ""
+
+walkM :: Int -> ?Expr -> Int
+walkM acc m
+  ? isNull m = acc
+  : walkM (acc + 1) (maybeOf (require m))
+
+chainDepth :: Int -> Int
+chainDepth n = walkM 0 (maybesRs n)

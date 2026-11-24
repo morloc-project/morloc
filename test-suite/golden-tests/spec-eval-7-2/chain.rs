@@ -3,17 +3,17 @@
 #[derive(Clone)]
 pub enum Chain {
     End,
-    Link(Box<(i64, Chain)>),
+    Link(i64, Box<Chain>),
 }
 
 impl Drop for Chain {
     fn drop(&mut self) {
         let mut next = match self {
-            Chain::Link(b) => std::mem::replace(&mut b.1, Chain::End),
+            Chain::Link(_, t) => std::mem::replace(&mut **t, Chain::End),
             Chain::End => return,
         };
-        while let Chain::Link(b) = &mut next {
-            let tail = std::mem::replace(&mut b.1, Chain::End);
+        while let Chain::Link(_, t) = &mut next {
+            let tail = std::mem::replace(&mut **t, Chain::End);
             next = tail;
         }
     }

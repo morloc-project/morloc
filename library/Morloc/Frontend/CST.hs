@@ -147,7 +147,7 @@ data CstExpr
   deriving (Show, Eq)
 
 data CstExport
-  = CstExportAll
+  = CstExportAll !Located
   | CstExportMany [Located]
   deriving (Show, Eq)
 

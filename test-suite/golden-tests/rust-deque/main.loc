@@ -15,7 +15,6 @@ import root-rust
 record Box where
   items :: Deque Int
   tag :: Int
-record Rust => Box = "struct"
 
 -- bare Deque through the Rust pool.
 roundDeque :: Deque Int -> Deque Int

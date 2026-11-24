@@ -24,6 +24,8 @@ all:
 	./nexus newtyped 5 >> obs.txt 2>> obs.err
 	./nexus mixedOp 5 >> obs.txt 2>> obs.err
 	./nexus fnConst 5 >> obs.txt 2>> obs.err
+	./nexus tmplLast 5 >> obs.txt 2>> obs.err
+	./nexus byValLast 5 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus bad-let bad-getter bad-param bad-op bad-hof bad-newtype bad-mixed bad-sortby bad-fn pools __pycache__

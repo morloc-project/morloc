@@ -17,7 +17,7 @@ on n. Tuple types and tuple values share the same parenthesized syntax.
 
 ### COLL-3 Indexing and slicing follow Python's semantics
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (issues/values.md)
 
 `.[i]` picks an element, `.[i:j]` a sub-range and `.[i:j:k]` a strided
 sub-range. A negative index counts from the end, out-of-range slice bounds

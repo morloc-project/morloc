@@ -1,0 +1,21 @@
+-- Spec OWN-11: a recursive helper placed in Python and called from Rust
+-- on a constructor literal is not copied into Rust; its result is
+-- unchanged.
+module main (tCross)
+
+import root-rust
+import root-py
+import .kc
+
+source Py from "cross.py" ("pyInc")
+source Rust from "tick.rs" ("ticks")
+
+pyInc :: Int -> Int
+ticks :: Int -> (Int, Int)
+
+countPy :: Int -> Chain -> Int
+countPy | acc (Link _ rest) = countPy (pyInc acc) rest
+        | acc _ = acc
+
+tCross :: Int -> (Int, Int)
+tCross n = ticks (countPy 0 (Link 1 (mk n)))

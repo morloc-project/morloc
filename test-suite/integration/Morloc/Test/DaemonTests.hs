@@ -375,12 +375,12 @@ stdioWedgeTests env = testCase "Daemon @stdout claim reclaim (wedge)" $ do
     assertJsonEq "useStdout is refused" r0 "status" "error"
     assertBool ("the refusal says the output streams: " ++ r0) ("streams" `isInfixOf` r0)
 
-    -- A refused open in the pool must leave no claim behind: every later
-    -- open is refused the same way, never as already open.
+    -- A `@stdout` command is refused the same way, every time, never as
+    -- already open.
     mapM_
       ( \i -> do
           rr <- call "rawStdout"
-          assertBool ("the pool refuses @stdout: " ++ rr) ("@stdout" `isInfixOf` rr)
+          assertBool ("the refusal says the output streams: " ++ rr) ("streams" `isInfixOf` rr)
           assertBool
             ("refusal " ++ show i ++ " must not report 'already open': " ++ rr)
             (not ("already open" `isInfixOf` rr))

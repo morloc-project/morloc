@@ -1,0 +1,34 @@
+-- Spec CLS-2: the instances of a method that recurse through each other each
+-- keep their own function.
+module main (f, g)
+
+import root-py
+
+source Py from "foo.py" ("size", "pos", "shorter")
+
+size :: Str -> Int
+pos :: Int -> Bool
+shorter :: Int -> Str
+
+class Tally f where
+  tally :: f a -> Str
+
+instance Tally List where
+  tally xs = "t"
+
+class Render a where
+  render :: a -> Str
+
+instance Render Str where
+  render s = "s" <> render (size s)
+
+instance Render Int where
+  render i
+    ? pos i = "i" <> render (shorter i)
+    : "z"
+
+f :: Str -> Str
+f x = render x
+
+g :: Str -> Str
+g x = tally [] <> render x

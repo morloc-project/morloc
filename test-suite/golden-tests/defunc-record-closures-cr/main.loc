@@ -10,7 +10,6 @@ record Ops where
   inc :: Int -> Int
   scale :: Int -> Int
 record Cpp => Ops = "Ops"
-record R => Ops = "list"
 
 type Cpp => Int = "int"
 

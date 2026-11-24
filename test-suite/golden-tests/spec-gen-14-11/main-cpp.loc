@@ -1,0 +1,28 @@
+-- GEN-14: a generated recursive record converts its packed field at every
+-- level, so in C++ it is saved and loaded like any other value. Python
+-- (main-py.loc) and a C++ user-mapped record (main-user.loc) have no node
+-- that converts at every level, so a value of such a type is refused
+-- wherever it would be marshalled, not only where it crosses.
+module main (trip)
+
+import root-cpp
+
+newtype Tenths = Int
+type Cpp => Tenths = "double"
+
+instance Packable Int Tenths where
+  source Cpp from "pk.hpp" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Tree where
+  t :: Tenths
+  kids :: [Tree]
+
+source Cpp from "f.hpp" ("mk", "tens")
+mk :: Int -> Tree
+tens :: Tree -> [Int]
+
+trip :: Str -> Int -> <IO> [Int]
+trip p n = do
+  _ <- @save 0 p (mk n)
+  r <- @load p :: <IO> (Try Str Tree)
+  match r | (Ok x) = tens x | (Err e) = []

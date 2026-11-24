@@ -8,6 +8,10 @@ module main (stream, pstream)
 -- The accumulator records the size of every batch it saw, so a lowering that
 -- flattens the stream rather than preserving the producer's batch boundaries
 -- gives a visibly different answer.
+--
+-- The folded result written to a file leaves the whole list to stdout, so
+-- the four threads write one stdout stream at once (SLOT-16), and the fold
+-- replays the recorded batches into one accumulator: no merges.
 
 import root-cpp
 
@@ -51,10 +55,10 @@ showPAcc :: PAcc -> Str
 --' Stream integer batches
 --' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
 --' @render -a/--all=joinAll
-stream :: <IO> ()
+stream :: <IO> (Collect Int)
 stream = @collect produce
 
 --' Stream integer batches from four threads at once
 --' @render -p/--parallel=showPAcc @fold=addPBatch @init=zeroPAcc @combine=mergePAcc
-pstream :: <IO> ()
+pstream :: <IO> (Collect Int)
 pstream = @collect produceParallel

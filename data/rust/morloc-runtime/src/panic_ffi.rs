@@ -132,21 +132,6 @@ mod tests {
     }
 
     #[test]
-    fn a_fold_call_with_a_null_value_ends_the_process() {
-        assert_eq!(status_of_child("child_puts_a_null_fold_value"), morloc_runtime_types::panic::PANIC_EXIT_STATUS);
-    }
-
-    #[test]
-    #[ignore]
-    fn child_puts_a_null_fold_value() {
-        in_child(|| {
-            let schema = morloc_runtime_types::schema::parse_schema("i4").unwrap();
-            let _ = morloc_runtime_types::panic::catch(|| unsafe { crate::cell::cell_put(0, &schema, std::ptr::null()) });
-            unsafe { libc::_exit(3) };
-        });
-    }
-
-    #[test]
     fn a_panic_below_a_c_abi_function_called_from_rust_reaches_the_catch() {
         assert_eq!(status_of_child("child_panics_below_a_c_abi_function"), CHILD_OK);
     }

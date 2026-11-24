@@ -104,7 +104,7 @@ read by the closure's calls (STATE-3).
 
 ### HOST-9 A function made by host code stays in the pool that made it
 Intent: ruled 2026-10-26
-Tests: spec-host-9-1, spec-host-9-2, spec-host-9-3, spec-host-9-4, spec-host-9-5
+Tests: spec-host-9-1, spec-host-9-2, spec-host-9-3, spec-host-9-4, spec-host-9-5, spec-host-9-6
 Code: conforms 2026-10-26
 
 A function made by host code has no identity outside the pool that made
@@ -143,3 +143,17 @@ source instead of the one placement first chose. A program that would carry one 
 an export, into a conditional that may hold functions of two pools) or
 serialize one (an intrinsic, a label that caches or logs) is refused at
 build.
+
+### HOST-10 A class method's source is called by its instance's signature
+Intent: proposed
+Tests: spec-host-10-1
+Code: conforms 2026-11-04
+
+A source that implements a class method is called by the method's type at
+the instance's types, not by the class's: in `class Run a where run :: a
+-> <IO> Int`, the source of `instance Run (Int -> <IO> Int)` is a function
+of a callback that returns its result, which it calls as HOST-2 and HOST-5
+say, and is given it in that form. A variable of the method's own type
+(not of the class) is a type variable of the source's signature as
+anywhere else. This holds for a call written in the program and for a
+call the compiler builds (packing, mapping, indexing).

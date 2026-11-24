@@ -1,0 +1,19 @@
+-- Spec COST-15 condition 1: a getter whose instance is only in Python runs in
+-- Python, though its receiver is made and its result consumed in C++.
+module main (f)
+import root-py
+import root-cpp
+
+record Box a where
+  foo :: Str
+record Py => Box a = dict
+record Cpp => Box a = "BoxS"
+instance PatternAccessible Box where
+  source Py from "h.py" ("walker" as __extract_pattern__)
+
+source Cpp from "h.hpp" ("inc", "mk")
+inc :: Str -> Int
+mk :: Int -> Box Int
+
+f :: Int -> Int
+f x = inc (.foo (mk x))

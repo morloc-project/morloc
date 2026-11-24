@@ -40,6 +40,10 @@ inline void recordBatch(const std::vector<int>& extra, const std::vector<int>& x
     g_sum += (long)escape(extra).size() * (long)escape(xs).size();
 }
 
+inline void recordBatches(const std::vector<int>& extra, const std::vector<std::vector<int>>& xss) {
+    for (const auto& xs : xss) g_sum += (long)escape(extra).size() * (long)escape(xs).size();
+}
+
 inline int bigAllocs(int) {
     return (int)g_big_allocs.load();
 }

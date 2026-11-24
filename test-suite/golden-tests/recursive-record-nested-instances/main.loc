@@ -1,0 +1,19 @@
+-- A record mapped to a C++ template that holds other instantiations of
+-- itself: within `L Str`, the `L Int` of field `i` holds an `L Str` again,
+-- which is a reference to the outer `L Str`, not to the `L Int` around it.
+module main (trip)
+
+import root-cpp
+
+record L a where
+  val :: a
+  next :: ?(L a)
+  s :: ?(L Str)
+  i :: ?(L Int)
+record Cpp => (L a) = "list_t<$1>" a
+
+source Cpp from "l.hpp" ("same")
+same :: a -> a
+
+trip :: L Str -> L Str
+trip x = same x

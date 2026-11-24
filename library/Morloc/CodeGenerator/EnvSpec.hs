@@ -41,7 +41,7 @@ import Morloc.Internal (unique)
 import Morloc.Language (Lang, showLangName)
 import qualified Morloc.Version
 import Morloc.Namespace.State
-  ( PackageMeta(..), DepSpec(..), RegDep(..), LocalDep(..), DepSource(..)
+  ( PackageMeta(..), MorlocDep(..), mdepKey, DepSpec(..), RegDep(..), LocalDep(..), DepSource(..)
   , effectiveDepSource, depSourceText, condaForgeChannel, dsChannel
   )
 
@@ -72,9 +72,9 @@ data LangReq = LangReq
   }
   deriving (Show, Eq, Ord)
 
--- | A system library named by the C++ @dependencies:@ field. 'srProvider' is a
--- forward-compatible enum ("conda-forge" | "host" | "vcpkg" | "unspecified");
--- the compiler cannot know the true provider, so it emits "unspecified".
+-- | A system library entry of the envspec's @system@ list, which mim reads
+-- ("conda-forge" | "host" | "vcpkg" | "unspecified" providers). The compiler
+-- emits none: a C++ link name is not a package name (PKG-12).
 data SystemReq = SystemReq
   { srName     :: !Text
   , srProvider :: !Text
@@ -85,6 +85,8 @@ data SystemReq = SystemReq
 data ModuleReq = ModuleReq
   { mrName    :: !Text
   , mrGitHash :: !(Maybe Text)
+  -- | Where to fetch it when not from its library's origin (PKG-6)
+  , mrSource  :: !(Maybe Text)
   }
   deriving (Show, Eq, Ord)
 
@@ -123,7 +125,7 @@ buildEnvSpec morlocVersion langs metas = do
       , esLanguages     = map langReq langNames
       , esPackages      = packageGroups
       , esTools         = toolReqs
-      , esSystem        = systemReqs
+      , esSystem        = []
       , esModules       = moduleReqs
       }
   where
@@ -187,17 +189,11 @@ buildEnvSpec morlocVersion langs metas = do
       effectiveDepSource lang ds == Just SrcConda
         && (lang /= "r" || maybe False (/= condaForgeChannel) (dsChannel ds))
 
-    -- The bare C++ `-l` link libraries; provider is unknowable at compile time.
-    systemReqs =
-      [ SystemReq name "unspecified"
-      | name <- unique (concatMap packageDependencies metas)
-      ]
-
-    -- Exact-git-hash module pins, deduplicated by module name (closer-to-root
-    -- resolution already happened during load/install).
+    -- Exact-git-hash module pins, one per module: the root project's pin
+    -- wins, as at install (the root is loaded first, so it is last in metas).
     moduleReqs =
-      [ ModuleReq name (Just h)
-      | (name, h) <- dedupFst (concatMap packageMorlocDependencies metas)
+      [ ModuleReq name (Just h) src
+      | (name, (h, src)) <- dedupFst [(mdepKey d, (mdepHash d, mdepSource d)) | d <- concatMap packageMorlocDependencies (reverse metas)]
       ]
 
 -- | The channel carried on the wire for a package. Only a conda dependency on a
@@ -310,6 +306,7 @@ renderEnvSpec es =
     sysJson (SystemReq n p) =
       jsonObj [("name", jsonStr n), ("provider", jsonStr p)]
 
-    modJson (ModuleReq n mh) =
+    modJson (ModuleReq n mh src) =
       jsonObj $ [("name", jsonStr n)]
         ++ maybe [] (\h -> [("git_hash", jsonStr h)]) mh
+        ++ maybe [] (\s -> [("source", jsonStr s)]) src

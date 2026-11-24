@@ -21,6 +21,8 @@ module Morloc.CodeGenerator.Grammars.Translator.PseudoCode
   , pseudocodeNativeExpr
   ) where
 
+import Data.Foldable (toList)
+import Morloc.Data.Zip (zipWithSame)
 import qualified Control.Monad.Identity as MI
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Namespace
@@ -81,14 +83,14 @@ prettyFoldManifold =
         prettyLB (LoopNLet i ne b) = "n" <> pretty i <+> "=" <+> poolExpr ne <> ";" <+> prettyLB b
         prettyLB (LoopSLet i se b) = "s" <> pretty i <+> "=" <+> poolExpr se <> ";" <+> prettyLB b
         prettyLB (LoopBase se) = "return" <+> poolExpr se
-        prettyLB (LoopContinue nes) = "__continue__" <> list (map poolExpr nes)
+        prettyLB (LoopContinue nes) = "__continue__" <> list (map (poolExpr . snd) nes)
 
     makeNativeExpr ::
       (Monad m) => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
     makeNativeExpr _ (AppExeN_ _ (SrcCallP _ src) xs) =
       return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) xs
-    makeNativeExpr _ (AppExeN_ _ (PatCallP pat) xs) =
-      return $ mergePoolDocs ((<>) (pretty pat) . tupled) xs
+    makeNativeExpr _ (PatN_ _ app) =
+      return $ mergePoolDocs ((<>) (pretty (patAppPattern app)) . tupled) (toList app)
     makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) xs) =
       return $ mergePoolDocs ((<>) (letNamerN idx) . tupled) xs
     makeNativeExpr _ (AppExeN_ _ (PapplyP idx) xs) =
@@ -107,7 +109,6 @@ prettyFoldManifold =
       return $ (mergePoolDocs (const "") es) {poolExpr = "WireToNativeN" <> parens (pretty (intrinsicName intr) <> tupled (map poolExpr es))}
     makeNativeExpr _ (NativeToWireN_ _ _ e) = return $ e {poolExpr = "NativeToWireN" <> parens (poolExpr e)}
     makeNativeExpr _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
-    makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}
     makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
     makeNativeExpr _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
     makeNativeExpr _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
@@ -117,8 +118,8 @@ prettyFoldManifold =
       return $ mergePoolDocs pyDict (map snd rs)
       where
         pyDict es' =
-          let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) es'
-           in "OrderedDict" <> tupled entries'
+          let entries' = zipWithSame (\k v -> pretty k <> "=" <> v) (map fst rs) es'
+           in "dict" <> tupled entries'
     makeNativeExpr _ (LogN_ _ v) = return $ defaultValue {poolExpr = if v then "True" else "False"}
     makeNativeExpr _ (RealN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
     makeNativeExpr _ (IntN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
@@ -165,6 +166,7 @@ prettyFoldManifold =
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             , poolBorrowedLocal = Nothing
+            , poolChain = Nothing
             }
 
     letNamerS :: Int -> MDoc
@@ -193,18 +195,18 @@ pseudoManifold ::
   PoolDocs ->
   PoolDocs
 pseudoManifold makeFunc makeLam m form headForm bodyPool =
-  let PoolDocs completeManifolds body priorLines priorExprs _ _ = bodyPool
+  let PoolDocs completeManifolds body priorLines priorExprs _ _ _ = bodyPool
       args = typeMofForm form
       mname = manNamer m
       newManifold = makeFunc mname args priorLines body headForm
       call = case form of
         (ManifoldPass _) -> mname
-        (ManifoldFull rs) -> mname <> tupled (map argNamer (typeMofRs rs))
+        (ManifoldFull rs) -> mname <> tupled (map (argNamer "") (typeMofRs rs))
         (ManifoldPart rs vs) ->
           makeLam
             mname
-            (map argNamer (typeMofRs rs))
-            [argNamer (Arg i (typeMof t)) | Arg i t <- vs]
+            (map (argNamer "") (typeMofRs rs))
+            [(argNamer "") (Arg i (typeMof t)) | Arg i t <- vs]
    in PoolDocs
         { poolCompleteManifolds = newManifold : completeManifolds
         , poolExpr = call
@@ -212,6 +214,7 @@ pseudoManifold makeFunc makeLam m form headForm bodyPool =
         , poolPriorExprs = priorExprs
         , poolReturnFlag = False
         , poolBorrowedLocal = Nothing
+        , poolChain = Nothing
         }
 
 prettyThing :: (p -> MI.Identity PoolDocs) -> p -> Doc ()

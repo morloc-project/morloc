@@ -1,0 +1,23 @@
+-- A failure on a thread user C++ code started belongs to no call, and ends
+-- the pool with the internal error status 70 (PANIC-1, PANIC-6), not an
+-- abort by signal. `throws` raises on such a thread; `calleeDies` makes a
+-- call from such a thread into a Python pool that dies, so the C++ thread
+-- receives the callee's death.
+
+module main (throws, calleeDies)
+
+import root-cpp
+import root-py
+
+source Cpp from "t.hpp" ("applyInThread", "throwInThread")
+source Py from "p.py" ("die")
+
+applyInThread :: (Int -> Int) -> Int -> Int
+throwInThread :: Int -> Int
+die :: Int -> Int
+
+throws :: Int -> Int
+throws x = throwInThread x
+
+calleeDies :: Int -> Int
+calleeDies x = applyInThread die x

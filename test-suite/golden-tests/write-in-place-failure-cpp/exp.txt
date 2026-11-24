@@ -1,0 +1,4 @@
+[true,false,true,false,true]
+[700,0,30,0,700,1430]
+["ok","C++ produced a Str that is not valid UTF-8 (byte 2 of 4)","ok","C++ produced a Str that is not valid UTF-8 (byte 2 of 4)","C++ produced a Str that is not valid UTF-8 (byte 299990 of 300000)","ok"]
+[560,0,24,0,0,560,1430]

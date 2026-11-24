@@ -1,0 +1,23 @@
+-- Spec REAL-3, CLS-16: the selected instance has no source a bracket can call in
+-- its language. The more general instance does not stand in.
+module main (three)
+import root-cpp
+
+newtype Vec (n :: Nat) a = [a]
+type Cpp => (Vec n a) = "std::vector<$1>" a
+instance Packable [a] (Vec n a) where
+  source Cpp from "h.hpp" ("h_id" as pack, "h_id" as unpack)
+
+instance Indexable (Vec n) where
+  source Cpp from "h.hpp" ("h_general" as __access_index__)
+instance Indexable (Vec 3) where
+  __access_index__ i v = hd (unpack v)
+
+source Cpp from "h.hpp" ("h_head" as hd)
+hd :: [a] -> a
+
+source Cpp from "h.hpp" ("h_inc" as inc)
+inc :: Int -> Int
+
+three :: Vec 3 Int -> Int
+three v = inc (.[0] v)

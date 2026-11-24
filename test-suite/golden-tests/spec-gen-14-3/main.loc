@@ -1,0 +1,47 @@
+-- GEN-14: a packed field converts once per write even where the walk
+-- reaches its record through a copy it makes itself. A `DQ` is a C++
+-- deque, which the walk visits as a copied vector; `Two` holds two of them,
+-- each of records with a packed `Date`, and every value must come back
+-- with its own date (a conversion keyed by an address inside a freed copy
+-- returns another value's). `count` checks each date unpacked once.
+module main (roundTwo, countTwo)
+
+import root-cpp
+import root-py
+
+newtype DQ a = [a]
+type Cpp => DQ a = "std::deque<$1>" a
+
+newtype Date = Str
+type Cpp => Date = "MlcDate"
+
+instance Packable Str Date where
+  source Cpp from "gen14.hpp" ("packDate" as pack, "unpackDate" as unpack)
+
+record Stamp where
+  d :: Date
+  n :: Int
+
+record Two where
+  xs :: DQ Stamp
+  ys :: DQ Stamp
+
+source Cpp from "gen14.hpp" ("dateOf", "unpacksAfter", "dq")
+dateOf :: Int -> Date
+dq :: [a] -> DQ a
+unpacksAfter :: Two -> <IO> Int
+
+source Py from "gen14.py" ("pyid")
+pyid :: a -> a
+
+mk :: Int -> Stamp
+mk i = {d = dateOf i, n = i}
+
+two :: Int -> Two
+two x = {xs = dq [mk x, mk (x + 1), mk (x + 2)], ys = dq [mk (x + 10), mk (x + 11), mk (x + 12)]}
+
+roundTwo :: Int -> Two
+roundTwo x = pyid (two x)
+
+countTwo :: Int -> <IO> Int
+countTwo x = unpacksAfter (pyid (two x))

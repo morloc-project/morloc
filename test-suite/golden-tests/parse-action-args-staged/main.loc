@@ -85,12 +85,17 @@ mk path = do
   @save 0 path [7, 8, 9, 10]
   path
 
---' Stream the input, then a tail
+--' Stream the input, then a tail, through stdout
 --' @render -s/--show=batchWith($1) @stream @default
 emit ::
   --' @parse lines=readLines
   [Int] ->
-  <IO> ()
-emit xs = do
-  @collect (emitList xs)
-  @collect produce
+  <IO> (Collect Int)
+emit xs = @stdout (\o -> do
+  _ <- emitList xs (writeTo o)
+  produce (writeTo o))
+
+writeTo :: OStream Int -> [Int] -> <IO> ()
+writeTo o b = do
+  _ <- @write 0 o b
+  ()

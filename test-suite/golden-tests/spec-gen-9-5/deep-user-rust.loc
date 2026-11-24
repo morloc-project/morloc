@@ -1,0 +1,12 @@
+-- A user-mapped recursive template record nested in itself seven deep
+-- round trips.
+module main (trip)
+import root-rust
+record L a where
+  val :: a
+  next :: ?(L a)
+record Rust => L a = "MyL<$1>" a
+source Rust from "u.rs" ("same")
+same :: a -> a
+trip :: L (L (L (L (L (L (L (Int))))))) -> L (L (L (L (L (L (L (Int)))))))
+trip x = same x

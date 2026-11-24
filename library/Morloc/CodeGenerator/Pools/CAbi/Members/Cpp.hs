@@ -23,33 +23,48 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Cpp
   , cppLang
   ) where
 
+import Morloc.Data.Zip (indexed, indexedFrom, mapIndexedM, zipExact, zipSame, zipWithSame)
+import Data.Foldable (toList)
 import Data.Char (isUpper)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter as CP
 import qualified Data.Char as DC
 import Data.Ord (comparing)
+import qualified Data.Graph as Graph
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( LoopResult (..)
+  (
+  Low (..)
+  , FieldRead (..)
+  , LowN
+  , LowS
+  , loopBodyDocs
+  , LoopResult (..)
   , armIndex
   , infixOperator
   , papplySteps
   , containsClosure
+  , IExpr (..)
   , IType (..)
   , IOwnership (..)
   , LowerConfig (..)
+  , FoldFn (..)
   , buildProgramM
   , defaultFoldRules
   , markLastReadsSeeded
+  , paramReads
+  , loopSlots
   , lastBuilds
   , nativeManifoldsUnder
   , RNode (..)
   , rnodeChildren
+  , varIndex
+  , rnodeLet
   , expandDeserialize
   , expandSerialize
   , nativeToWire
@@ -63,13 +78,20 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgs, appMacroArgs, macroArgsF, valueArgsF)
-import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
+import Morloc.CodeGenerator.Infer (declaredDataNames)
+import Morloc.CodeGenerator.Ownership (CondLet (..), LentResult (..), LetMode (..), condKey, condLetsIn, LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, unchangedSlot, emptyPoolPlan, letMode, letPlan, letValue, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
+import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, recordUses, depNamespaces, nameRoot)
 import qualified Morloc.CodeGenerator.Platform as P
+import qualified Morloc.CodeGenerator.SystemConfig as SC
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
+  , serialAstToNativeType
+  , isSerializable
+  , generatedObject
+  , serialSubtrees
+  , unpackedAsTypeF
   , wireSerialAstToType
   , containsFunT
   , containsEffectT
@@ -101,6 +123,33 @@ isNativeThrow (IntrinsicN _ IntrThrow _ _) = True
 isNativeThrow (DoBlockN _ e) = isNativeThrow e
 isNativeThrow _ = False
 
+-- | One arm of a conditional assigning its value to the result variable. A
+-- @throw arm never returns, so it is a bare statement rather than an
+-- assignment: assigning the universal-conversion `_mlc_throw` helper into
+-- a container-typed result is an ambiguous C++ `operator=`.
+cppIfArm :: Bool -> MDoc -> Maybe NativeExpr -> PoolDocs -> [MDoc]
+cppIfArm unit v armE d
+  | maybe False isNativeThrow armE = poolPriorLines d <> [poolExpr d <> ";"]
+  | otherwise = poolPriorLines d <> [v <+> "=" <+> cppMoved unit (maybe False armOwnsResult armE) (poolExpr d) <> ";"]
+
+-- | An arm of a conditional whose value is lent or owned (OWN-10), its
+-- value adapted by 'cppLentArm'.
+cppLentIfArm :: MDoc -> Maybe NativeExpr -> PoolDocs -> [MDoc]
+cppLentIfArm v armE d
+  | maybe False isNativeThrow armE = poolPriorLines d <> [poolExpr d <> ";"]
+  | otherwise = poolPriorLines d <> [v <> ".emplace(" <> poolExpr d <> ");"]
+
+-- | A conditional's value or an arm's, moved when the arm owns it
+-- ('armOwnsResult') and the result is not Unit, which is emitted as a bare
+-- statement where a discarded std::move is a warning.
+cppMoved :: Bool -> Bool -> MDoc -> MDoc
+cppMoved unit owned e = if owned && not unit then "std::move(" <> e <> ")" else e
+
+cppUnitResult :: NativeExpr -> Bool
+cppUnitResult e = case typeFof e of
+  VarF (FV tv _) -> tv == BT.unit
+  _ -> False
+
 -- | Whether a conditional arm's value is a let bound inside the arm.
 armOwnsResult :: NativeExpr -> Bool
 armOwnsResult = go Set.empty
@@ -113,7 +162,7 @@ armOwnsResult = go Set.empty
 serialType :: MDoc
 serialType = "uint8_t*"
 
-data CallSemantics = Copy | Reference | ConstPtr
+data CallSemantics = Copy | Reference | ConstPtr | Taken
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
@@ -128,6 +177,7 @@ setCallSemantics Reference typestr
   | isScalarCppType typestr = "const" <+> typestr
   | otherwise = "const" <+> typestr <> "&"
 setCallSemantics ConstPtr typestr = "const" <+> typestr
+setCallSemantics Taken typestr = typestr <> "&&"
 
 -- | Cheap-to-copy scalar C++ types: a copy is a register move.
 isScalarCppType :: MDoc -> Bool
@@ -137,6 +187,30 @@ isScalarCppType t = render t `elem`
   , "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long"
   , "short", "unsigned short", "char", "signed char", "unsigned char", "size_t"
   , "float", "double", "bool" ]
+
+-- | The parameter list of a function value's C++ type (CPP-7), from each
+-- parameter's type and its rendering.
+cppFnParams :: [(TypeF, MDoc)] -> MDoc
+cppFnParams = tupled . map (uncurry cppFnParam)
+
+-- | A scalar by value, anything else by const reference. A name morloc
+-- does not know to be either, such as a template parameter or a mapped
+-- type, decides in C++, so a template instantiated with a type spells
+-- the parameter as that type's own occurrences do.
+cppFnParam :: TypeF -> MDoc -> MDoc
+cppFnParam tf t = case tf of
+  EnumF {} -> t
+  VarF _
+    | isScalarCppType t -> t
+    | otherwise -> "std::conditional_t<std::is_scalar_v<" <> t <> ">," <+> t <> ", const" <+> t <> "&>"
+  UnkF _ -> "std::conditional_t<std::is_scalar_v<" <> t <> ">," <+> t <> ", const" <+> t <> "&>"
+  _ -> "const" <+> t <> "&"
+
+-- | 'cppFnParam' for a parameter given as a 'TypeM'.
+cppFnParamM :: TypeM -> MDoc -> MDoc
+cppFnParamM (Native tf) t = cppFnParam tf t
+cppFnParamM (Function _ _) t = "const" <+> t <> "&"
+cppFnParamM _ t = t
 
 -- | The capture list of a do-block thunk ('lcMakeDoBlock'). By value: a
 -- thunk may outlive the frame that built it.
@@ -165,17 +239,16 @@ tryThunkByReference thunk = case T.stripPrefix (thunkCapture <> "(") (render thu
 --   record Cpp => Container a = "container_t<$1>" a      -- macro template
 -- both lower to `container_t<int64_t>` for `Container Int`.
 --
--- 'argDocs' must already exclude kind args. 'kindCount' is threaded
--- to expandMacro for the error hint only.
-renderTemplatedType :: Text -> [MDoc] -> Int -> MDoc
-renderTemplatedType name argDocs kindCount
-  | T.any (== '$') name = pretty $ expandMacro name (map render argDocs) kindCount
+-- 'argDocs' must already exclude kind args.
+renderTemplatedType :: Text -> [MDoc] -> MDoc
+renderTemplatedType name argDocs
+  | T.any (== '$') name = pretty $ expandMacro name (map render argDocs)
   | otherwise = pretty name <> CP.printRecordTemplate argDocs
 
 -- | No type is cheap enough to copy rather than reference; a tag test may
 -- read a value a field was taken from, since the payload stays in its arm.
 cppCaps :: OwnCaps
-cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocListKeeps = False}
+cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocLends = const True, ocSharedTakes = True, ocTakesElems = True, ocGivesToSources = True}
 
 chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
@@ -192,16 +265,16 @@ instance HasCppType TypeM where
   cppTypeOf (Function ts t) = do
     t' <- cppTypeOf t
     ts' <- mapM cppTypeOf ts
-    return $ "std::function<" <> t' <> tupled ts' <> ">"
+    return $ "std::function<" <> t' <> tupled (zipWithSame cppFnParamM ts ts') <> ">"
 
   cppArgOf s (Arg i t) = do
     typeStr <- cppTypeOf t
     let typeStrQualified = setCallSemantics s typeStr
     return $ case t of
-      (Serial _) -> typeStrQualified <+> svarNamer i
-      (Native _) -> typeStrQualified <+> nvarNamer i
-      Passthrough -> typeStrQualified <+> svarNamer i
-      (Function _ _) -> typeStrQualified <+> nvarNamer i
+      (Serial _) -> typeStrQualified <+> (svarNamer cppLocals) i
+      (Native _) -> typeStrQualified <+> (nvarNamer cppLocals) i
+      Passthrough -> typeStrQualified <+> (svarNamer cppLocals) i
+      (Function _ _) -> typeStrQualified <+> (nvarNamer cppLocals) i
 
 instance HasCppType NativeManifold where
   cppTypeOf = cppTypeOf . typeMof
@@ -216,11 +289,31 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- instantiation and spells nothing of its arguments.
       dataTypeName gv x ps
         | T.any (== '$') x = do
-            gscope <- CMS.gets translatorGScope
-            let (typeTs, kindCount) = macroArgsF gscope gv ps
+            let typeTs = tyArgs ps
             ts' <- mapM f typeTs
-            return . pretty $ expandMacro x (map render ts') kindCount
-        | otherwise = return (pretty (nativeTypeName x))
+            -- A generated template in its module's header goes by its
+            -- qualified name, any other by its identifier.
+            public <- CMS.gets translatorPublic
+            ddefs <- CMS.gets translatorDataDefs
+            let (h, rest) = T.breakOn "<" x
+                x' = case Map.lookup gv public of
+                  Just q -> q <> rest
+                  Nothing | Map.member gv ddefs -> nativeTypeName h <> rest
+                  Nothing -> x
+            return . pretty $ expandMacro x' (map render ts')
+        -- A generated template's instance named by its arguments
+        -- ('Infer.instanceName') is its own type.
+        | otherwise = do
+            ddefs <- CMS.gets translatorDataDefs
+            if Map.member gv ddefs then return (pretty (nativeTypeName x)) else publicOr gv (pretty (nativeTypeName x))
+
+      complainT :: Text -> CppTranslator ()
+      complainT msg = CMS.modify $ \st -> st {translatorErrors = msg : translatorErrors st}
+
+      -- A generated type declared in its module's header goes by its
+      -- qualified name (GEN-4); any other by the name given.
+      publicOr :: TVar -> MDoc -> CppTranslator MDoc
+      publicOr gv d = maybe d pretty . Map.lookup gv <$> CMS.gets translatorPublic
 
       f (UnkF (FV _ x)) = return $ pretty (nativeTypeName (unCVar x))
       -- An enum lowers to its concrete name; the `enum class X : uint8_t`
@@ -255,16 +348,13 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         -- The generated-type set is what separates them.
         declared <- CMS.gets translatorVariantNames
         if legit || Set.member gv declared
-          then return (pretty (nativeTypeName cvText))
+          then publicOr gv (pretty (nativeTypeName cvText))
           else leakError gvText
       f (VarF (FV _ x)) = return $ pretty (nativeTypeName (unCVar x))
       f (FunF ts t) = do
         t' <- f t
         ts' <- mapM f ts
-        return $ "std::function<" <> t' <> tupled ts' <> ">"
-      f (NatLitF _) = return mempty
-      f (VoidF _) = return mempty
-      f (StrLitF _) = return mempty
+        return $ "std::function<" <> t' <> cppFnParams (zipSame ts ts') <> ">"
       -- Leak guard on the parameterized form (mirror of the VarF
       -- guard above). An unmapped recursive alias appears as
       -- @AppF (VarF (FV gv (CV gv))) [...]@ where the head's CV is
@@ -274,65 +364,75 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         legit <- cscopeMatches gv cvText
         if legit
           then do
-            gscope <- CMS.gets translatorGScope
-            let (typeTs, kindCount) = macroArgsF gscope gv ts
+            let typeTs = tyArgs ts
             ts' <- mapM f typeTs
-            return . pretty $ expandMacro cvText (map render ts') kindCount
+            return . pretty $ expandMacro cvText (map render ts')
           else do
             declaredApp <- CMS.gets translatorVariantNames
             if Set.member gv declaredApp then return (pretty (nativeTypeName cvText)) else leakError gvText
       f (AppF t ts) = do
-        -- $N in the CV template indexes TYPE args only; kind-kinded
-        -- args (NatLitF, StrLitF, VoidF) are structural
-        -- metadata and skipped. The skipped count is threaded to
-        -- expandMacro for error-message context only.
+        -- $N in the CV template indexes type args only (NATIVE-1).
         t' <- f t
-        gscope <- CMS.gets translatorGScope
-        let (typeTs, kindCount) = appMacroArgs gscope t ts
+        let typeTs = tyArgs ts
         ts' <- mapM f typeTs
-        return . pretty $ expandMacro (render t') (map render ts') kindCount
-      f t@(NamF _ (FV gc (CV "struct")) _ rs) = do
-        recmap <- CMS.gets translatorRecmap
-        -- handle autogenerated structs
-        case lookup (FV gc (CV "struct"), map fst rs) recmap of
-          (Just rec) -> do
-            params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
-            return $ recName rec <> params
-          Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
+        return . pretty $ expandMacro (render t') (map render ts')
+      -- A generated record is its definition at the arguments it carries,
+      -- which are native at both levels: the unpacked view keeps a
+      -- generated record native (GEN-14).
+      f (NamF _ (FV gc (CV "struct")) ps _) = do
+        (names, records) <- recordsWithExtras
+        defs <- CMS.gets translatorGenDefs
+        let q = pretty (Map.findWithDefault (unTVar gc) gc names)
+        case Map.lookup gc records of
+          Just gd
+            | null (nativeParams gd) -> return q
+            | otherwise -> case carriedTemplateArgs gd ps of
+                Just args -> (q <>) . CP.printRecordTemplate <$> mapM f args
+                Nothing -> do
+                  complainT ("a use of the record " <> unTVar gc <> " carries no arguments to spell it at")
+                  return q
+          Nothing -> do
+            -- A record refused in planning has said why.
+            fails <- CMS.gets translatorGenFailures
+            unless (Map.member gc defs) $
+              complainT ("the record " <> unTVar gc <> " has no C++ definition: "
+                <> Map.findWithDefault "its declaration could not be resolved in C++" gc fails)
+            return q
       -- A table's wire shape ('serialAstToType' of its serial form).
       f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
-      f (NamF _ (FV gv (CV s)) ps _) = do
-        gscope <- CMS.gets translatorGScope
-        let (typeTs, kindCount) = macroArgsF gscope gv ps
-        ps' <- mapM f typeTs
-        return $ renderTemplatedType s ps' kindCount
-      -- Autogenerated struct case (cv == "struct") is not supported
-      -- here: a recmap lookup needs the field keys, which a RecF does
-      -- not carry. Users hitting this must add an explicit
-      -- @record Cpp => T = "<concrete-name>"@ mapping. This matches the
-      -- limitation already documented for cross-language records.
-      f (RecF (FV _ (CV "struct"))) =
-        error $
-          "Recursive record without an explicit C++ concrete type mapping " ++
-          "is not yet supported. Add `record Cpp => <Name> = \"<struct-name>\"` " ++
-          "in the morloc source."
-      -- Back-reference to a recursive alias or record. The FVar's CVar
-      -- slot is unreliable (often the leaked morloc TVar text from
-      -- weave's bnd-protect path), so resolve the concrete name via
-      -- cscope -- the same source pairEval uses. If cscope holds an
-      -- entry, render its body's outer name. Otherwise the alias has
-      -- no concrete C++ mapping and we raise 'leakError'.
-      f (RecF (FV gv@(TV gvName) _)) = do
+      f (NamF _ (FV _ (CV s)) ps _) = renderTemplatedType s <$> mapM f (tyArgs ps)
+      -- A back-reference to a generated record names its definition at
+      -- its arguments.
+      f (RecF (FV gv (CV "struct")) ps) = do
+        (names, records) <- recordsWithExtras
+        case Map.lookup gv names of
+          Just name -> case Map.lookup gv records of
+            Just gd | not (null (nativeParams gd)) -> case carriedTemplateArgs gd ps of
+              Just args -> (pretty name <>) . CP.printRecordTemplate <$> mapM f args
+              Nothing -> do
+                CMS.modify $ \s -> s {translatorErrors = ("a reference to the record " <> unTVar gv <> " carries no arguments to spell it at") : translatorErrors s}
+                return (pretty name)
+            _ -> return (pretty name)
+          Nothing -> do
+            fails <- CMS.gets translatorGenFailures
+            CMS.modify $ \s -> s {translatorErrors = ("the record " <> unTVar gv <> " has no C++ definition: "
+              <> Map.findWithDefault "its declaration could not be resolved in C++" gv fails) : translatorErrors s}
+            return (pretty (tvarIdentifier gv))
+      -- A reference resolved through the concrete scope: a user-mapped
+      -- record is its form at the reference's arguments, as an occurrence
+      -- of it is spelled. A record or alias with no C++ mapping is
+      -- 'leakError'.
+      f (RecF (FV gv (CV x)) ps) = do
         cscope <- CMS.gets translatorCScope
-        variantNames <- CMS.gets translatorVariantNames
-        case Map.lookup gv cscope of
-          Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body -> return (pretty cv)
-          -- A back-reference to a `data` type names a type this pool
-          -- GENERATES, so it is already declared and needs no user mapping.
-          -- The leak diagnostic below is for recursive ALIASES, which have
-          -- no generated form and would otherwise reach the pool as a bare
-          -- morloc identifier.
-          _ | Set.member gv variantNames -> return (pretty (nativeTypeName gvName))
+        dataNames <- CMS.gets translatorDataNames
+        if Set.member gv dataNames then dataTypeName gv x ps else case Map.lookup gv cscope of
+          -- A generated record's entry names no type ("struct"); its
+          -- back-reference is the refusal above.
+          Just ((_, body, _, _, _) : _) | Just "struct" <- bodyCV body -> f (RecF (FV gv (CV "struct")) ps)
+          Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body ->
+            if null ps then return (pretty cv) else renderTemplatedType cv <$> mapM f (tyArgs ps)
+          -- A recursive alias has no generated form and would otherwise
+          -- reach the pool as a bare morloc identifier.
           _ -> leakError (unTVar gv)
       -- Recursive optional (?T where T points back to a containing record)
       -- collapses to a single `std::shared_ptr<const T>` with `nullptr ==
@@ -346,9 +446,15 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- single-relptr Optional encoding directly.
       -- A non-recursive `?T` keeps `std::optional<T>` -- sizeof(T) is
       -- known and inline storage is leaner.
-      f (OptionalF t@(RecF _)) = do
+      f (OptionalF t@(RecF (FV gv _) _)) = do
         t' <- f t
-        return $ "std::shared_ptr<const " <> t' <> ">"
+        handles <- CMS.gets translatorHandles
+        dataNames <- CMS.gets translatorDataNames
+        -- A handle is complete, so its optional is the ordinary one; so is
+        -- a `data` type's, which is a tagged pointer.
+        return $ if Map.member gv handles || Set.member gv dataNames
+          then "std::optional<" <> t' <> ">"
+          else "std::shared_ptr<const " <> t' <> ">"
       f (OptionalF t) = do
         t' <- f t
         return $ "std::optional<" <> t' <> ">"
@@ -381,30 +487,45 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- guards (where pairEval bnd-protection leaks @gv == cv@ and
       -- cscope confirms no legitimate mapping) and from the RecF rule
       -- (where the back-reference's TVar has no cscope entry).
-      leakError gv =
-        error $
-          "Recursive type alias `" ++ T.unpack gv ++ "` has no concrete C++ mapping. " ++
-          "Add either `type Cpp => " ++ T.unpack gv ++ " ... = \"<cpp-template>\" ...` " ++
-          "(for tuple/list aliases mapped to a user-provided struct template) or " ++
-          "`record Cpp => " ++ T.unpack gv ++ " = \"<struct-name>\"` " ++
-          "(for records), where the template/struct names a user-provided C++ type. " ++
-          "See test-suite/golden-tests/native-recursive-record/foo.hpp for the pattern."
+      -- Recorded as a pool error, reported before any C++ is written.
+      leakError :: Text -> CppTranslator MDoc
+      leakError gv = do
+        cscope <- CMS.gets translatorCScope
+        let entries = Map.findWithDefault [] (TV gv) cscope
+            generated = any (\(_, body, _, _, _) -> bodyCV body == Just "struct") entries
+            msg
+              | generated =
+                  "the record " <> gv <> " refers to itself, and its C++ definition cannot be"
+                    <> " generated in its module's header; give it a C++ form, `record Cpp => "
+                    <> gv <> " = \"<struct-name>\"`, naming a struct you write"
+              | otherwise =
+                  "Recursive type alias `" <> gv <> "` has no concrete C++ mapping. "
+                    <> "Add either `type Cpp => " <> gv <> " ... = \"<cpp-template>\" ...` "
+                    <> "(for tuple/list aliases mapped to a user-provided struct template) or "
+                    <> "`record Cpp => " <> gv <> " = \"<struct-name>\"` "
+                    <> "(for records), where the template/struct names a user-provided C++ type."
+        CMS.modify $ \st -> st {translatorErrors = msg : translatorErrors st}
+        return (pretty (tvarIdentifier (TV gv)))
 
   cppArgOf s (Arg i t) = do
     t' <- cppTypeOf (typeFof t)
-    return $ setCallSemantics s t' <+> nvarNamer i
+    return $ setCallSemantics s t' <+> (nvarNamer cppLocals) i
 
 data CppTranslatorState = CppTranslatorState
   { translatorCounter :: Int
-  , translatorRecmap :: RecMap
   , translatorSignatureSet :: Set.Set Int
   , translatorLocalManifoldSet :: Set.Set Int
   , translatorRemoteManifoldSet :: Set.Set Int
   , translatorEffectLabels :: Map.Map Int (Set.Set Text)
   , translatorLogTemplates :: Map.Map Int RenderedTemplate
+  , translatorNewtypeRecords :: Scope
+  -- ^ a record-shaped entry for each newtype whose form names a struct over
+  -- a record, for its marshaller
   -- ^ Per-labeled-midx pre-rendered log templates (see 'LogTemplate').
   -- The IIFE wrap is injected at the definition site so manifolds
   -- referenced by symbol (e.g. @std::bind(m1043, _1)@) also log.
+  , translatorDataNames :: Set.Set TVar
+  -- ^ The `data` types the program declares.
   , translatorVariantNames :: Set.Set TVar
   -- ^ The payload-bearing `data` types this pool DECLARES. A `RecF`
   -- back-reference naming one of these is legitimate and renders as that
@@ -422,9 +543,6 @@ data CppTranslatorState = CppTranslatorState
   -- Without this disambiguation, the inline @gv == cv@ leak guard would
   -- false-positive on case 1.
   , translatorCScope :: Scope
-  , translatorGScope :: Scope
-  -- ^ The general typedef scope: the declared kind of each type parameter,
-  -- which decides the arguments that are values ('valueArgsF').
   , translatorDebugInfo :: Int -> (Text, Text)
   -- ^ Snapshot of per-manifold @(name, srcloc)@ metadata (from
   -- 'makeManifoldDebugInfoLookup'); consumed by 'cppDebugWrap'.
@@ -433,9 +551,18 @@ data CppTranslatorState = CppTranslatorState
   -- named function, 'Nothing' for any other manifold (DIAG-5).
   , translatorDebugMode :: Bool
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
-  -- traceback in 'cppDebugWrap'; the manifold-level catch in
-  -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
+  -- traceback in 'cppDebugWrap', and no manifold pushes a frame line.
   , translatorPool :: PoolPlan
+  , translatorNoMoves :: Bool
+  , translatorTwin :: Maybe Int
+  -- ^ the manifold whose by-value form is being lowered (OWN-7)
+  , translatorTwinDone :: Set.Set Int
+  -- ^ the manifolds whose by-value form is emitted
+  , translatorOwningSigs :: Map.Map Int MDoc
+  -- ^ the call signatures of the closures with a by-value form, which a
+  -- let holding one as a std::function wraps in mlc::owning (CPP-7)
+  -- ^ MORLOC_NO_MOVES: no read is marked as a last read, the oracle the
+  -- copy and move tests compare against
   -- ^ The pool's ownership decisions; its takes are keyed by the top-level
   -- manifold and the let index, because a let index names a binding within
   -- a manifold and two manifolds may share one.
@@ -456,26 +583,71 @@ data CppTranslatorState = CppTranslatorState
   -- lets and parameters a last read moves, and the (manifold, local) pairs
   -- its code moves into a manifold as it is built.
   , translatorErrors :: [Text]
+  , translatorTypeHomes :: Map.Map TVar TypeHome
+  -- ^ The declaring module and name of every declared type (GEN-4).
+  , translatorPublic :: Map.Map TVar Text
+  -- ^ The generated types this pool declares in their module's header,
+  -- each with its qualified name (GEN-6).
+  , translatorHandles :: Map.Map TVar [(Key, TypeF)]
+  -- ^ The generated records that refer to themselves, each a handle to its
+  -- shared fields (GEN-1, CPP-6), with its fields.
+  , translatorLetDefs :: Map.Map Int NativeExpr
+  -- ^ the native lets of the segment being lowered bound only once
+  , translatorOwnedVars :: Set.Set Int
+  -- ^ the segment's by-value parameters and the loop slots it owns
+  , translatorBorrowedSlots :: Set.Set Int
+  -- ^ the loop slots that refer to what they start from
+  , translatorLentParams :: Set.Set Int
+  -- ^ the parameters the segment's manifolds take by reference
+  , translatorScopedTakes :: Set.Set Int
+  -- ^ the projection lets whose subject the manifold they are in owns: a
+  -- let, a loop slot it owns or a parameter it takes by value
+  , translatorGenDefs :: Map.Map TVar GenDef
+  -- ^ Each generated record's definition from its declaration (GEN-9).
+  , translatorExtras :: Extras
+  -- ^ The closure's generated types the pool does not use (GEN-6).
+  , translatorDataDefs :: Map.Map TVar DataDef
+  -- ^ Each generated parameterized `data` type's definition (GEN-9).
+  , translatorDataFailures :: Map.Map TVar Text
+  -- ^ Why a generated parameterized `data` type has no definition.
+  , translatorIntrinsicAsts :: [SerialAST]
+  -- ^ The serial forms of the values the pool's intrinsics marshal.
+  , translatorDepNamespaces :: Map.Map Text (Text, [Text])
+  -- ^ Dependency namespace roots and the headers naming one includes (GEN-7).
+  , translatorGenFailures :: Map.Map TVar Text
+  -- ^ Why a used record has no definition, for each that has none.
+  , translatorRecordUses :: [RecordUse]
+  -- ^ Every occurrence of a generated record in the pool.
+  , translatorRecords :: Map.Map TVar GenDef
+  -- ^ The generated records of the pool, each defined from its declaration
+  -- (GEN-9).
+  , translatorRecordNames :: Map.Map TVar Text
+  -- ^ The qualified C++ name of each: in its module's header, or in the
+  -- pool (GEN-10).
   }
 
 instance Defaultable CppTranslatorState where
   defaultValue =
     CppTranslatorState
       { translatorCounter = 0
-      , translatorRecmap = []
       , translatorSignatureSet = Set.empty
       , translatorLocalManifoldSet = Set.empty
       , translatorRemoteManifoldSet = Set.empty
       , translatorEffectLabels = Map.empty
       , translatorLogTemplates = Map.empty
+      , translatorNewtypeRecords = Map.empty
       , translatorVariantNames = Set.empty
+      , translatorDataNames = Set.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
-      , translatorGScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
       , translatorTraceInfo = \_ -> Nothing
       , translatorDebugMode = False
       , translatorPool = emptyPoolPlan
+      , translatorNoMoves = False
+      , translatorTwin = Nothing
+      , translatorTwinDone = Set.empty
+      , translatorOwningSigs = Map.empty
       , translatorCurrentRoot = 0
       , translatorMoves = Set.empty
       , translatorParamMoves = Set.empty
@@ -484,6 +656,24 @@ instance Defaultable CppTranslatorState where
       , translatorMovedBuilds = Set.empty
       , translatorLowered = []
       , translatorErrors = []
+      , translatorTypeHomes = Map.empty
+      , translatorPublic = Map.empty
+      , translatorHandles = Map.empty
+      , translatorLetDefs = Map.empty
+      , translatorOwnedVars = Set.empty
+      , translatorBorrowedSlots = Set.empty
+      , translatorLentParams = Set.empty
+      , translatorScopedTakes = Set.empty
+      , translatorGenDefs = Map.empty
+      , translatorExtras = noExtras
+      , translatorDataDefs = Map.empty
+      , translatorDataFailures = Map.empty
+      , translatorIntrinsicAsts = []
+      , translatorDepNamespaces = Map.empty
+      , translatorGenFailures = Map.empty
+      , translatorRecordUses = []
+      , translatorRecords = Map.empty
+      , translatorRecordNames = Map.empty
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -542,6 +732,7 @@ translate srcs es = do
   (srcs', cxxFlags, includeDirs) <- handleFlagsAndPaths srcs
 
   checkOn <- maybe False (`notElem` ["", "0"]) <$> liftIO (lookupEnv "MORLOC_CHECK_OWNERSHIP")
+  noMoves <- maybe False (`notElem` ["", "0"]) <$> liftIO (lookupEnv "MORLOC_NO_MOVES")
   labels <- collectLogLabels <$> MM.gets stateManifoldConfig
   templates <- collectRenderedTemplates cppLang
 
@@ -549,47 +740,94 @@ translate srcs es = do
   traceInfo <- makeTraceLabelLookup
   debugMode <- MM.gets stateDebugTrace
   closureTable <- computeClosureSchemas cppLang es
+  typeHomes <- MM.gets stateTypeHomes
   stageTable <- stageTableEntries
-  let recmap = unifyRecords . concatMap collectRecords $ es
-      translatorState = defaultValue
-        { translatorRecmap = recmap
-        , translatorEffectLabels = effectMap
+  let -- Closures' captured and bound arguments are deserialized by their
+      -- dispatch wrappers, not by any manifold, so their types are added.
+      poolTypes = concatMap (poolTypesWith serialAstToType) es <> map (unpackedAsTypeF . serialAstToType) (closureSerialASTs closureTable)
+      uses = recordUses poolTypes
+      named = dataNamesIn poolTypes
+  (gdefs, gfails) <- genDefs cppLang (Set.fromList [g | (g, _, _, _) <- uses] <> named)
+  (ddefs, dfails) <- dataDefs cppLang named
+  extras <- extraDefs cppLang (typeNamesIn poolTypes <> Set.fromList [g | (g, _, _, _) <- uses] <> named)
+  intrAsts <- inPoolSerialASTs cppLang es
+  depRoots <- depNamespaces "cpp"
+  depGuards <- dependencyHeaderGuards
+  gscope <- MM.getGeneralScope
+  let translatorState = defaultValue
+        { translatorEffectLabels = effectMap
+        , translatorDataNames = declaredDataNames gscope
         , translatorLogTemplates = templates
+        , translatorNewtypeRecords = newtypeRecords gscope cppScope
         , translatorCScope = mergedCppScope
-        , translatorGScope = generalScope
         , translatorDebugInfo = debugInfo
         , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
         , translatorPool = pool
+        , translatorNoMoves = noMoves
+        , translatorTypeHomes = typeHomes
+        , translatorGenDefs = gdefs
+        , translatorDataDefs = ddefs
+        , translatorDataFailures = dfails
+        , translatorIntrinsicAsts = intrAsts
+        , translatorDepNamespaces = depRoots
+        , translatorGenFailures = gfails
+        , translatorRecordUses = uses
+        , translatorExtras = extras
         }
-      pool = planPool cppCaps es
-      (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
+      pool = if noMoves then emptyPoolPlan else planPool cppCaps es
+      ((code, headers), stEnd) = CMS.runState (makeCppCode depGuards labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwRejected . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
     case concatMap (checkOne pool) (translatorLowered stEnd) of
       [] -> return ()
       vs -> MM.throwCompilerBug ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
-  maker <- makeTheMaker cxxFlags includeDirs
+  -- The generated headers' directory is searched first, so that a stale
+  -- copy of one in a source directory never shadows it.
+  maker <- makeTheMaker cxxFlags ["pools" </> "types" </> "cpp" | not (null headers)] includeDirs
 
   let poolSubdir = ML.poolDirKey cppLang
+      privateNote = poolPrivateNote [unTVar gv | gv <- Map.keys (translatorRecords stEnd), Map.notMember gv (translatorPublic stEnd)]
 
   return $
     Script
       { scriptBase = "pool"
       , scriptLang = cppLang
-      , scriptCode = "." :/ Dir "pools" [Dir poolSubdir
+      , scriptCode = "." :/ Dir "pools" ([Dir poolSubdir
           [ File "pool.cpp" (Code (subVersion (render code)))
           , File "pool_host.cpp" (Code (subVersion (DF.embededFileText (DF.poolHostTemplate "cpp"))))
-          ]]
+          ]] <> [Dir "types" [Dir "cpp" (typeFileTree ".hpp" headers <> privateNote)] | not (null headers && null privateNote)]
+          )
       , scriptMake = maker
       }
+
+-- | PKG-14: one check per header of every cpp-deps entry of the program, so a
+-- header that does not resolve is refused naming its dependency.
+dependencyHeaderGuards :: MorlocMonad [MDoc]
+dependencyHeaderGuards = do
+  metas <- MM.gets statePackageMeta
+  return
+    [ vsep
+        [ "#if !__has_include(<" <> pretty h <> ">)"
+        , "#error \"C++ dependency" <+> pretty name <+> "(header" <+> pretty h <> ") not found\""
+        , "#endif"
+        ]
+    | (name, h) <-
+        unique
+          [ (name, h)
+          | meta <- metas
+          , (name, d) <- Map.toList (Map.findWithDefault Map.empty "cpp" (packageDepImports meta))
+          , h <- diImports d
+          ]
+    ]
 
 -- Substitute the version placeholder shared by the member and host templates.
 subVersion :: Text -> Text
 subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 
 makeCppCode ::
+  [MDoc] ->
   Map.Map Int Text ->
   [Source] ->
   [SerialManifold] ->
@@ -597,18 +835,35 @@ makeCppCode ::
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
   Map.Map Int StageEntry ->
   Set.Set Int ->
-  CppTranslator MDoc
-makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
+  CppTranslator (MDoc, [([Text], Text)])
+makeCppCode depGuards labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
-  gscope <- CMS.gets translatorGScope
   CMS.modify $ \st -> st
-    { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants gscope es] }
+    { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
+  headers <- planPublicTypes es
+  -- OWN-8: a scalar is passed and returned by value (CPP-1), so it is
+  -- never lent.
+  pp0 <- CMS.gets translatorPool
+  lentOk <- Map.fromList <$> filterM (\(_, lr) -> not <$> cppNoMove (lrType lr)) (Map.toList (ppLent pp0))
+  condOk <- Map.fromList <$> filterM (\(_, cl) -> not <$> cppNoMove (clType cl)) (Map.toList (ppCondLets pp0))
+  CMS.modify $ \st -> st
+    { translatorPool = pp0
+        { ppLent = lentOk
+        , ppLentLets = Map.filter (\(m, _) -> Map.member m lentOk) (ppLentLets pp0)
+        , ppCondLets = condOk
+        }
+    }
   templates <- CMS.gets translatorLogTemplates
   (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap es
 
   -- write include statements for sources
-  let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
+  -- The dependency checks come first (PKG-14), then the generated headers, so
+  -- a sourced file may name their types (GEN-6).
+  let includeDocs =
+        depGuards
+          <> ["#include" <+> dquotes (pretty (cppHeaderPath p)) | (p, _) <- headers]
+          <> map translateSource (unique . mapMaybe srcPath $ srcs)
 
   signatures0 <- concat <$> mapM (makeSignature nativeEntries) es
 
@@ -618,11 +873,12 @@ makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntri
   papplyHeads <- papplyHeadSigs closureCppSig es
   let closureGen = ClosureGen reifyThunks stageTable papplyHeads
 
-  (autoDecl, autoFwds, autoSerial) <- generateAnonymousStructs
+  intrAsts <- CMS.gets translatorIntrinsicAsts
+  (autoDecl, autoFwds, autoLate) <- generateRecords (cppLowerConfig closureGen) (concatMap allSerialASTs es <> intrAsts <> closureSerialASTs closureTable0)
   (varWrappers, varArms, varFwds, varSerial, varLate) <-
     generateCppVariants (cppLowerConfig closureGen) closureTable0 es
   -- Converting marshallers follow the template's closure machinery.
-  let signatures = stageLookupDoc stageTable : varLate <> signatures0
+  let signatures = stageLookupDoc stageTable : varLate <> autoLate <> signatures0
   enumDecl <- generateCppEnums es
   valueChecks <- cppValueChecks es
   -- Declaration order is forced by what holds what by value. An enum is a
@@ -636,14 +892,14 @@ makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntri
   let serializationCode =
         enumDecl ++ varWrappers ++ autoDecl ++ varArms
           ++ varFwds ++ autoFwds ++ srcFwds
-          ++ varSerial ++ autoSerial ++ srcSerial ++ srcDeserial
+          ++ varSerial ++ srcSerial ++ srcDeserial
           ++ valueChecks
 
   -- build the program (translates each manifold tree)
   program <- buildProgramM labels templates includeDocs [] es (translateSegment closureGen) getCppSchemaTable (Map.map closureSchemaTexts closureTable)
 
   -- create and return complete pool script
-  return $ CP.printProgram serializationCode signatures closureWrappers program
+  return (CP.printProgram serializationCode signatures closureWrappers program, headers)
 
 -- | A closure's C++ callable signature "Ret(Arg...)" -- the same string
 -- 'lcClosureSig' produces and 'MorlocClosure<Sig>' is keyed on. Rendered from
@@ -652,7 +908,7 @@ closureCppSig :: [TypeF] -> TypeF -> CppTranslator Text
 closureCppSig ins out = do
   rt <- cppTypeOf out
   ats <- mapM cppTypeOf ins
-  return (render (rt <> tupled ats))
+  return (render (rt <> cppFnParams (zipSame ins ats)))
 
 -- | For each defunctionalized closure manifold, emit a serial dispatch wrapper
 -- so the home pool can apply the closure when a foreign pool calls back on its
@@ -676,18 +932,23 @@ makeClosureDispatch closureTable es = do
     one (NativeManifold i _ form _) = do
       let ctxTs = [t | Arg _ o <- manifoldContext form, Just t <- [orNativeType o]]
           bndTs = [t | Arg _ t <- manifoldBound form]
-          ctxNames = map argNamer (typeMofRs (manifoldContext form))
+          ctxNames = map (argNamer cppLocals) (typeMofRs (manifoldContext form))
           -- inTable already guaranteed membership, so this key is present.
           (capAsts, bndAsts, resAst) = closureTable Map.! i
       argTypes <- mapM cppTypeOf (ctxTs <> bndTs)
       getVals <- mapM
         (\(j, (t, ast)) -> cppDecode ("args[" <> pretty j <> "]") t ast)
-        (zip [(0 :: Int) ..] (zip argTypes (capAsts <> bndAsts)))
+        (indexed (zipSame argTypes (capAsts <> bndAsts)))
       let call = manNamer i <> tupled getVals
       putRes <- cppEncode call resAst
       reifier <- closureReifyThunk ctxNames capAsts
-      bndSids <- mapM (cppRegisterSchema . render . serialAstToMsgpackSchema) bndAsts
-      let bndSchemas = "std::vector<Schema*>" <> encloseSep "{" "}" ", " ["mlc_schema_table[" <> pretty j <> "]" | j <- bndSids]
+      bndTypes <- mapM cppTypeOf bndTs
+      bndEncs <- mapM
+        (\(t, ast) -> do
+            b <- cppToBytes "__x" ast
+            return ("[](const void* __p) -> std::vector<uint8_t> { const" <+> t <> "& __x = *static_cast<const" <+> t <> "*>(__p); return" <+> b <> "; }"))
+        (zipSame bndTypes bndAsts)
+      let bndSchemas = "std::vector<mlc_arg_encoder>" <> encloseSep "{" "}" ", " bndEncs
       let dispatchDoc =
             [idoc|uint8_t* mlc_closure_dispatch_#{pretty i}(const uint8_t** args) {
     return #{putRes};
@@ -704,26 +965,43 @@ closureReifyThunk :: [MDoc] -> [SerialAST] -> CppTranslator MDoc
 closureReifyThunk names asts
   | null names = return "[]() { return std::vector<std::vector<uint8_t>>{}; }"
   | otherwise = do
-      caps <- mapM cap (zip names asts)
+      caps <- mapM cap (zipSame names asts)
       return
         [idoc|[#{cat (punctuate ", " names)}]() -> std::vector<std::vector<uint8_t>> {
     return { #{cat (punctuate ", " caps)} };
 }|]
   where
-    cap (nm, ast@(SerialClosure _ _)) = do
-      sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
-      return [idoc|_mlc_reify_capture(_mlc_reify(#{nm}), mlc_schema_table[#{pretty sid}])|]
-    cap (nm, ast) = do
-      sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
-      return [idoc|_mlc_reify_capture(#{nm}, mlc_schema_table[#{pretty sid}])|]
+    cap (nm, ast) = cppToBytes nm ast
 
--- | Serialize a native value by its wire form: a closure is reified first.
+-- | A native value as its wire form, closures reified and packers applied
+-- (the conversion every ordinary argument gets): the statements that
+-- compute it and the wire expression.
+cppWireOf :: MDoc -> SerialAST -> CppTranslator ([MDoc], MDoc)
+cppWireOf v ast = do
+  (stmts, e) <- nativeToWire (cppLowerConfig (ClosureGen Map.empty Map.empty Set.empty)) v ast
+  return (map CP.printStmt stmts, CP.printExpr e)
+
+-- | An expression of the wire value of @v@ handed to @k@, with the
+-- statements computing it run first.
+cppWithWire :: MDoc -> SerialAST -> (MDoc -> MDoc) -> CppTranslator MDoc
+cppWithWire v ast k = do
+  (stmts, e) <- cppWireOf v ast
+  return $
+    if null stmts
+      then k e
+      else "[&]() {" <+> hsep stmts <+> "return" <+> k e <> "; }()"
+
+-- | A self-contained packet of a native value, as bytes.
+cppToBytes :: MDoc -> SerialAST -> CppTranslator MDoc
+cppToBytes v ast = do
+  sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
+  cppWithWire v ast (\e -> "_mlc_reify_capture(" <> e <> ", mlc_schema_table[" <> pretty sid <> "])")
+
+-- | Serialize a native value by its wire form.
 cppEncode :: MDoc -> SerialAST -> CppTranslator MDoc
 cppEncode v ast = do
   sid <- cppRegisterSchema (render (serialAstToMsgpackSchema ast))
-  return $ case ast of
-    SerialClosure _ _ -> "_put_value(_mlc_reify(" <> v <> "), mlc_schema_table[" <> pretty sid <> "])"
-    _ -> "_put_value(" <> v <> ", mlc_schema_table[" <> pretty sid <> "])"
+  cppWithWire v ast (\e -> "_put_value(" <> e <> ", mlc_schema_table[" <> pretty sid <> "])")
 
 -- | Deserialize a packet by its wire form into a value of the given C++
 -- type: a closure is reflected into a proxy that calls back to its home.
@@ -736,12 +1014,17 @@ cppDecode pkt typeStr ast = do
             "_get_value<" <> pretty cppClosureWireTupleName <> ">(" <> pkt
               <> ", mlc_schema_table[" <> pretty sid <> "])"
       cppClosureProxyLambda cloInit ins out
-    _ -> return $ "_get_value<" <> typeStr <> ">(" <> pkt <> ", mlc_schema_table[" <> pretty sid <> "])"
+    _ -> do
+      (e, stmts) <- deserialize pkt typeStr ast
+      return $
+        if null stmts
+          then e
+          else "[&]() ->" <+> typeStr <+> "{" <+> hsep stmts <+> "return" <+> e <> "; }()"
 
 -- | Collect TVar names of all named (non-anonymous) record types used
 -- in a SerialManifold tree.
-collectNamedRecordTVars :: Scope -> SerialManifold -> Set.Set TVar
-collectNamedRecordTVars gscope e0 =
+collectNamedRecordTVars :: SerialManifold -> Set.Set TVar
+collectNamedRecordTVars e0 =
   runIdentity $ foldWithSerialManifoldM fm e0
   where
     fm = defaultValue
@@ -750,12 +1033,12 @@ collectNamedRecordTVars gscope e0 =
       }
 
     nativeExpr _ (DeserializeN_ t s xs) =
-      return $ Set.unions [xs, seekNamedRecs t, seekNamedRecs (serialAstToType s)]
+      return $ Set.unions [xs, seekNamedRecs t, seekNamedRecs (unpackedAsTypeF (serialAstToType s))]
     nativeExpr efull e =
       return $ foldlNE Set.union (seekNamedRecs (typeFof efull)) e
 
     serialExpr _ (SerializeS_ s xs) =
-      return $ Set.union (seekNamedRecs (serialAstToType s)) xs
+      return $ Set.union (seekNamedRecs (unpackedAsTypeF (serialAstToType s))) xs
     serialExpr _ e = return $ foldlSE Set.union Set.empty e
 
     seekNamedRecs :: TypeF -> Set.Set TVar
@@ -763,15 +1046,15 @@ collectNamedRecordTVars gscope e0 =
       | c /= "struct" = Set.insert v (Set.unions (map (seekNamedRecs . snd) rs))
     seekNamedRecs (NamF _ _ _ rs) = Set.unions (map (seekNamedRecs . snd) rs)
     seekNamedRecs (FunF ts t) = Set.unions (map seekNamedRecs (t : ts))
-    seekNamedRecs (AppF t ts) = Set.unions (map seekNamedRecs (t : appValueArgs gscope t ts))
+    seekNamedRecs (AppF t ts) = Set.unions (map seekNamedRecs (t : tyArgs ts))
     seekNamedRecs (OptionalF t) = seekNamedRecs t
     -- A record held in a constructor's payload needs its marshaller as
     -- much as one held in a field.
-    seekNamedRecs (VariantF (FV gv _) ps as) = Set.unions (map seekNamedRecs (valueArgsF gscope gv ps ++ concatMap snd as))
+    seekNamedRecs (VariantF (FV _ _) ps as) = Set.unions (map seekNamedRecs (tyArgs ps ++ concatMap snd as))
     seekNamedRecs _ = Set.empty
 
-makeTheMaker :: [Text] -> [Path] -> MorlocMonad [SysCommand]
-makeTheMaker flags includes = do
+makeTheMaker :: [Text] -> [Path] -> [Path] -> MorlocMonad [SysCommand]
+makeTheMaker flags generated includes = do
   let poolSubdir = ML.poolDirKey cppLang
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
@@ -790,7 +1073,7 @@ makeTheMaker flags includes = do
   -- header (a program called `tuple`) never replaces it.
   -- Paths are quoted: the command runs through a shell, and a project under
   -- a directory with spaces (iCloud Drive, Google Drive) is ordinary.
-  let incs = concat [[pretty ("-iquote" <> MS.shellQuote i), pretty ("-idirafter" <> MS.shellQuote i)] | i <- "." : includes]
+  let incs = concat [[pretty ("-iquote" <> MS.shellQuote i), pretty ("-idirafter" <> MS.shellQuote i)] | i <- generated <> ("." : includes)]
   let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =
@@ -821,7 +1104,7 @@ makeSignature nativeEntries = foldWithSerialManifoldM fm
     -- that takes all of its arguments returns a value, not a callable.
     nativeManifold (NativeManifold m _ form body) folded
       | Set.member m nativeEntries = do
-          typestr <- cppTypeOf (typeMof body)
+          typestr <- cppTypeOf (typeMof body) >>= cppResultType m
           own <- manifoldSignature m typestr form
           return (foldlNM (<>) own folded)
       | otherwise = return (foldlNM (<>) [] folded)
@@ -835,9 +1118,19 @@ makeSignature nativeEntries = foldWithSerialManifoldM fm
         else do
           let formArgs = typeMofForm form
 
-          args <- zipWithM (cppParamOf i) [0 ..] formArgs
+          args <- mapIndexedM (cppParamOf i) formArgs
           CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
-          return [typestr <+> manNamer i <> tupled args <> ";"]
+          -- the by-value form, for a call from any segment (OWN-7)
+          positions <- filterM (\(j, Arg _ t) -> cppTwinPosition i j (typeMof t)) (indexed formArgs)
+          twin <-
+            if null positions
+              then return []
+              else do
+                CMS.modify (\st -> st {translatorTwin = Just i})
+                targs <- mapIndexedM (cppParamOf i) formArgs
+                CMS.modify (\st -> st {translatorTwin = Nothing})
+                return [typestr <+> manNamer i <> tupled targs <> ";"]
+          return ((typestr <+> manNamer i <> tupled args <> ";") : twin)
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
@@ -848,7 +1141,7 @@ recordAccess record field = record <> "." <> field
 -- | The ownership check (OWN-1) of one marked top-level manifold, given how
 -- the pool binds each of its lets.
 checkOne :: PoolPlan -> (SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int, Set.Set (Int, Int)) -> [Text]
-checkOne pp (sm, modes, moves, moved) = checkManifold mode (ocTagAfterTake cppCaps) moves (\m -> Map.findWithDefault Set.empty m (ppByValue pp)) moved sm
+checkOne pp (sm, modes, moves, moved) = checkManifold mode (ocTagAfterTake cppCaps) moves (keptPositions pp) moved sm
   where
     byIndex = Map.fromListWith (\_ old -> old) [(i, m) | (i, _, m) <- modes]
     mode i _ = Map.findWithDefault LetCopy i byIndex
@@ -859,11 +1152,58 @@ cppLetMode :: Int -> NativeExpr -> CppTranslatorM LetMode
 cppLetMode i rhs = do
   pp <- CMS.gets translatorPool
   root <- CMS.gets translatorCurrentRoot
+  handles <- CMS.gets translatorHandles
+  defs <- CMS.gets translatorLetDefs
   case letMode pp root i rhs of
-    LetCopy -> return LetCopy
+    -- a let bound once naming a reference is a reference too (OWN-2): a
+    -- let bound to one, a borrowed loop slot or a borrowed parameter
+    LetCopy
+      | Map.member i defs, Just j <- varIndex (letValue rhs), Just jrhs <- Map.lookup j defs -> do
+          jmode <- cppLetMode j jrhs
+          return (if jmode == LetBorrow then LetBorrow else LetCopy)
+      | Map.member i defs, Just j <- varIndex (letValue rhs) -> do
+          st <- CMS.get
+          let lent = Set.member j (translatorBorrowedSlots st) || Set.member j (translatorLentParams st)
+          return (if lent then LetBorrow else LetCopy)
+      | otherwise -> return LetCopy
     mode -> do
       typestr <- cppTypeOf (typeFof rhs)
-      return (if isScalarCppType typestr then LetCopy else mode)
+      case () of
+        _ | isScalarCppType typestr -> return LetCopy
+          | LetTake <- mode, PatN _ (PatGet _ [] (NativeArgExpr v)) <- rhs -> do
+              owned <- ownsVar i v
+              -- a handle's fields are behind a shared pointer
+              let handle = maybe False (`Map.member` handles) (recordNameOf (typeFof v))
+              return (if owned && not handle then LetTake else LetBorrow)
+          | LetTake <- mode, IntrinsicN _ IntrListElem _ (v : _) <- rhs -> do
+              owned <- ownsVar i v
+              return (if owned then LetTake else LetBorrow)
+          | LetTake <- mode, IntrinsicN _ IntrCtorField _ (v : _) <- rhs -> do
+              owned <- ownsVar i v
+              return (if owned then LetTake else LetBorrow)
+          -- a field of an element of a list the frame owns (OWN-5)
+          | LetBorrow <- mode
+          , IntrinsicN _ IntrCtorField _ (IntrinsicN _ IntrListElem _ (v : _) : _) <- rhs
+          , Set.member (root, i) (ppTakes pp) -> do
+              owned <- ownsVar i v
+              return (if owned then LetTake else LetBorrow)
+          | otherwise -> return mode
+  where
+    -- A move out of a value the frame does not own would copy it.
+    -- the subject of let @k@ is owned in the manifold the let is in
+    ownsVar k v = do
+      scoped <- CMS.gets translatorScopedTakes
+      case varIndex v of
+        Just j | Set.member k scoped -> owned j
+        _ -> return False
+    owned j = do
+      defs <- CMS.gets translatorLetDefs
+      case Map.lookup j defs of
+        Just jrhs -> ownsMode <$> cppLetMode j jrhs
+        Nothing -> return True
+    ownsMode LetBorrow = False
+    ownsMode (LetLent _) = False
+    ownsMode _ = True
 
 -- | A kept element (OWN-2).
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
@@ -878,31 +1218,213 @@ cppNoMove t = do
 -- | The value a native loop ends with (OWN-2): one of its carried locals at
 -- its last read is moved.
 cppKeepSlot :: [Int] -> NativeExpr -> MDoc -> CppTranslatorM MDoc
-cppKeepSlot ids e x = case e of
-  LetVarN t j LastRead -> slot t j
-  BndVarN t j LastRead -> slot t j
-  _ -> return x
+cppKeepSlot ids e x = do
+  pp <- CMS.gets translatorPool
+  case [lr | lr <- Map.elems (ppLent pp), Set.null (lrIfs lr), lrSlots lr == ids] of
+    (lr : _) | Just v <- varIx e -> do
+      lends <- cppLendsLeaf lr v
+      if lends then return ("mlc::lent(" <> (nvarNamer cppLocals) v <> ")") else kept
+    _ -> kept
   where
+    varIx (LetVarN _ j _) = Just j
+    varIx (BndVarN _ j _) = Just j
+    varIx _ = Nothing
+    kept = case e of
+      LetVarN t j LastRead -> slot t j
+      BndVarN t j LastRead -> slot t j
+      _ -> return x
     slot t j
-      | j `elem` ids && render x == render (nvarNamer j) = do
+      | j `elem` ids && render x == render ((nvarNamer cppLocals) j) = do
           cheap <- cppNoMove t
           return (if cheap then x else "std::move(" <> x <> ")")
-      | otherwise = return x
+      | otherwise = cppKeepElem e x
+
+-- | Whether a base leaf naming local @v@ returns it lent (OWN-8): the plan
+-- names it, and as this form binds it, it is the loop's slot that refers to
+-- the parameter or a reference to a part of it bound in the loop.
+cppLendsLeaf :: LentResult -> Int -> CppTranslatorM Bool
+cppLendsLeaf lr = reaches Set.empty
+  where
+    reaches seen j
+      | Set.notMember j (lrLeaves lr) || Set.member j seen = return False
+      | j `elem` lrSlots lr = Set.member j <$> CMS.gets translatorBorrowedSlots
+      | otherwise = do
+          defs <- CMS.gets translatorLetDefs
+          case Map.lookup j defs of
+            Just rhs -> do
+              mode <- cppLetMode j rhs
+              case (mode, baseOf rhs) of
+                (LetBorrow, Just k) -> reaches (Set.insert j seen) k
+                _ -> return False
+            Nothing -> return False
+    baseOf e = case e of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (s : _) -> baseOf s
+      IntrinsicN _ IntrListElem _ (s : _) -> baseOf s
+      PatN _ (PatGet _ [] (NativeArgExpr s)) -> baseOf s
+      _ -> Nothing
+
+-- | Whether loop let @i@ is a part some base leaf returns lent (OWN-8).
+cppLentPart :: Int -> CppTranslatorM Bool
+cppLentPart i = do
+  pp <- CMS.gets translatorPool
+  case [lr | lr <- Map.elems (ppLent pp), Set.null (lrIfs lr), Set.member i (lrLeaves lr), i `notElem` lrSlots lr] of
+    (lr : _) -> cppLendsLeaf lr i
+    [] -> return False
+
+-- | A let bound to a call whose result is lent or owned, read where it lies
+-- (OWN-8): the result held whole, and the let a reference into it.
+cppLentLet :: Bool -> MDoc -> MDoc -> [MDoc]
+cppLentLet cond name x = case T.stripPrefix "mlc::own(" (render x) >>= T.stripSuffix ")" of
+  Just call ->
+    [ "auto" <+> name <> "_lent =" <+> pretty call <> ";"
+    , "const auto&" <+> name <+> "=" <+> name <> "_lent.get();"
+    ]
+  -- a conditional rendered owned (OWN-10)
+  Nothing
+    | cond ->
+        [ "auto" <+> name <> "_lent =" <+> x <> ";"
+        , "const auto&" <+> name <+> "=" <+> name <> "_lent;"
+        ]
+  Nothing -> error ("morloc bug: OWN-8 let " <> show (render name) <> " is not bound to a call that lends its result: " <> show (render x))
+
+-- | Whether let @i@ of the current manifold is bound to a conditional read
+-- where it lies (OWN-10).
+cppIsCondLet :: Int -> CppTranslatorM Bool
+cppIsCondLet i = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  return (Map.member (root, i) (ppCondLets pp))
+
+-- | Whether a conditional's value is lent or owned (OWN-10).
+cppLentIf :: NativeExpr -> CppTranslatorM Bool
+cppLentIf e@IfN {} = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  let k = condKey e
+  return $
+    any (Set.member k . clIfs) (condLetsIn pp root)
+      || any (Set.member k . lrIfs) (Map.elems (ppLent pp))
+cppLentIf _ = return False
+
+-- | An arm of a conditional whose value is lent or owned (OWN-10): a part
+-- the plan names, as this member binds it a reference, lent; an inner such
+-- conditional passed on; any other value owned.
+cppLentArm :: NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> CppTranslatorM PoolDocs
+cppLentArm ifE armE raw owned
+  | isNativeThrow armE = return owned
+  | otherwise = do
+      pp <- CMS.gets translatorPool
+      root <- CMS.gets translatorCurrentRoot
+      let k = condKey ifE
+          cls = [cl | cl <- condLetsIn pp root, Set.member k (clIfs cl)]
+          lrs = [lr | lr <- Map.elems (ppLent pp), Set.member k (lrIfs lr)]
+      innerLent <- case armValue armE of
+        v@IfN {} -> cppLentIf v
+        _ -> return False
+      lends <- case armValue armE of
+        LetVarN _ v _ -> (||) <$> lendsVar cls v <*> lendsParam lrs v
+        BndVarN _ v _ -> (||) <$> lendsVar cls v <*> lendsParam lrs v
+        _ -> return False
+      let ownedExpr = cppMoved (cppUnitResult ifE) (armOwnsResult armE) (poolExpr owned)
+      return $ case () of
+        _ | innerLent, Just x <- T.stripPrefix "mlc::own(" (render (poolExpr raw)) >>= T.stripSuffix ")" -> raw {poolExpr = pretty x}
+          | lends -> raw {poolExpr = "mlc::lent(" <> poolExpr raw <> ")"}
+          | otherwise -> owned {poolExpr = ownedExpr}
+  where
+    armValue e = case e of
+      NativeLetN i r@IfN {} (LetVarN _ j _) | i == j -> armValue r
+      NativeLetN _ _ b -> armValue b
+      _ -> e
+    -- OWN-8: the parameter, or a part of it bound by reference, where this
+    -- form takes the parameter by reference
+    lendsParam lrs v = case lrs of
+      (lr : _) | Set.member v (lrLeaves lr) -> do
+        lentParams <- CMS.gets translatorLentParams
+        let params = Set.fromList (map snd (lrParams lr)) `Set.intersection` lentParams
+        if Set.member v params then return True else paramRef lr params v
+      _ -> return False
+    paramRef lr params v = do
+      defs <- CMS.gets translatorLetDefs
+      case Map.lookup v defs of
+        Just rhs -> do
+          mode <- cppLetMode v rhs
+          case (mode, baseOf rhs) of
+            (LetBorrow, Just b)
+              | Set.member b params -> return True
+              | Set.member b (lrParts lr) -> paramRef lr params b
+            _ -> return False
+        Nothing -> return False
+    lendsVar cls v
+      | any (\cl -> Set.member v (clSources cl) && Set.member v (clLeaves cl)) cls = return True
+      | otherwise = case [cl | cl <- cls, Set.member v (clParts cl)] of
+          [] -> return False
+          (cl : _) -> partRef cl v
+    -- a part let bound by reference, through parts bound by reference
+    partRef cl v = do
+      defs <- CMS.gets translatorLetDefs
+      case Map.lookup v defs of
+        Just rhs -> do
+          mode <- cppLetMode v rhs
+          case (mode, baseOf rhs) of
+            (LetBorrow, Just b)
+              | Set.member b (clParts cl) -> partRef cl b
+              | otherwise -> return True
+            _ -> return False
+        Nothing -> return False
+    baseOf e = case e of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (x : _) -> baseOf x
+      IntrinsicN _ IntrListElem _ (x : _) -> baseOf x
+      PatN _ (PatGet _ [] (NativeArgExpr x)) -> baseOf x
+      _ -> Nothing
+
+-- | The value a manifold whose result is lent or owned returns (OWN-8): a
+-- conditional's lent-or-owned value as it is.
+cppLentReturn :: Int -> MDoc -> CppTranslatorM MDoc
+cppLentReturn m x = do
+  pp <- CMS.gets translatorPool
+  return $ case Map.lookup m (ppLent pp) of
+    Just lr
+      | not (Set.null (lrIfs lr))
+      , Just inner <- T.stripPrefix "mlc::own(std::move(*" (render x) >>= T.stripSuffix "))" ->
+          "std::move(*" <> pretty inner <> ")"
+    _ -> x
+
+-- | Whether let @i@ is a part a conditional read where it lies may lend
+-- (OWN-10).
+cppCondPart :: Int -> CppTranslatorM Bool
+cppCondPart i = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  return (any (Set.member i . clParts) (condLetsIn pp root) || any (Set.member i . lrParts) (Map.elems (ppLent pp)))
+
+-- | The type a call of manifold @m@ returns, given its value's type: lent
+-- or owned for a manifold that may lend its result (OWN-8).
+cppResultType :: Int -> MDoc -> CppTranslatorM MDoc
+cppResultType m t = do
+  pp <- CMS.gets translatorPool
+  return (if Map.member m (ppLent pp) then "mlc::lent_or<" <> t <> ">" else t)
 
 -- | The move of a kept let (OWN-2), when its lowered form is the let itself.
 cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
 cppKeptLet (LetVarN t i LastRead) x
-  | render x == render (nvarNamer i) = do
+  | render x == render ((nvarNamer cppLocals) i) = do
       moves <- CMS.gets translatorMoves
-      if Set.member i moves
+      -- a loop slot the loop owns, at its last read (OWN-2)
+      slots <- (\st -> translatorOwnedVars st `Set.difference` translatorParamMoves st) <$> CMS.get
+      if Set.member i moves || Set.member i slots
         then do
           cheap <- cppNoMove t
           return (if cheap then Nothing else Just ("std::move(" <> x <> ")"))
         else return Nothing
 cppKeptLet (BndVarN t i LastRead) x
-  | render x == render (nvarNamer i) = do
+  | render x == render ((nvarNamer cppLocals) i) = do
       params <- CMS.gets translatorParamMoves
-      if Set.member i params
+      owned <- CMS.gets translatorOwnedVars
+      if Set.member i params || Set.member i owned
         then do
           cheap <- cppNoMove t
           return (if cheap then Nothing else Just ("std::move(" <> x <> ")"))
@@ -914,7 +1436,14 @@ cppKeptLet _ _ = return Nothing
 cppKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> CppTranslatorM MDoc
 cppKeepCallArg m j e x = do
   pp <- CMS.gets translatorPool
-  if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) then cppKeepElem e x else return x
+  if Set.member j (keptPositions pp m) then cppKeepElem e x else return x
+
+-- | The positions where manifold @m@ takes or may take its argument by
+-- value: a call moves an argument there wherever it may (OWN-7), so a
+-- call that moves every one of its by-value form's arguments selects that
+-- form.
+keptPositions :: PoolPlan -> Int -> Set.Set Int
+keptPositions pp m = Map.findWithDefault Set.empty m (ppByValue pp) <> Map.findWithDefault Set.empty m (ppTwoForm pp)
 
 -- | Whether building manifold @m@ moves local @i@ of type @t@ into it: the
 -- building is its last read and it is an owned let or by-value parameter
@@ -937,46 +1466,37 @@ cppMovesInto m i t = do
 cppKeepContextArg :: Int -> Int -> Int -> TypeF -> MDoc -> CppTranslatorM MDoc
 cppKeepContextArg m j i t x = do
   pp <- CMS.gets translatorPool
-  if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) && not (isFunctionValue t) && render x == render (nvarNamer i)
+  if Set.member j (keptPositions pp m) && not (isFunctionValue t) && render x == render ((nvarNamer cppLocals) i)
     then do
       moves <- cppMovesInto m i t
       return (if moves then "std::move(" <> x <> ")" else x)
     else return x
 
 -- | The parameter at position @j@ of manifold @m@: one it takes by value is
--- declared as a value (OWN-7).
+-- declared as a value, and one its by-value form takes as an rvalue
+-- reference (OWN-7).
 cppParamOf :: Int -> Int -> Arg TypeM -> CppTranslator MDoc
 cppParamOf m j r@(Arg _ t) = do
   pp <- CMS.gets translatorPool
+  twin <- CMS.gets translatorTwin
+  taken <- cppTwinPosition m j t
   byValue <- case t of
     Native tf
       | Set.member j (Map.findWithDefault Set.empty m (ppByValue pp))
       , not (isFunctionValue tf) -> not <$> cppNoMove tf
     _ -> return False
-  cppArgOf (if byValue then Copy else chooseCallSemantics t) r
+  cppArgOf (if twin == Just m && taken then Taken else if byValue then Copy else chooseCallSemantics t) r
 
--- | A segment with the reads of the parameters manifold @m@ takes by value
--- (@seeds m@) written as reads of a parameter: such a parameter shares its
--- index with what its caller passes, which may be one of the caller's lets.
-paramReads :: (Int -> [Int]) -> SerialManifold -> SerialManifold
-paramReads seeds = mmap (defaultValue {mapNativeManifold = onNM})
-  where
-    onNM (NativeManifold m l f e) = case seeds m of
-      [] -> NativeManifold m l f e
-      ps -> NativeManifold m l f (asParams (Set.fromList ps) e)
-    asParams ps = mgatedMap gate (defaultValue {mapNativeExpr = rd})
-      where
-        rd (LetVarN t i r) | Set.member i ps = BndVarN t i r
-        rd x = x
-    gate = defaultValue {gateNativeManifold = const False, gateSerialManifold = const False}
-
--- | The carried locals of every loop under a node.
-loopSlots :: RNode -> Set.Set Int
-loopSlots n = here n <> Set.unions (map loopSlots (rnodeChildren n))
-  where
-    here (RN (LoopN _ starts _)) = Set.fromList (map fst starts)
-    here (RS (LoopS _ ids _)) = Set.fromList ids
-    here _ = Set.empty
+-- | Whether parameter @j@ of manifold @m@ is one its by-value form takes
+-- (OWN-7): kept on some evaluations, and worth moving.
+cppTwinPosition :: Int -> Int -> TypeM -> CppTranslatorM Bool
+cppTwinPosition m j t = do
+  pp <- CMS.gets translatorPool
+  case t of
+    Native tf
+      | Set.member j (Map.findWithDefault Set.empty m (ppTwoForm pp))
+      , not (isFunctionValue tf) -> not <$> cppNoMove tf
+    _ -> return False
 
 isFunctionValue :: TypeF -> Bool
 isFunctionValue FunF {} = True
@@ -985,62 +1505,58 @@ isFunctionValue _ = False
 -- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
 -- Guards -> if/else; native/serial lets -> locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value of
--- a slot it changes into an @auto@ temp, then move it into the slot. The IR
--- body, when it is known, is walked beside the lowered one; a let whose IR
--- node is not at the same place, with the same index, binds a copy.
-cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
-cppWalkLoopBody setResult ids = go
+-- a slot it changes into an @auto@ temp, then move it into the slot. Each
+-- let binds as its IR node decides.
+cppWalkLoopBody :: (MDoc -> MDoc) -> LoopBody LowN LowS PoolDocs -> CppTranslatorM [MDoc]
+cppWalkLoopBody setResult = go
   where
-    go _ (LoopBase seDocs) =
+    go (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
     -- A slot whose new value is itself is left alone: copying it into a temp
     -- and back would copy the whole value every iteration.
     -- A let moved into its slot needs no temp, as no slot reassignment
-    -- changes it.
-    go o (LoopContinue contDocs) = do
-      let changed = changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs
-      moved <- mapM (\(_, cd, oe) -> maybe (return Nothing) (\e -> cppKeptLet e (poolExpr cd)) oe) changed
-      let viaTemp = [(i, cd) | ((i, cd, _), Nothing) <- zip changed moved]
-          direct = [(i, x) | ((i, _, _), Just x) <- zip changed moved]
-      tmpVars <- map helperNamer <$> mapM (const getCounter) viaTemp
+    -- changes it; a slot moved into another goes through a temp, since its
+    -- own reassignment may come first.
+    go (LoopContinue xs) = do
+      let changed = changedSlots [(i, o, d) | (i, Low o d) <- xs]
+          slots = map fst xs
+          fromSlot e = case e of
+            LetVarN _ j _ -> j `elem` slots
+            BndVarN _ j _ -> j `elem` slots
+            _ -> False
+      moved <- mapM (\(_, cd, oe) -> cppKeptLet oe (poolExpr cd)) changed
+      let viaTemp = [(i, maybe (poolExpr cd) id m) | ((i, cd, oe), m) <- zipSame changed moved, isNothing m || fromSlot oe]
+          direct = [(i, x) | ((i, _, oe), Just x) <- zipSame changed moved, not (fromSlot oe)]
+      tmpVars <- map (helperNamer cppLocals) <$> mapM (const getCounter) viaTemp
       let priors = concatMap (\(_, cd, _) -> poolPriorLines cd) changed
-          tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars viaTemp
-          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") viaTemp tmpVars
-          moves = [nvarNamer i <+> "=" <+> x <> ";" | (i, x) <- direct]
+          tmpAssigns = zipWithSame (\tv (_, x) -> "auto" <+> tv <+> "=" <+> x <> ";") tmpVars viaTemp
+          reassigns = zipWithSame (\(i, _) tv -> (nvarNamer cppLocals) i <+> "= std::move(" <> tv <> ");") viaTemp tmpVars
+          moves = [(nvarNamer cppLocals) i <+> "=" <+> x <> ";" | (i, x) <- direct]
       return $ priors <> tmpAssigns <> reassigns <> moves
-    go o (LoopNLet i neDocs b) = do
-      let (orhs, ob) = case o of
-            Just (LoopNLet j r k) | j == i -> (Just r, Just k)
-            _ -> (Nothing, Nothing)
-      mode <- maybe (return LetCopy) (cppLetMode i) orhs
+    go (LoopNLet i (Low r neDocs) b) = do
+      mode <- cppLetMode i r
+      cond <- cppIsCondLet i
       -- A function value keeps its own type; a std::function would allocate.
-      typestr <- case orhs of
-        Just r | not (isFunctionValue (typeFof r)) -> cppTypeOf (typeFof r)
-        _ -> return "auto"
+      typestr <- if isFunctionValue (typeFof r) then return "auto" else cppTypeOf (typeFof r)
       let decl = if mode == LetBorrow then "const" <+> typestr <> "&" else typestr
           letLine
-            | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> nvarNamer i <> "{};"]
-            | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> nvarNamer i <> "{};"]
-            | otherwise = [decl <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"]
-      rest <- go ob b
+            | LetLent _ <- mode = cppLentLet cond ((nvarNamer cppLocals) i) (poolExpr neDocs)
+            | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> (nvarNamer cppLocals) i <> "{};"]
+            | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> (nvarNamer cppLocals) i <> "{};"]
+            | otherwise = [decl <+> (nvarNamer cppLocals) i <+> "=" <+> poolExpr neDocs <> ";"]
+      rest <- go b
       return $ poolPriorLines neDocs <> letLine <> rest
-    go o (LoopSLet i seDocs b) = do
-      rest <- go (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
-      return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
-    go o (LoopIf guardDocs t e) = do
-      let (ot, oe) = case o of
-            Just (LoopIf _ a b) -> (Just a, Just b)
-            _ -> (Nothing, Nothing)
-      tLines <- go ot t
-      eLines <- go oe e
-      let ifBlock = vsep
-            [ "if" <+> parens (poolExpr guardDocs) <+> "{"
-            , indent 4 (vsep tLines)
-            , "} else {"
-            , indent 4 (vsep eLines)
-            , "}"
-            ]
-      return $ poolPriorLines guardDocs <> [ifBlock]
+    go (LoopSLet i (Low _ seDocs) b) = do
+      rest <- go b
+      return $ poolPriorLines seDocs <> ["auto" <+> (svarNamer cppLocals) i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
+    go (LoopIf (Low _ guardDocs) t e) = do
+      tLines <- go t
+      eLines <- go e
+      -- Every branch ends the iteration, so the else branch follows the
+      -- guarded one rather than nesting in it (EMIT-5).
+      let next = ["continue;" | not (loopBodyBreaks t)]
+          ifBlock = vsep ["if" <+> parens (poolExpr guardDocs) <+> "{", indent 4 (vsep (tLines <> next)), "}"]
+      return $ poolPriorLines guardDocs <> [ifBlock] <> eLines
 
 -- | What lowering a closure needs: per crossing closure manifold name, its
 -- reify thunk and its bound arguments' schemas; the stage table; and the
@@ -1049,12 +1565,28 @@ data ClosureGen = ClosureGen (Map.Map Text (MDoc, MDoc)) (Map.Map Int StageEntry
 
 -- | A constructor field a let takes ('consumableProjectionLets') out of its
 -- subject's arm (OWN-5, CPP-6).
-cppTakeField :: NativeExpr -> MDoc
-cppTakeField (IntrinsicN _ IntrCtorField _ [LetVarN t j _, StrN _ n, IntN _ i])
-  | VariantF _ _ arms <- t =
-      "mlc::take_field(std::get<" <> pretty (armIndex n (map fst arms)) <> ">("
-        <> nvarNamer j <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
-cppTakeField e = error $ "cppTakeField: not a constructor field of a let: " <> show e
+cppTakeField :: Bool -> NativeExpr -> MDoc
+cppTakeField release (IntrinsicN _ IntrCtorField _ [v, StrN _ n, IntN _ i])
+  | Just subj <- subject v
+  , VariantF _ _ arms <- typeFof v =
+      (if release then "mlc::take_field_release(std::get<" else "mlc::take_field(std::get<")
+        <> pretty (armIndex n (map fst arms)) <> ">("
+        <> subj <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
+  where
+    subject x = case x of
+      IntrinsicN _ IntrListElem _ [l, IntN _ k] -> (\d -> parens d <> "[" <> pretty k <> "]") <$> subject l
+      _ -> (nvarNamer cppLocals) <$> varIndex x
+cppTakeField _ e = error $ "cppTakeField: not a constructor field of a variable: " <> show e
+
+-- | The right-hand side of let @i@ that takes its value (OWN-5), given its
+-- rendering: a constructor field leaves its arm, releasing the arm when
+-- nothing names the value after it (CPP-6), and a getter moves the field.
+cppTakeLet :: Int -> NativeExpr -> MDoc -> CppTranslatorM MDoc
+cppTakeLet i rhs@(IntrinsicN _ IntrCtorField _ _) _ = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  return (cppTakeField (Set.member (root, i) (ppReleases pp)) rhs)
+cppTakeLet _ _ x = return ("std::move(" <> x <> ")")
 
 -- | Operands that are all scalars reach only a built-in operator (CPP-1).
 cppConstArg :: Maybe [TypeM] -> TypeM -> MDoc -> MDoc
@@ -1069,9 +1601,20 @@ cppConstArg operands _ x
 cppLowerConfig :: ClosureGen -> LowerConfig CppTranslatorM
 cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
   LowerConfig
-    { lcSrcName = \src -> pretty (srcName src)
+    { lcLocalPrefix = cppLocals
+    , lcSrcName = \src -> pretty (srcName src)
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
+    -- COPY-7
+    , lcFoldStep = \f x -> case f of
+        FoldSourced -> "[](auto&& a, const auto& b) { return " <> x <> "(std::forward<decltype(a)>(a), b); }"
+        FoldManifold m -> "[](auto&& a, const auto& b) { return " <> m <> "(std::forward<decltype(a)>(a), b); }"
+        FoldValue -> x
+    , lcFoldCombine = \f x -> case f of
+        FoldSourced -> "[](auto&& a, auto&& b) { return " <> x <> "(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b)); }"
+        FoldManifold m -> "[](auto&& a, auto&& b) { return " <> m <> "(std::forward<decltype(a)>(a), std::forward<decltype(b)>(b)); }"
+        FoldValue -> x
+    , lcForkChecked = \_ x -> "[&]() { mlc::fork_guard _mlc_fork; return " <> x <> "; }()"
     , lcSourcedResult = \_ _ _ x -> x
     , lcSourcedArg = \_ _ _ x -> x
     , lcConstArg = cppConstArg
@@ -1106,6 +1649,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
         in ty <> "{mlc::make_arm<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
     , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
+    , lcNoArmMatched = Nothing
     , lcVariantTagTest = \_ _ tag subj ->
         parens (parens subj <> ".v.index() ==" <+> pretty tag)
     , lcCtorField = \_ _ _ tag i subj ->
@@ -1113,7 +1657,10 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> ty <> "::" <> pretty n)
     , lcListLenTest = \subj n -> parens (parens subj <> ".size() ==" <+> pretty n)
-    , lcListElem = \_ subj i -> parens subj <> "[" <> pretty i <> "]"
+    -- OWN-5: an element of a list read for the last time is moved out
+    , lcListElem = \how subj i -> case how of
+        FieldTake -> "std::move(" <> parens subj <> "[" <> pretty i <> "])"
+        _ -> parens subj <> "[" <> pretty i <> "]"
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf
@@ -1123,19 +1670,32 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcPackerName = \src -> pretty (srcName src)
     , lcUnpackerName = \src -> pretty (srcName src)
     , lcBorrowPackArg = \_ -> False
-    , lcRecordAccessor = \_ _ -> recordAccess
+    , lcWireListIter = (,)
+    , lcRecordAccessor = \_ fv record field -> do
+        handles <- CMS.gets translatorHandles
+        return $ case fv of
+          FV g _ | Map.member g handles -> record <> "->" <> field
+          _ -> recordAccess record field
     , lcDeserialRecordAccessor = \i _ v -> tupleKey i v
     , lcTupleAccessor = tupleKey
     , lcNewIndex = getCounter
     , lcPrintExpr = CP.printExpr
     , lcPrintStmt = CP.printStmt
     , lcTakeGetter = \_ _ _ -> return Nothing
-    , lcEvalPattern = \t p xs -> do
+    , lcEvalPattern = \t argTypes app -> do
         state <- CMS.get
-        return $ evaluatePattern state t p xs
+        -- A getter's receiver is its last argument, after any bracket bounds.
+        let rt = case app of
+              PatGet {} | not (null argTypes) -> Just (last argTypes)
+              _ -> listToMaybe argTypes
+        return $ evaluatePattern state t rt app
     , lcTakeSetter = cppTakeSetter
-    , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
-    , lcTupleConstructor = \_ _ -> ((<>) "std::make_tuple" . tupled)
+    , lcListConstructor = \listT _ _ es -> do
+        ty <- cppTypeOf listT
+        return $ case es of
+          [] -> ty <> "{}"
+          _ -> "mlc::list_of<" <> ty <> ">" <> encloseSep "{" "}" ", " es <> ".value"
+    , lcTupleConstructor = (<>) "std::make_tuple" . tupled
     , lcRecordConstructor = \recType _ _ _ rs -> do
         t <- cppTypeOf recType
         let -- For a field at a recursive-cycle position the field's
@@ -1162,7 +1722,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
             -- enclosing record's name.
             isSelfRef self (VarF v) = v == self
             isSelfRef self (NamF _ v _ _) = v == self
-            isSelfRef self (RecF v) = v == self
+            isSelfRef self (RecF v _) = v == self
             isSelfRef _ _ = False
             needsWrap (OptionalF inner) = case selfName of
               Just s -> isSelfRef s inner
@@ -1173,8 +1733,28 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
                 Just ft | needsWrap ft ->
                   "mlc::wrap_field<decltype(" <> t <> "::" <> pretty k <> ")>(" <> v <> ")"
                 _ -> v
-        return $ defaultValue {poolExpr = t <> encloseSep "{" "}" "," (map wrapField rs)}
+        handles <- CMS.gets translatorHandles
+        return $ defaultValue
+          { poolExpr = case selfName of
+              Just (FV g _) | Map.member g handles -> cppHandleOf t (map snd rs)
+              _ -> t <> encloseSep "{" "}" "," (map wrapField rs)
+          }
     , lcKeepCallArg = cppKeepCallArg
+    , lcTwinCall = \_ _ -> return Nothing
+    -- OWN-8: both forms of a manifold that may lend its result return it
+    -- lent or owned; a call that is not a let reading it in place owns it.
+    , lcLentCall = \m _ x -> do
+        pp <- CMS.gets translatorPool
+        return (if Map.member m (ppLent pp) then "mlc::own(" <> x <> ")" else x)
+    , lcBuildOwnership = \_ _ own -> return own
+    , lcKeepClosureArg = cppKeptLet
+    , lcKeepSourcedArg = cppKeptLet
+    -- CPP-1: a parameter that takes no rvalue (a `T&` template deducing a
+    -- const reference) is given the value as before. Each local is a
+    -- parameter of the lambda, so the test depends on it and fails softly.
+    , lcMoveWhereAccepted = \vs moved asIs ->
+        "[&](" <> hsep (punctuate "," ["auto&" <+> v | v <- vs]) <> ") { if constexpr (requires { " <> moved
+          <> "; }) return " <> moved <> "; else return " <> asIs <> "; }" <> tupled vs
     , lcKeepContextArg = cppKeepContextArg
     , lcKeepSlot = cppKeepSlot
     , lcKeepElem = cppKeepElem
@@ -1187,8 +1767,10 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
           resT <- cppTypeOf out
           -- each application typed explicitly: the head may be a bind
           -- expression, which deduction cannot see through
-          let step ts acc x = "mlc_apply1<" <> hsep (punctuate "," (resT : ts ++ restTs)) <> ">" <> tupled [acc, x]
-          return (papplySteps step argTs f xs)
+          let argPs = zipWithSame (cppFnParam . typeMToF) argTypes argTs
+              restPs = zipWithSame cppFnParam rins restTs
+              step ts acc x = "mlc_apply1<" <> hsep (punctuate "," (resT : ts ++ restPs)) <> ">" <> tupled [acc, x]
+          return (papplySteps step argPs f xs)
         _ -> return f
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
@@ -1221,10 +1803,22 @@ PROPAGATE_ERROR(errmsg)|]
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
         binding <- maybe (return LetCopy) (cppLetMode letIndex) mrhs
-        let e1' = case (binding, mrhs) of
-              (LetTake, Just rhs) -> e1 {poolExpr = cppTakeField rhs}
-              _ -> e1
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1' e2
+        taken <- case (binding, mrhs) of
+          (LetTake, Just rhs) -> Just <$> cppTakeLet letIndex rhs (poolExpr e1)
+          _ -> return Nothing
+        let e1' = maybe e1 (\x -> e1 {poolExpr = x}) taken
+        cond <- cppIsCondLet letIndex
+        case binding of
+          LetLent _ ->
+            return $
+              e2
+                { poolCompleteManifolds = poolCompleteManifolds e1 <> poolCompleteManifolds e2
+                , poolPriorLines = poolPriorLines e1 <> cppLentLet cond (namer letIndex) (poolExpr e1) <> poolPriorLines e2
+                , poolPriorExprs = poolPriorExprs e1 <> poolPriorExprs e2
+                , poolReturnFlag = poolReturnFlag e1 || poolReturnFlag e2
+                , poolChain = Nothing
+                }
+          _ -> return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1' e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
@@ -1237,7 +1831,7 @@ PROPAGATE_ERROR(errmsg)|]
         case frameLineLit state callIndex of
           Nothing -> return Nothing
           Just _ -> do
-            rt <- returnType manifoldType
+            rt <- returnType manifoldType >>= cppResultType callIndex
             let pop = "mlc::frame_pop();"
             return . Just $ case () of
               _ | render rt == "void" -> vsep [e <> ";", pop, "return;"]
@@ -1250,13 +1844,33 @@ PROPAGATE_ERROR(errmsg)|]
     -- let outside a loop.
     , lcLoopLetRhs = \i orhs d -> do
         mode <- cppLetMode i orhs
-        return $
-          if mode == LetTake
-            then d {poolExpr = cppTakeField orhs}
-            else d
-    , lcLetRhs = \_ _ d -> return d
+        lentPart <- cppLentPart i
+        case () of
+          _ | mode == LetTake -> (\x -> d {poolExpr = x}) <$> cppTakeLet i orhs (poolExpr d)
+            -- OWN-8: a part a base leaf returns lent must be a place in the
+            -- loop's parameter, so a temporary does not build
+            | lentPart -> return d {poolExpr = "mlc::place(" <> poolExpr d <> ")"}
+            | otherwise -> return d
+    -- OWN-10: a part a conditional may lend must be a place, so a temporary
+    -- does not build
+    , lcLetRhs = \i rhs d -> do
+        part <- cppCondPart i
+        mode <- if part then cppLetMode i rhs else return LetCopy
+        owning <- case rhs of
+          ManN (NativeManifold m _ form _) | isClosureForm form -> Map.lookup m <$> CMS.gets translatorOwningSigs
+          _ -> return Nothing
+        return $ case owning of
+          -- CPP-7: a let holds a function value as a std::function, whose
+          -- target mlc::give finds to reach the by-value form (OWN-7).
+          Just sig -> d {poolExpr = "mlc::owning<" <> sig <> ">(" <> poolExpr d <> ")"}
+          Nothing
+            | mode == LetBorrow -> d {poolExpr = "mlc::place(" <> poolExpr d <> ")"}
+            | otherwise -> d
+    , lcLentIf = cppLentIf
+    , lcLentArm = cppLentArm
+    , lcLentReturn = cppLentReturn
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
-    , lcMakeLoop = \res carried origBody body -> do
+    , lcMakeLoop = \res carried body -> do
         -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
         -- loop-carried vars are native locals ('nvarNamer id'), non-const,
         -- reassigned in place: the manifold's deserialized parameters in a
@@ -1268,20 +1882,28 @@ PROPAGATE_ERROR(errmsg)|]
         -- defined; a native one is an optional, since the value's type need
         -- not be default-constructible.
         resultIdx <- getCounter
-        let resultVar = helperNamer resultIdx
+        borrowedSlots <- CMS.gets translatorBorrowedSlots
+        let resultVar = (helperNamer cppLocals) resultIdx
             ids = map fst carried
-            initLines = concat [poolPriorLines d <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
+            -- A slot no step changes that starts from a name refers to it:
+            -- nothing in the loop moves what it names (OWN-3).
+            slotDecl i
+              | Set.member i borrowedSlots = "const auto&"
+              | otherwise = "auto"
+            initLines = concat [poolPriorLines d <> [slotDecl i <+> (nvarNamer cppLocals) i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
         (resultDecl, setResult, resultExpr) <- case res of
           LoopResultSerial ->
             return ("uint8_t*" <+> resultVar <+> "= nullptr;", \e -> resultVar <+> "=" <+> e <> ";", resultVar)
           LoopResultNative t -> do
-            tStr <- cppTypeOf t
+            tStr0 <- cppTypeOf t
+            pp <- CMS.gets translatorPool
+            let tStr = if any (\lr -> Set.null (lrIfs lr) && lrSlots lr == ids) (Map.elems (ppLent pp)) then "mlc::lent_or<" <> tStr0 <> ">" else tStr0
             return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
                    , \e -> resultVar <> ".emplace(" <> e <> ");"
                    , "std::move(*" <> resultVar <> ")" )
-        bodyLines <- cppWalkLoopBody setResult ids origBody body
+        bodyLines <- cppWalkLoopBody setResult body
         let whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
-            leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
+            leaves = loopBodyDocs body <> [d | (_, Just d) <- carried]
         return $ PoolDocs
           { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
           , poolExpr = resultExpr
@@ -1289,40 +1911,49 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
           , poolBorrowedLocal = Nothing
+          , poolChain = Nothing
           }
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
+    , lcChainLadder = \isAnd flag first rungs ->
+        let undecided = if isAnd then flag else "!" <> flag
+            rung (stmts, e) =
+              vsep ["if" <+> parens undecided <+> "{", indent 4 (vsep (stmts <> [flag <+> "=" <+> e <> ";"])), "}"]
+         in vsep (("bool" <+> flag <+> "=" <+> first <> ";") : map rung rungs)
+    -- A chain of guards as one flat block (EMIT-5): a block run once, left
+    -- by the first arm whose test holds. An arm is an expression; a loop's
+    -- own exits are written only by the loop walkers, over a 'LoopBody'.
+    , lcMakeIfLadder = \origExpr (Guards (c1, e1, t1) rungs (eE, eD)) -> do
+        idx <- getCounter
+        lent <- cppLentIf origExpr
+        let v = (helperNamer cppLocals) idx
+        typeStr <- cppTypeOf origExpr
+        let unit = cppUnitResult origExpr
+            arm = if lent then cppLentIfArm v else cppIfArm unit v
+            taken c armE d = vsep ["if" <+> parens c <+> "{", indent 4 (vsep (arm (Just armE) d <> ["break;"])), "}"]
+            body =
+              [taken c1 e1 t1]
+                <> concat [pre <> [taken c armE d] | (pre, c, armE, d) <- toList rungs]
+                <> arm (Just eE) eD
+            (decl, result)
+              | lent = ("std::optional<mlc::lent_or<" <> typeStr <> ">>" <+> v <> ";", "mlc::own(std::move(*" <> v <> "))")
+              | otherwise = (typeStr <+> v <> ";", cppMoved unit True v)
+        return (result, vsep [decl, "do {", indent 4 (vsep body), "} while (false);"])
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
-        let v = helperNamer idx
+        lent <- cppLentIf origExpr
+        let v = (helperNamer cppLocals) idx
         typeStr <- cppTypeOf origExpr
         let condE = poolExpr condDocs
-            thenE = poolExpr thenDocs
-            elseE = poolExpr elseDocs
-            -- A @throw arm never returns, so emit it as a bare statement rather
-            -- than an assignment. Assigning the universal-conversion
-            -- `_mlc_throw` helper into a container-typed result var is an
-            -- ambiguous C++ `operator=` (a scalar result resolves; a
-            -- std::vector, whose initializer_list overload also matches, does
-            -- not). The dead assignment is unnecessary anyway.
-            (thenThrow, elseThrow) = case origExpr of
-              IfN _ _ tn en -> (isNativeThrow tn, isNativeThrow en)
-              _ -> (False, False)
-            (thenOwned, elseOwned) = case origExpr of
-              IfN _ _ tn en -> (armOwnsResult tn, armOwnsResult en)
-              _ -> (False, False)
-            -- Every if is bound by a let ('atomize'), the only reader of this
-            -- result variable, so the result and an arm's own last let are
-            -- both dead once read, and are moved rather than copied. A Unit
-            -- result is emitted as a bare statement, where a discarded
-            -- std::move is a warning, so it is not moved.
-            isUnitResult = case typeFof origExpr of
-              VarF (FV tv _) -> tv == BT.unit
-              _ -> False
-            moved owned e = if owned && not isUnitResult then "std::move(" <> e <> ")" else e
-            armStmt isThrow owned e = if isThrow then e <> ";" else v <+> "=" <+> moved owned e <> ";"
-            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenOwned thenE]
-            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseOwned elseE]
-            decl = typeStr <+> v <> ";"
+            (thenE, elseE) = case origExpr of
+              IfN _ _ tn en -> (Just tn, Just en)
+              _ -> (Nothing, Nothing)
+            unit = cppUnitResult origExpr
+            arm = if lent then cppLentIfArm v else cppIfArm unit v
+            thenBlock = arm thenE thenDocs
+            elseBlock = arm elseE elseDocs
+            (decl, result)
+              | lent = ("std::optional<mlc::lent_or<" <> typeStr <> ">>" <+> v <> ";", "mlc::own(std::move(*" <> v <> "))")
+              | otherwise = (typeStr <+> v <> ";", cppMoved unit True v)
             ifStmt = vsep
               [ decl
               , "if" <+> parens condE <+> "{"
@@ -1333,12 +1964,19 @@ PROPAGATE_ERROR(errmsg)|]
               ]
         return $ PoolDocs
           { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
-          , poolExpr = moved True v
+          , poolExpr = result
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
           , poolBorrowedLocal = Nothing
+          , poolChain = Nothing
           }
+    , lcMakeCallback = \param mt stmts expr ->
+        return
+          ( []
+          , "[&](const" <+> maybe "auto" renderIType mt <> "&" <+> param <> ")" <+> "{"
+              <> nest 4 (line <> vsep (stmts ++ ["return" <+> expr <> ";"])) <> line <> "}"
+          )
     , lcMakeDoBlock = \t stmts expr ->
         let isUnit = case t of
               VarF (FV tv _) -> tv == TV "Unit"
@@ -1405,21 +2043,48 @@ PROPAGATE_ERROR(errmsg)|]
     , lcDivertNestedClosure = cppDivertsClosure
     , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm isClosure -> do
         state <- CMS.get
-        let alreadyDone = case headForm of
+        let twin = translatorTwin state == Just callIndex
+            alreadyDone = case headForm of
+              _ | twin -> Set.member callIndex (translatorTwinDone state)
               (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
               _ -> Set.member callIndex (translatorLocalManifoldSet state)
         if alreadyDone
           then return Nothing
           else do
             case headForm of
+              _ | twin ->
+                CMS.modify
+                  (\s -> s {translatorTwinDone = Set.insert callIndex (translatorTwinDone s)})
               (Just HeadManifoldFormRemoteWorker) ->
                 CMS.modify
                   (\s -> s {translatorRemoteManifoldSet = Set.insert callIndex (translatorRemoteManifoldSet s)})
               _ ->
                 CMS.modify
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
-            returnTypeStr <- returnType manifoldType
-            typedArgs <- zipWithM (cppParamOf callIndex) [0 ..] args
+            returnTypeStr <- returnType manifoldType >>= cppResultType callIndex
+            typedArgs0 <- mapIndexedM (cppParamOf callIndex) args
+            -- The by-value form owns what it is given: each such parameter
+            -- moves into a local the body names, released when the call
+            -- returns whether or not it is kept (OWN-7).
+            owned <-
+              if twin
+                then fmap concat . sequence $
+                  [ do
+                      taken <- cppTwinPosition callIndex j t
+                      pp <- CMS.gets translatorPool
+                      let always = Set.member j (Map.findWithDefault Set.empty callIndex (ppKeptAlways pp))
+                      if taken && not always
+                        then do
+                          ty <- cppTypeOf t
+                          let v = (nvarNamer cppLocals) i
+                          return [(j, ty <> "&&" <+> v <> "_given", ty <+> v <+> "= std::move(" <> v <> "_given);")]
+                        else return []
+                  | (j, Arg i t) <- indexed args
+                  ]
+                else return []
+            let typedArgs = [maybe a (\(_, d, _) -> d) (lookup j [(k, x) | x@(k, _, _) <- owned]) | (j, a) <- indexed typedArgs0]
+                takeLines = [l | (_, _, l) <- owned]
+                priorLines' = takeLines <> priorLines
             let debugMode = translatorDebugMode state
                 -- Outside --debug a frame is a call of a named function,
                 -- labeled with its definition (DIAG-5); any other manifold
@@ -1428,42 +2093,12 @@ PROPAGATE_ERROR(errmsg)|]
                 (userName, srclocStr)
                   | debugMode = translatorDebugInfo state callIndex
                   | otherwise = maybe ("", "") id traceLabel
-                -- Raw text with a literal newline; escapeCxxStringLit converts
-                -- '\n' -> "\\n" so the emitted C++ string literal contains the
-                -- escape, not an actual newline byte.
                 frameName = cppFrameName callIndex userName srclocStr
-                frameLine = "\n  at " <> frameName
-                frameLit :: MDoc
-                frameLit = dquotes (pretty (escapeCxxStringLit frameLine))
                 -- Marks this manifold as the one executing on the thread,
                 -- so a fatal signal is reported against it.
                 frameScope = "mlc::frame_scope _mlc_frame(" <> dquotes (pretty (escapeCxxStringLit frameName)) <> ");"
                 fullName = mname <> mnameExt headForm
                 decl = returnTypeStr <+> fullName <> tupled typedArgs
-                tryBody = block 4 "try" (vsep $ frameScope : priorLines <> [body])
-                -- In --debug the drain owns the traceback; appending a
-                -- frame line here would duplicate every frame. The
-                -- normalize-to-std::runtime_error step remains so that
-                -- non-std::exception throws (const char*, std::string)
-                -- surface their message through the outer dispatch's
-                -- 'catch (const std::exception&)'.
-                appendFrame lit e =
-                  if debugMode
-                    then "throw std::runtime_error(" <> e <> ");"
-                    else "throw std::runtime_error(" <> e <> " + " <> lit <> ");"
-                -- A closed pipe keeps its class through every frame, so no
-                -- outer @try takes it.
-                catchBody = vsep
-                  [ block 4 "catch (const MorlocPipeClosed&)" "throw;"
-                  , block 4 "catch (const std::exception& e)"
-                      (appendFrame frameLit "std::string(e.what())")
-                  , block 4 "catch (const char* e)"
-                      (appendFrame frameLit "std::string(e)")
-                  , block 4 "catch (const std::string& e)"
-                      (appendFrame frameLit "e")
-                  , block 4 "catch (...)"
-                      (appendFrame frameLit "std::string(\"An unknown error occurred\")")
-                  ]
                 -- STATE-5: a named function records its call; the pop is in
                 -- its return statement ('lcFrameReturn'). STATE-6: a closure,
                 -- which code outside morloc may call and whose failure it may
@@ -1472,14 +2107,15 @@ PROPAGATE_ERROR(errmsg)|]
                   Just lit -> ["mlc::frame_push(" <> lit <> ");"]
                   Nothing -> []
                 innerBlock
-                  | debugMode = tryBody <+> catchBody
+                  -- STATE-6: a failure passes on as it was thrown.
+                  | debugMode = vsep (frameScope : priorLines' <> [body])
                   | isClosure =
                       vsep
                         [ "size_t _mlc_saved = mlc::frame_enter();"
-                        , block 4 "try" (vsep (framePush <> priorLines <> [body]))
+                        , block 4 "try" (vsep (framePush <> priorLines' <> [body]))
                             <+> block 4 "catch (...)" "_mlc_closure_rethrow(_mlc_saved);"
                         ]
-                  | otherwise = vsep (framePush <> priorLines <> [body])
+                  | otherwise = vsep (framePush <> priorLines' <> [body])
             -- Wrap labeled manifolds with a chrono start/pass/fail shim,
             -- using user-supplied templates (from YAML 'log-template').
             -- Each event has its own pre-rendered template; a 'Nothing'
@@ -1534,7 +2170,7 @@ PROPAGATE_ERROR(errmsg)|]
         Function ins out -> do
           argTypes <- mapM cppTypeOf ins
           resType <- cppTypeOf out
-          return $ resType <> tupled argTypes
+          return $ resType <> tupled (zipWithSame cppFnParamM ins argTypes)
         _ -> return ""
     -- An unapplied manifold is its function, unless it is staged or can
     -- cross, which takes the closure form
@@ -1542,7 +2178,10 @@ PROPAGATE_ERROR(errmsg)|]
     , lcMakePass = \_ sig _ mname args ->
         if isJust (stageOf mname) || Map.member (render mname) reifyThunks
           then makeLambda sig mname [] args
-          else return mname
+          else do
+            twin <- hasTwin mname args
+            when twin (noteOwning mname sig)
+            return (if twin then dispatcher mname else mname)
     , lcMakeLambda = \_ sig _ -> makeLambda sig
     , lcRegisterSchema = cppRegisterSchema
     , lcTableImportFn = Nothing
@@ -1550,24 +2189,49 @@ PROPAGATE_ERROR(errmsg)|]
   where
     stageOf mname = manifoldIdOf mname >>= (`Map.lookup` stageTable)
 
+    -- Whether the manifold named has a by-value form (OWN-7): its two
+    -- forms are an overload set, which std::bind cannot name.
+    hasTwin :: MDoc -> [Arg TypeM] -> CppTranslatorM Bool
+    hasTwin mname args = case manifoldIdOf mname of
+      Just m -> do
+        pp <- CMS.gets translatorPool
+        if Map.member m (ppTwoForm pp)
+          then or <$> mapM (\(j, Arg _ t) -> cppTwinPosition m j t) (indexed args)
+          else return False
+      Nothing -> return False
+
+    noteOwning :: MDoc -> MDoc -> CppTranslatorM ()
+    noteOwning mname sig = case manifoldIdOf mname of
+      Just m -> CMS.modify (\st -> st {translatorOwningSigs = Map.insert m sig (translatorOwningSigs st)})
+      Nothing -> return ()
+
+    dispatcher :: MDoc -> MDoc
+    dispatcher mname =
+      "[](auto&&... mlcA) -> decltype(" <> mname <> "(std::forward<decltype(mlcA)>(mlcA)...)) { return "
+        <> mname <> "(std::forward<decltype(mlcA)>(mlcA)...); }"
+
     makeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> CppTranslatorM MDoc
-    makeLambda sig mname contextArgs boundArgs =
-      let ctxNames = map argNamer contextArgs
-          vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-          bindArgs = cat (punctuate "," (mname : (ctxNames ++ vs')))
-          -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
-          -- name minus its leading "m".
-          midDoc = pretty (MT.drop 1 (render mname))
-          stage = stageOf mname
-       in case (Map.lookup (render mname) reifyThunks, stage) of
+    makeLambda sig mname contextArgs boundArgs = do
+     twin <- hasTwin mname (contextArgs ++ boundArgs)
+     let callee = if twin then dispatcher mname else mname
+         ctxNames = map (argNamer cppLocals) contextArgs
+         vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
+         bindArgs = cat (punctuate "," (callee : (ctxNames ++ vs')))
+         -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
+         -- name minus its leading "m".
+         midDoc = pretty (MT.drop 1 (render mname))
+         stage = stageOf mname
+     case (Map.lookup (render mname) reifyThunks, stage) of
             -- A staged closure: applied to the arguments before its stage
             -- point, it runs its stage entry (bound to the same captured
             -- values) once and becomes the closure the stage returns.
             (thunk, Just (StageEntry nctx k smid))
-              | nctx == length contextArgs ->
-                  let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<Schema*>{}") thunk
-                      stageArgs = cat (punctuate "," (manNamer smid : (ctxNames ++ take k vs')))
-                   in return [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
+              | nctx == length contextArgs -> do
+                  stageTwin <- hasTwin (manNamer smid) (contextArgs ++ take k boundArgs)
+                  let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<mlc_arg_encoder>{}") thunk
+                      stageCallee = if stageTwin then dispatcher (manNamer smid) else manNamer smid
+                      stageArgs = cat (punctuate "," (stageCallee : (ctxNames ++ take k vs')))
+                  return [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
               | otherwise ->
                   error $ "C++: staged closure " <> show (render midDoc) <> " captures " <> show (length contextArgs)
                     <> " values but its stage entry takes " <> show nctx
@@ -1585,13 +2249,16 @@ PROPAGATE_ERROR(errmsg)|]
             -- other forms name their captures twice.
             (Nothing, Nothing) -> do
               ctxDocs <- mapM capture contextArgs
-              return [idoc|std::bind(#{cat (punctuate "," (mname : (ctxDocs ++ vs')))})|]
+              -- A crossing, pap or staged closure is not wrapped: reify
+              -- finds it by its own target type.
+              when twin (noteOwning mname sig)
+              return [idoc|std::bind(#{cat (punctuate "," (callee : (ctxDocs ++ vs')))})|]
       where
         capture a@(Arg i (Native tf))
           | Just m <- readMay (T.unpack (MT.drop 1 (render mname))), not (isFunctionValue tf) = do
               moves <- cppMovesInto m i tf
-              return (if moves then "std::move(" <> argNamer a <> ")" else argNamer a)
-        capture a = return (argNamer a)
+              return (if moves then "std::move(" <> (argNamer cppLocals) a <> ")" else (argNamer cppLocals) a)
+        capture a = return ((argNamer cppLocals) a)
 
     -- The wire-side type of a value being taken apart for sending or rebuilt
     -- after receiving: a record that is taken apart or rebuilt (it holds a
@@ -1606,28 +2273,28 @@ PROPAGATE_ERROR(errmsg)|]
     rawTypeOf s = Just . toIType <$> rawDoc s
 
     rawDoc :: SerialAST -> CppTranslator MDoc
-    rawDoc s | cppIsLeaf s = cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    rawDoc s | cppIsLeaf s = cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf s))
     rawDoc (SerialObject _ _ _ rs) = do
       ds <- mapM (rawDoc . snd) rs
       return $ "std::tuple" <> encloseSep "<" ">" "," ds
     rawDoc (SerialPack _ (_, s)) = rawDoc s
     rawDoc (SerialList v d e) = do
       inner <- rawDoc e
-      cppTypeOf (AppF (VarF v) (maybe [] pure d ++ [rendered inner]))
+      cppTypeOf (AppF (VarF v) (maybe [] (pure . KiA) d ++ [TyA (rendered inner)]))
     rawDoc (SerialTuple v es) = do
       inners <- mapM rawDoc es
-      cppTypeOf (AppF (VarF v) (map rendered inners))
+      cppTypeOf (AppF (VarF v) (map (TyA . rendered) inners))
     rawDoc (SerialOptional _ e) = do
       inner <- rawDoc e
       cppTypeOf (OptionalF (rendered inner))
-    rawDoc s = cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    rawDoc s = cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf s))
 
     -- Decoded straight into its type, as wireToNative leaves it.
     cppIsLeaf :: SerialAST -> Bool
     cppIsLeaf s = isSerializable s && not (cppDivertsClosure s)
 
     cppDivertsClosure :: SerialAST -> Bool
-    cppDivertsClosure = not . null . serialClosuresOutsideVariants
+    cppDivertsClosure = not . null . serialClosuresOutsideNodes
 
     rendered :: MDoc -> TypeF
     rendered d = VarF (FV (TV "raw") (CV (render d)))
@@ -1662,8 +2329,9 @@ PROPAGATE_ERROR(errmsg)|]
             -- alias's referent, not hold a reference to it -- today std::bind
             -- decay-copies bound args, '[=]' captures copy the referent, and
             -- a '[&]' capture is only ever an immediately invoked lambda: the
-            -- loop IIFE, and an inline @try thunk ('tryThunkByReference'),
-            -- which '_mlc_try' calls before returning. A by-reference
+            -- loop IIFE, the fork check around a call of user code
+            -- ('lcForkChecked'), and an inline @try thunk
+            -- ('tryThunkByReference'), which '_mlc_try' calls before returning. A by-reference
             -- capture that escaped would dangle. A binding that takes its
             -- referent is a separate decision and a far narrower one
             -- ('consumableProjectionLets'): nothing else may use the referent
@@ -1688,6 +2356,7 @@ PROPAGATE_ERROR(errmsg)|]
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
             , poolBorrowedLocal = borrowedLocal
+            , poolChain = Nothing
             }
 
     -- Match only bare 'Unit' -- a suspension of Unit is
@@ -1744,6 +2413,7 @@ serialize v0 s = do
       , poolPriorExprs = []
       , poolReturnFlag = False
       , poolBorrowedLocal = Nothing
+      , poolChain = Nothing
       }
 
 -- | Whether a rendered expression is a call (rather than a variable, a
@@ -1791,7 +2461,7 @@ cppCacheBody resSa lbl midx args bodyPool = do
       resSchema = render (serialAstToMsgpackSchema resSa)
   -- Per-arg setup: serialize native bindings to packets, route serial
   -- bindings through by name; both feed the packets array.
-  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (indexed args)
   let argRefs = [r | (r, _, _) <- preparedArgs]
       argSchemas = [s | (_, s, _) <- preparedArgs]
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
@@ -1865,6 +2535,7 @@ cppCacheBody resSa lbl midx args bodyPool = do
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | C++ debug-trace wrap. Wraps the manifold body in @try {...}
@@ -1896,7 +2567,7 @@ cppDebugWrap midx args bodyPool = do
       packetsVar = hp <> "dpk_" <> suffix
       schemasVar = hp <> "dsc_" <> suffix
       n = length args
-  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (zip [0 :: Int ..] args)
+  preparedArgs <- mapM (prepareCppCacheArg wrapIdx) (indexed args)
   let argRefs = [r | (r, _, _) <- preparedArgs]
       argSchemas = [s | (_, s, _) <- preparedArgs]
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
@@ -1950,6 +2621,7 @@ cppDebugWrap midx args bodyPool = do
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
     , poolBorrowedLocal = Nothing
+    , poolChain = Nothing
     }
 
 -- | Serialize a single C++ cache arg. Native bindings are routed
@@ -1964,15 +2636,14 @@ prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
   let schemaStr = render (serialAstToMsgpackSchema sa)
   case tm of
     Native _ -> do
-      sid <- cppRegisterSchema schemaStr
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
+      enc <- cppEncode ((argNamer cppLocals) a) sa
       let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "mlc::Packet" <+> argVar <> "_own(_put_value("
-            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]));"
+          decl = "mlc::Packet" <+> argVar <> "_own(" <> enc <> ");"
             <+> "const uint8_t*" <+> argVar <+> "=" <+> argVar <> "_own.get();"
       return (argVar, schemaStr, [decl])
-    _ -> return (argNamer a, schemaStr, [])
+    _ -> return ((argNamer cppLocals) a, schemaStr, [])
 
 -- | Escape a string for a C++ string literal. Conservative: only
 -- handles characters the morloc msgpack-schema serializer emits
@@ -1989,13 +2660,17 @@ cppEscapeString = T.concatMap esc
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
 deserialize varname0 typestr0 s0 = do
   (expr, stmts) <- expandDeserialize (cppLowerConfig (ClosureGen Map.empty Map.empty Set.empty)) varname0 s0
-  let rendered = CP.printExpr expr
+  -- The statements' result and the local holding it are temporaries that
+  -- only this expression names, so each is moved on.
+  let rendered = case expr of
+        IVar v -> "std::move" <> parens (pretty v)
+        _ -> CP.printExpr expr
   if null stmts
     then return (rendered, [])
     else do
-      schemaVar <- helperNamer <$> getCounter
+      schemaVar <- (helperNamer cppLocals) <$> getCounter
       let final = [idoc|#{typestr0} #{schemaVar} = #{rendered};|]
-      return (schemaVar, map CP.printStmt stmts ++ [final])
+      return ("std::move" <> parens schemaVar, map CP.printStmt stmts ++ [final])
 
 -- The C++ concrete type of a defunctionalized closure's wire tuple:
 -- @(home_language, manifold_id, captured_packets)@, as in 'Serial.closureWireSchema'.
@@ -2015,9 +2690,9 @@ cppClosureWireLeaf = VarF (FV (TV "Closure") (CV cppClosureWireTupleName))
 -- packets, and RPCs back to the home pool via foreign_call on the manifold id.
 cppClosureProxyLambda :: MDoc -> [SerialAST] -> SerialAST -> CppTranslator MDoc
 cppClosureProxyLambda cloInit ins out = do
-  argTypes <- mapM (cppTypeOf . serialAstToType) ins
-  resType <- cppTypeOf (serialAstToType out)
-  sig <- closureCppSig (map serialAstToType ins) (serialAstToType out)
+  argTypes <- mapM (cppTypeOf . serialAstToNativeType) ins
+  resType <- cppTypeOf (serialAstToNativeType out)
+  sig <- closureCppSig (map serialAstToNativeType ins) (serialAstToNativeType out)
   -- The argument packets and the result packet belong to this application
   -- alone, so each is held by an mlc::Packet and released once the result
   -- has been read, or when a throw unwinds past it. The captured packets
@@ -2026,9 +2701,9 @@ cppClosureProxyLambda cloInit ins out = do
     (\(i, ast) -> do
         enc <- cppEncode ("__a" <> pretty i) ast
         return ("__owned.emplace_back(" <> enc <> "); __pkts.push_back(__owned.back().get());"))
-    (zip [(0 :: Int) ..] ins)
+    (indexed ins)
   resDoc <- cppDecode "__res.get()" resType out
-  let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- zip [(0 :: Int) ..] argTypes]
+  let paramDocs = [cppFnParam (serialAstToNativeType ast) t <+> ("__a" <> pretty i) | (i, (ast, t)) <- indexed (zipSame ins argTypes)]
       bodyDocs =
         [ "std::vector<const uint8_t*> __pkts;"
         , "std::vector<mlc::Packet> __owned;"
@@ -2054,16 +2729,16 @@ cppClosureProxyLambda cloInit ins out = do
   apply1 <- case ins of
     [] -> return []
     (a0 : rest) -> do
-      a0Type <- cppTypeOf (serialAstToType a0)
-      a0Sid <- cppRegisterSchema (render (serialAstToMsgpackSchema a0))
-      restSig <- closureCppSig (map serialAstToType rest) (serialAstToType out)
+      a0Type <- cppTypeOf (serialAstToNativeType a0)
+      a0Bytes <- cppToBytes "__x" a0
+      restSig <- closureCppSig (map serialAstToNativeType rest) (serialAstToNativeType out)
       restSid <- cppRegisterSchema (render (serialAstToMsgpackSchema (SerialClosure rest out)))
       restProxy <- cppClosureProxyLambda "__o" rest out
       return
         [ "__c.apply1 = [__origin](const" <+> a0Type <> "& __x) -> std::function<" <> pretty restSig <> "> {"
         , indent 4 (vsep
             [ "auto __o = __origin;"
-            , "std::get<2>(__o).push_back(_mlc_reify_arg(__x, mlc_schema_table[" <> pretty a0Sid <> "]));"
+            , "std::get<2>(__o).push_back(" <> a0Bytes <> ");"
             , "size_t __n, __k; int64_t __s;"
             , "if (mlc_stage_lookup(std::get<1>(__o), &__n, &__k, &__s) && std::get<2>(__o).size() == __n + __k) {"
             , indent 4 (vsep
@@ -2116,6 +2791,64 @@ stageLookupDoc tbl =
     , "}"
     ]
 
+-- | The lets projecting a part of a variable that the manifold the let is
+-- in owns: a let or loop slot of that manifold (but a slot in @lentSlots@),
+-- or a parameter it takes by value (@byValue m form@). A nested manifold
+-- names its caller's variables by the same indices, so ownership is a
+-- question about one manifold, never about an index (OWN-5, OWN-7).
+scopedTakes :: (Int -> ManifoldForm (Or TypeS TypeF) TypeF -> Set.Set Int) -> Set.Set Int -> RNode -> Set.Set Int
+scopedTakes byValue lentSlots = go Set.empty
+  where
+    go own n = case n of
+      RNM (NativeManifold m _ form _) ->
+        Set.unions (map (go (byValue m form)) (rnodeChildren n))
+      RSM _ -> Set.unions (map (go Set.empty) (rnodeChildren n))
+      RN (LoopN _ starts _) ->
+        let own' = own <> (Set.fromList (map fst starts) `Set.difference` lentSlots)
+         in Set.unions (map (go own') (rnodeChildren n))
+      RS (LoopS _ ids _) ->
+        Set.unions (map (go (own <> Set.fromList ids)) (rnodeChildren n))
+      _ -> case rnodeLet n of
+        Just (k, rhs, body) ->
+          let here = [k | Just j <- [subjectOf rhs], Set.member j own]
+           in Set.fromList here <> go own rhs <> go (Set.insert k own) body
+        Nothing -> Set.unions (map (go own) (rnodeChildren n))
+    subjectOf (RN e) = case e of
+      PatN _ (PatGet _ [] (NativeArgExpr v)) -> varIndex v
+      IntrinsicN _ IntrListElem _ (v : _) -> varIndex v
+      IntrinsicN _ IntrCtorField _ (IntrinsicN _ IntrListElem _ (v : _) : _) -> varIndex v
+      IntrinsicN _ IntrCtorField _ (v : _) -> varIndex v
+      _ -> Nothing
+    subjectOf _ = Nothing
+
+-- | The slots of the loops under a node that refer to what they start
+-- from: no continue changes them, and they start from a parameter of the
+-- enclosing manifold that it takes by reference (not in @byValue@), so the
+-- loop has only a reference to it. Nothing in a loop moves what it names
+-- (OWN-3).
+borrowedSlots :: Set.Set Int -> RNode -> Set.Set Int
+borrowedSlots byValue = go Set.empty
+  where
+    go lent n = case n of
+      RNM (NativeManifold _ _ form _) ->
+        let ps = Set.fromList [i | Arg i _ <- typeMofForm form] `Set.difference` byValue
+         in Set.unions (map (go ps) (rnodeChildren n))
+      RN (LoopN _ starts body) ->
+        Set.fromList [i | (i, start) <- starts, startsFrom lent start, all (unchanged i) (continuesOf body)]
+          <> Set.unions (map (go lent) (rnodeChildren n))
+      _ -> Set.unions (map (go lent) (rnodeChildren n))
+    startsFrom lent (LetVarN _ j _) = Set.member j lent
+    startsFrom lent (BndVarN _ j _) = Set.member j lent
+    startsFrom _ _ = False
+    unchanged i xs = maybe True (unchangedSlot i) (lookup i xs)
+    continuesOf :: LoopBody NativeExpr SerialExpr b -> [[(Int, NativeExpr)]]
+    continuesOf b = case b of
+      LoopIf _ t f -> continuesOf t <> continuesOf f
+      LoopNLet _ _ r -> continuesOf r
+      LoopSLet _ _ r -> continuesOf r
+      LoopBase _ -> []
+      LoopContinue xs -> [xs]
+
 -- | The type a value of a 'TypeM' has in the pool.
 typeMToF :: TypeM -> TypeF
 typeMToF (Native t) = t
@@ -2124,66 +2857,114 @@ typeMToF (Function ins out) = FunF (map typeMToF ins) (typeMToF out)
 typeMToF Passthrough = error "unreachable: a passthrough value is never a native argument"
 
 translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
-translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
+translateSegment closureGen m0 = do
   resetCounter
-  CMS.modify (\st -> st {translatorCurrentRoot = root})
-  modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets m0)
   pp <- CMS.gets translatorPool
+  before <- CMS.gets translatorLocalManifoldSet
+  prepared <- prepareSegment m0
+  e <- foldWithSerialManifoldM (defaultFoldRules cfg) (preparedBody prepared)
+  recordLowered prepared
+  after <- CMS.gets translatorLocalManifoldSet
+  let defined = after `Set.difference` before
+      twins =
+        Map.elems $
+          Map.fromList
+            [ (m, nm)
+            | nm@(NativeManifold m _ _ _) <- nativeManifoldsUnder (RSM m0)
+            , Set.member m defined
+            , Map.member m (ppTwoForm pp)
+            ]
+  forms <- mapM (byValueForm pp) twins
+  return $ vsep (concatMap fst forms ++ [renderPoolDocs e] ++ concatMap snd forms)
+  where
+    cfg = cppLowerConfig closureGen
+    -- The by-value form of a manifold (OWN-7): the segment planned again
+    -- with the parameters it keeps on some evaluations taken by value, and
+    -- only that manifold lowered. It is an overload of the same name, so a
+    -- call selects it exactly when every such argument is an rvalue.
+    byValueForm pp (NativeManifold m _ form body) = do
+      positions <- filterM (\(j, Arg _ t) -> cppTwinPosition m j t) (indexed (typeMofForm form))
+      if null positions
+        then return ([], [])
+        else do
+          let pp' = pp {ppByValue = Map.insertWith Set.union m (Set.fromList (map fst positions)) (ppByValue pp)}
+          CMS.modify (\st -> st {translatorPool = pp', translatorTwin = Just m})
+          prepared <- prepareSegment m0
+          docs <- case [nm | nm@(NativeManifold m' _ _ _) <- nativeManifoldsUnder (RSM (preparedBody prepared)), m' == m] of
+            (nm : _) -> foldWithNativeManifoldM (defaultFoldRules cfg) nm
+            [] -> error "morloc bug: a by-value form whose manifold is not in its segment"
+          recordLowered prepared
+          typestr <- cppTypeOf (typeMof body) >>= cppResultType m
+          args <- mapIndexedM (cppParamOf m) (typeMofForm form)
+          CMS.modify (\st -> st {translatorPool = pp, translatorTwin = Nothing})
+          return ([typestr <+> manNamer m <> tupled args <> ";"], poolCompleteManifolds docs)
+
+-- | A segment ready to lower: its lets' modes, its last reads marked, and
+-- the translator state its lowering reads set.
+data PreparedSegment = PreparedSegment
+  { preparedBody :: SerialManifold
+  , preparedModes :: [(Int, NativeExpr, LetMode)]
+  , preparedMoves :: Set.Set Int
+  }
+
+prepareSegment :: SerialManifold -> CppTranslator PreparedSegment
+prepareSegment m0@(SerialManifold root _ _ _ _) = do
+  let lets = nativeLets m0
+      once = Map.keysSet (Map.filter (== (1 :: Int)) (Map.fromListWith (+) [(i, 1) | (i, _) <- lets]))
+  pp <- CMS.gets translatorPool
+  let byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form _ <- nativeManifoldsUnder (RSM m0), Map.member m (ppByValue pp)]
+      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
+  let borrowed = borrowedSlots params (RSM m0)
+      lent = Set.fromList [i | NativeManifold _ _ form _ <- nativeManifoldsUnder (RSM m0), Arg i _ <- typeMofForm form] `Set.difference` params
+  let scoped = scopedTakes (\m form -> byValueIndices pp m form) borrowed (RSM m0)
+  CMS.modify (\st -> st {translatorLentParams = lent, translatorScopedTakes = scoped, translatorCurrentRoot = root, translatorLetDefs = Map.fromList [d | d@(i, _) <- lets, Set.member i once], translatorOwnedVars = params <> (loopSlots (RSM m0) `Set.difference` borrowed), translatorBorrowedSlots = borrowed})
+  modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) lets
   let plan = letPlan modes
       held = lpHeld plan
-      byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM m0)]
-      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
       m0' = paramReads seeds m0
-      m1 = markLastReadsSeeded (lpAliases plan) held seeds m0'
-      builds = lastBuilds (lpAliases plan) held seeds [m0']
-  let moves = lpOwned plan
+  noMoves <- CMS.gets translatorNoMoves
+  let m1 = if noMoves then m0' else markLastReadsSeeded (lpAliases plan) held seeds m0'
+      builds = if noMoves then Set.empty else lastBuilds (lpAliases plan) held seeds [m0']
+      moves = lpOwned plan
   CMS.modify (\st -> st {translatorMoves = moves, translatorParamMoves = params, translatorLets = Set.fromList [i | (i, _, _) <- modes], translatorBuilds = builds, translatorMovedBuilds = Set.empty})
-  e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m1
+  return (PreparedSegment m1 modes (moves <> params))
+
+-- | Keep a lowered segment for the ownership check.
+recordLowered :: PreparedSegment -> CppTranslator ()
+recordLowered prepared = do
   moved <- CMS.gets translatorMovedBuilds
-  CMS.modify (\st -> st {translatorLowered = (m1, modes, moves <> params, moved) : translatorLowered st})
-  return $ renderPoolDocs e
+  CMS.modify (\st -> st {translatorLowered = (preparedBody prepared, preparedModes prepared, preparedMoves prepared, moved) : translatorLowered st})
 
 -- handle string interpolation
-evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
-evaluatePattern _ _ (PatternText s ss) xs = "interweave_strings" <> tupled [fragments, insertions]
+-- | A pattern call, given its result type and its receiver's type.
+evaluatePattern :: CppTranslatorState -> TypeF -> Maybe TypeF -> PatApp MDoc -> MDoc
+evaluatePattern _ _ _ (PatText s xs) = "interweave_strings" <> tupled [fragments, insertions]
   where
-    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit) (s : ss))
-    insertions = encloseSep "{" "}" ", " xs
+    fragments = encloseSep "{" "}" ", " (map (dquotes . pretty . escapeQuotes "\"" "\\\"" . escapeStringLit) (s : map snd xs))
+    insertions = encloseSep "{" "}" ", " (map fst xs)
 
 -- handle getters
-evaluatePattern _ _ (PatternStruct (ungroup -> [ss])) [m] =
-  writeSelector m ss
-evaluatePattern _ _ (PatternStruct (ungroup -> sss)) [m] =
-  encloseSep "{" "}" "," (map (writeSelector m) sss)
+evaluatePattern state _ rt (PatGet (ungroup -> [ss]) [] m) =
+  readSelector (translatorHandles state) rt m ss
+evaluatePattern state t rt (PatGet (ungroup -> sss) [] m) =
+  CMS.evalState (cppTypeOf t) state <> encloseSep "{" "}" "," (map (readSelector (translatorHandles state) rt m) sss)
 -- PatternStruct with bracket steps inside the Selector. App args are
 -- [bracket_bounds..., receiver]. Walk the Selector recursively,
 -- emitting C++ source for each step: `.field`, `std::get<N>(...)`,
 -- `morloc_at(idx, value)`, `morloc_slice(...)`. Multi-sibling groups
 -- emit `std::make_tuple(...)`.
-evaluatePattern _ _ (PatternStruct s) args
-  | selectorHasBracket s, length args == bracketArity s + 1 =
-      let n = bracketArity s
-          (bracketArgs, receivers) = splitAt n args
-          receiver = case receivers of
-            [r] -> r
-            _ -> error $ "evaluatePattern: bracket-in-Selector expected 1 receiver, \
-                         \got " <> show (length receivers)
-      in fst (walkCppSelectorBrackets receiver bracketArgs s)
-evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) = setterOf False state0 t0 s0 m0 xs0
-evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
+evaluatePattern state _ rt (PatGet s bracketArgs receiver) =
+  fst (fst (walkCppSelectorBrackets (translatorHandles state) (receiver, rt) bracketArgs s))
+evaluatePattern state0 t0 _ (PatSet s0 m0 xs0) = setterOf False state0 t0 s0 m0 (toList xs0)
 -- C++ bracket index: List and Vector both use std::vector<T> on the wire,
 -- so the same morloc_at helper works for both. Args: [index, receiver].
-evaluatePattern _ _ PatternBracketIndex [i, m] =
+evaluatePattern _ _ _ (PatIndex i m) =
   "morloc_at" <> tupled [i, m]
-evaluatePattern _ _ PatternBracketIndex args =
-  error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
 -- C++ bracket slice: List and Vector share std::vector<T> on the wire,
 -- so morloc_slice works for both. Args: [start, stop, step, receiver].
-evaluatePattern _ _ PatternBracketSlice [start, stop, step, m] =
+evaluatePattern _ _ _ (PatSlice start stop step m) =
   "morloc_slice" <> tupled [start, stop, step, m]
-evaluatePattern _ _ PatternBracketSlice args =
-  error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
 
 -- | A setter on receiver @m0@ with values @xs0@: the receiver rebuilt with
 -- the set fields changed; when nothing reads the receiver again (@dead@),
@@ -2193,17 +2974,31 @@ setterOf dead state0 t0 s0 m0 xs0 =
   patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
   where
     makeTuple (AppF _ ts) xs =
-      let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
+      let tupleTypes = CMS.evalState (mapM cppTypeOf (tyArgs ts)) state0
        in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
     makeTuple _ _ = error "Unreachable"
 
-    makeRecord _ xs = encloseSep "{" "}" ", " xs
+    -- A `?T` field may be stored as a pointer (CPP-6): its value is
+    -- converted to the field's own form.
+    handles = translatorHandles state0
+    isHandle t = maybe False (`Map.member` handles) (recordNameOf t)
+    makeRecord t fields =
+      let recT = CMS.evalState (cppTypeOf t) state0
+          store ((Key k, OptionalF _), x) = "mlc::wrap_field<decltype(" <> recT <> "::" <> pretty k <> ")>(" <> x <> ")"
+          store (_, x) = x
+       in if isHandle t
+            then cppHandleOf recT (map snd fields)
+            else recT <> encloseSep "{" "}" ", " (map store fields)
 
     accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
-    accessRecord _ d k = d <> "." <> pretty k
+    accessRecord t d k = cppField handles (Just t) d k
     -- An unchanged field is copied into the aggregate init, or moved out of
     -- a receiver nothing reads again (OWN-2).
     finalizeSet _ v
+      -- OWN-5: an unchanged field of the receiver's own node is taken from
+      -- it whole; a field below it is moved.
+      | dead, Just k <- T.stripPrefix (render m0 <> "->") (render v), isIdentifier k =
+          "mlc::take_field(" <> m0 <> ".p, [](auto& f) -> auto& { return f." <> pretty k <> "; })"
       | dead = "std::move(" <> v <> ")"
       | otherwise = v
 
@@ -2216,55 +3011,76 @@ cppTakeSetter recv t sel (m : xs) = do
   return (if kept then Just (setterOf True state t sel m xs) else Nothing)
 cppTakeSetter _ _ _ [] = return Nothing
 
-writeSelector :: MDoc -> [Either Int Text] -> MDoc
-writeSelector d [] = d
-writeSelector d (Right k : rs) = writeSelector (d <> "." <> pretty k) rs
-writeSelector d (Left i : rs) = writeSelector ("std::get<" <> pretty i <> ">" <> parens d) rs
+readField :: MDoc -> MDoc
+readField access = "mlc::read_field(" <> access <> ")"
+
+-- | A getter's steps from a receiver of the given type. A `?T` field may be
+-- stored as a pointer (CPP-6), so a field read that may be one goes through
+-- @mlc::read_field@, which gives the std::optional every other `?T` value
+-- is and returns any other field as is.
+readSelector :: Map.Map TVar [(Key, TypeF)] -> Maybe TypeF -> MDoc -> [Either Int Text] -> MDoc
+readSelector _ _ d [] = d
+readSelector handles t d (Right k : rs) =
+  let ft = t >>= fieldsOf handles >>= lookup (Key k)
+      access = cppField handles t d k
+      value = case ft of
+        Just (OptionalF _) -> readField access
+        Nothing -> readField access
+        _ -> access
+   in readSelector handles ft value rs
+readSelector handles t d (Left i : rs) =
+  let et = case t of
+        Just (AppF _ (tyArgs -> ts)) | i < length ts -> Just (ts !! i)
+        _ -> Nothing
+   in readSelector handles et ("std::get<" <> pretty i <> ">" <> parens d) rs
+
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting C++
 -- source code per step. Threads the bracket runtime args through
 -- bracket steps in DFS order; returns the produced expression and
 -- the remaining (unconsumed) bracket args. Multi-sibling groups
 -- emit @std::make_tuple(...)@. See 'walkSelectorBrackets'.
-walkCppSelectorBrackets :: MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
-walkCppSelectorBrackets =
+walkCppSelectorBrackets :: Map.Map TVar [(Key, TypeF)] -> (MDoc, Maybe TypeF) -> [MDoc] -> Selector -> ((MDoc, Maybe TypeF), [MDoc])
+walkCppSelectorBrackets handles =
   walkSelectorBrackets
-    (\rcv k -> rcv <> "." <> pretty k)
-    (\rcv i -> "std::get<" <> pretty i <> ">" <> parens rcv)
-    (\idx rcv -> "morloc_at" <> tupled [idx, rcv])
-    (\start stop step rcv -> "morloc_slice" <> tupled [start, stop, step, rcv])
-    (\results -> "std::make_tuple" <> tupled results)
+    (\(rcv, t) k -> (readField (cppField handles t rcv k), t >>= fieldOf k))
+    (\(rcv, t) i -> ("std::get<" <> pretty i <> ">" <> parens rcv, t >>= elemOf i))
+    (\idx (rcv, t) -> ("morloc_at" <> tupled [idx, rcv], t >>= listElem))
+    (\start stop step (rcv, t) -> ("morloc_slice" <> tupled [start, stop, step, rcv], t))
+    (\results -> ("std::make_tuple" <> tupled (map fst results), Nothing))
+  where
+    fieldOf k t = fieldsOf handles t >>= lookup (Key k)
+    elemOf i (AppF _ (tyArgs -> ts)) | i >= 0 && i < length ts = Just (ts !! i)
+    elemOf _ _ = Nothing
+    listElem (AppF _ (tyArgs -> [a])) = Just a
+    listElem _ = Nothing
 
-typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
-typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
+-- | The fields of a record type, a back-reference to a handle included.
+fieldsOf :: Map.Map TVar [(Key, TypeF)] -> TypeF -> Maybe [(Key, TypeF)]
+fieldsOf _ (NamF _ _ _ fs) = Just fs
+fieldsOf handles t = recordNameOf t >>= (`Map.lookup` handles)
 
--- | Collect every payload-bearing `data` type used in these manifolds with
--- its arms, merging occurrences arm-wise. A constructor literal's type
--- reports only the arm being built, and reports it with no fields, so taking
--- the first occurrence could declare an arm as nullary that the schema says
--- carries a payload.
--- Keep the LONGEST constructor list, not the first seen. A constructor
--- LITERAL reports a type whose table holds only its own arm, so a
--- first-wins merge can define the type from one arm and silently renumber
--- every other constructor -- an arm's position is its wire tag.
-mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
-mergeLongest =
-  Map.elems
-    . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
-    -- Keyed by the CONCRETE name, which is what the declaration is
-    -- called. A parameterized `data` has one concrete type per
-    -- instantiation, so keying by the general name would collapse
-    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
-    -- and the second use would name a type that was never emitted.
-    . map (\e@(FV _ cv, _) -> (cv, e))
+-- | A field of a value of the given type: a handle's fields are behind its
+-- pointer.
+cppField :: Map.Map TVar [(Key, TypeF)] -> Maybe TypeF -> MDoc -> Text -> MDoc
+cppField handles t d k = case t >>= recordNameOf of
+  Just g | Map.member g handles -> d <> "->" <> pretty k
+  _ -> d <> "." <> pretty k
+
+-- | A handle built in pool code, its node from the pool's allocator
+-- (CPP-6, STATE-8).
+cppHandleOf :: MDoc -> [MDoc] -> MDoc
+cppHandleOf t fields = t <> "(mlc::make_arm<" <> CP.handleFields t <> ">(" <> CP.handleFields t <> encloseSep "{" "}" ", " fields <> "))"
+
 
 -- | Every native type reachable in this pool that names no type variable,
 -- with each part of it.
-collectCppTypes :: (TVar -> Text -> Bool) -> [SerialManifold] -> [TypeF]
-collectCppTypes mapped =
+collectCppTypes :: (TVar -> Text -> Bool) -> (TVar -> Bool) -> [SerialManifold] -> [TypeF]
+collectCppTypes mapped isData =
   unique
-    . filter concrete
-    . concatMap parts
+    . map snd
+    . filter (uncurry concrete)
+    . concatMap (parts [])
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -2274,24 +3090,31 @@ collectCppTypes mapped =
 
     -- A record's or a variant's type parameters are not descended into:
     -- one may be phantom, naming a type no value carries.
-    parts t = t : case t of
-      AppF _ ts -> concatMap parts ts
-      NamF _ _ _ rs -> concatMap (parts . snd) rs
-      OptionalF x -> parts x
-      VariantF _ _ as -> concatMap (concatMap parts . snd) as
-      FunF ts r -> concatMap parts (r : ts)
+    -- Each part is paired with the records it is inside of, by name and
+    -- arguments, which a reference back to one of them names.
+    parts anc t = (anc, t) : case t of
+      AppF _ ts -> concatMap (parts anc) (tyArgs ts)
+      NamF _ (FV g _) ps rs -> concatMap (parts ((g, ps) : anc) . snd) rs
+      OptionalF x -> parts anc x
+      VariantF _ _ as -> concatMap (concatMap (parts anc) . snd) as
+      FunF ts r -> concatMap (parts anc) (r : ts)
       _ -> []
 
-    concrete t = case t of
+    concrete anc t = case t of
       VarF (FV (TV v) (CV c)) -> typeName v && (v /= c || mapped (TV v) c)
-      AppF h ts -> concrete h && all concrete ts
-      NamF _ (FV (TV v) _) ps _ -> typeName v && all concrete ps
-      OptionalF x -> concrete x
-      VariantF _ ps _ -> all concrete ps
+      AppF h ts -> concrete anc h && all (concrete anc) (tyArgs ts)
+      NamF _ (FV (TV v) _) ps _ -> typeName v && all (concreteArg anc) (tyArgs ps)
+      OptionalF x -> concrete anc x
+      VariantF _ ps _ -> all (concrete anc) (tyArgs ps)
+      RecF (FV g _) ps | isData g -> all (concrete anc) (tyArgs ps)
       EnumF {} -> True
-      NatLitF _ -> True
-      StrLitF _ -> True
       _ -> False
+    -- A record argument that is not a reference back to an enclosing
+    -- record is the record at its arguments.
+    concreteArg anc t = case t of
+      RecF (FV g@(TV v) _) ps
+        | not (isData g) && (g, ps) `notElem` anc -> typeName v && all (concreteArg anc) (tyArgs ps)
+      _ -> concrete anc t
     typeName v = case T.uncons (T.takeWhileEnd (/= '.') v) of
       Just (c, _) -> isUpper c
       Nothing -> False
@@ -2310,47 +3133,49 @@ cppValueChecks es = do
         AppU (VarU (TV n)) _ -> Just n
         NamU _ (TV n) _ _ -> Just n
         _ -> Nothing
-  docs <- mapM check [t | t <- collectCppTypes mapped es, checked t]
+  dataNames <- CMS.gets translatorDataNames
+  docs <- mapM check (collectCppTypes mapped (`Set.member` dataNames) es)
   return (map pretty (unique (map render (concat docs))))
   where
-    checked t = case t of
-      NatLitF _ -> False
-      StrLitF _ -> False
-      _ -> True
     check t = do
       ty <- cppTypeOf t
-      let name = render ty
+      handles <- CMS.gets translatorHandles
+      -- The name is quoted in a message, so it must not break across lines.
+      let name = T.unwords (T.words (render ty))
           valueOf x what = "static_assert(mlc::is_value_type_v<" <> x <> ">, \"CPP-3: " <> what <> " is a value type\");"
+          -- A handle's fields live in its fields struct.
+          holder = case t of
+            NamF _ (FV g _) _ _ | Map.member g handles -> CP.handleFields ty
+            _ -> ty
       fields <- case t of
         NamF NamRecord _ _ rs -> return
-          [ valueOf ("decltype(" <> ty <> "::" <> pretty k <> ")") ("field " <> pretty k <> " of " <> pretty name)
+          [ valueOf ("decltype(" <> holder <> "::" <> pretty k <> ")") ("field " <> pretty k <> " of " <> pretty name)
           | (Key k, _) <- rs ]
         _ -> return []
       let movable = case t of
             NamF NamRecord _ _ rs@(_ : _) ->
-              [ "static_assert(mlc::builds_from<" <> ty <> ", "
-                  <> hsep (punctuate "," ["decltype(" <> ty <> "::" <> pretty k <> ")" | (Key k, _) <- rs])
+              [ "static_assert(mlc::builds_from<" <> holder <> ", "
+                  <> hsep (punctuate "," ["decltype(" <> holder <> "::" <> pretty k <> ")" | (Key k, _) <- rs])
                   <> ">, \"CPP-4: " <> pretty name <> " is built from moved fields\");" ]
             _ -> []
       return $ if isScalarCppType ty || T.isInfixOf "\"" name then [] else valueOf ty (pretty name) : fields <> movable
 
--- | Every argument-free @data@ type reachable in this pool.
-collectCppEnums :: Scope -> [SerialManifold] -> [(FVar, [Text])]
-collectCppEnums gscope =
-  mergeLongest
-    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+-- | Every occurrence of an argument-free @data@ type in this pool.
+collectCppEnums :: [SerialManifold] -> [(FVar, [Text])]
+collectCppEnums =
+  concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [Text])]
     seek (EnumF v _ ns) = [(v, ns)]
     seek (VariantF _ _ as) = concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
+    seek (AppF t ts) = seek t <> concatMap seek (tyArgs ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -2359,12 +3184,23 @@ collectCppEnums gscope =
 -- definition, exactly as a mapped record does.
 generateCppEnums :: [SerialManifold] -> CppTranslator [MDoc]
 generateCppEnums es = do
-  gscope <- CMS.gets translatorGScope
-  concat <$> mapM makeOne (collectCppEnums gscope es)
+  -- Keyed by the concrete name, which is what the declaration is called.
+  let byName = Map.fromListWith Set.union [(cvText, Set.singleton (gv, ns)) | (FV gv (CV cvText), ns) <- collectCppEnums es]
+  concat <$> mapM merged (Map.toList byName)
   where
-    makeOne (FV gv (CV cvText), ctors) = do
-      userMapped <- variantIsUserMapped gv cvText
-      return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors | not userMapped]
+    merged (cvText, occs) = do
+      let gvs = nubOrd [gv | (gv, _) <- Set.toList occs]
+      unmapped <- filterM (\gv -> not <$> variantIsUserMapped gv cvText) gvs
+      case (unmapped, gvs) of
+        ([], _) -> return []
+        (_, [gv]) -> case mergeEnumOccurrences cvText (map snd (Set.toList occs)) of
+          Right ctors -> do
+            public <- CMS.gets translatorPublic
+            return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors | not (Map.member gv public)]
+          Left msg -> failWith msg
+        _ -> failWith $ "the `data` types " <> MT.intercalate ", " (map unTVar gvs) <> " share the C++ name " <> cvText
+    failWith :: Text -> CppTranslator [MDoc]
+    failWith msg = CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return []
 
 -- | Every occurrence of a payload-bearing @data@ type in this pool, with
 -- the arguments it was applied to. Occurrences are not merged here: which
@@ -2372,19 +3208,19 @@ generateCppEnums es = do
 -- a template instantiated twice is two types, a generated type is one per
 -- instantiation whatever it was applied to -- and rendering needs the
 -- translator, so the merge happens in 'generateCppVariants'.
-collectCppVariants :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
-collectCppVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
+collectCppVariants :: [SerialManifold] -> [(FVar, [ArgF], [(Text, [TypeF])])]
+collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
-    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (unpackedAsTypeF (serialAstToType s))
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
-    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ (SerializeS_ s xs) = return $ seek (unpackedAsTypeF (serialAstToType s)) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
-    seek (VariantF v@(FV gv _) ps as) = (v, ps, as) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
+    seek :: TypeF -> [(FVar, [ArgF], [(Text, [TypeF])])]
+    seek (VariantF v@(FV _ _) ps as) = (v, ps, as) : concatMap seek (tyArgs ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
+    seek (AppF t ts) = seek t <> concatMap seek (tyArgs ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -2397,39 +3233,68 @@ generateCppVariants ::
   [SerialManifold] ->
   CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants cfg closureAsts es = do
-  gscope <- CMS.gets translatorGScope
-  named <- mapM occurrence (collectCppVariants gscope es)
+  ddefs0 <- CMS.gets translatorDataDefs
+  -- A template some instance of which holds a function is marshalled at
+  -- each instance, whose closures are wired by name; any other once for
+  -- every instance, with an instance whose arm fields convert specialised.
+  let perInstance = Set.fromList ([gv | (FV gv _, _, arms) <- collectCppVariants es, any holdsFunF (concatMap snd arms)]
+                      <> [gv | (gv, dd) <- Map.toList ddefs0, any holdsFunF (concatMap snd (ddArms dd))])
+  named <- mapM occurrence (collectCppVariants es)
   wireArms <- variantWireArms cppTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
-  parts <- mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
-  let decls = concatMap (\(d, _, _, _, _) -> d) parts
-      bodies = concatMap (\(_, b, _, _, _) -> b) parts
-      fwds = concatMap (\(_, _, f, _, _) -> f) parts
-      serials = concatMap (\(_, _, _, x, _) -> x) parts
+  parts <- mapM (uncurry (merged perInstance wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
+  (tdecls, tbodies, tfwds, tserials) <- templateDecls perInstance
+  let decls = tdecls <> concatMap (\(d, _, _, _, _) -> d) parts
+      bodies = tbodies <> concatMap (\(_, b, _, _, _) -> b) parts
+      fwds = tfwds <> concatMap (\(_, _, f, _, _) -> f) parts
+      serials = tserials <> concatMap (\(_, _, _, x, _) -> x) parts
       late = concatMap (\(_, _, _, _, x) -> x) parts
   -- Returned apart so the caller can interleave them with other
   -- declarations.
   return (decls, bodies, fwds, serials, late)
   where
+    -- Each generated template, declared from its definition when no header
+    -- holds it, and marshalled once for every instance: two morloc types
+    -- that are one C++ type are one instance.
+    templateDecls perInstance = do
+      ddefs <- CMS.gets translatorDataDefs
+      public <- CMS.gets translatorPublic
+      parts <- sequence
+        [ do
+            arms' <- mapM (\(c, ts) -> (,) c <$> mapM cppTypeOf ts) (ddArms dd)
+            qname <- cppTypeOf (RecF (FV gv (CV (ddForm dd))) [TyA (VarF (FV (TV ("&" <> unTVar p)) (CV (nativeParam p)))) | p <- ddTypeParams dd])
+            let leaf = pretty (tvarIdentifier gv)
+                decls = if Map.member gv public then [] else [CP.printCppVariantDecl params leaf arms']
+                bodies = if Map.member gv public then [] else [CP.printCppVariantArms params leaf arms']
+                payload = filter (not . null . snd) arms'
+                fwds = CP.printMarshalDecls params qname : [CP.printMarshalDecls params (CP.armName qname c) | (c, _) <- payload]
+                armSerials = concat
+                  [ [CP.printSerializer params aname fields, CP.printDeserializer params aname fields]
+                  | (c, ts) <- payload
+                  , let aname = CP.armName qname c
+                        fields = [("f" <> pretty i, t) | (i, t) <- indexed ts] ]
+                serials = armSerials <> [CP.printCppVariantSerializers params qname arms']
+            return (decls, bodies, if Set.member gv perInstance then [] else fwds, if Set.member gv perInstance then [] else serials)
+        | (gv, dd) <- Map.toList ddefs
+        , let params = map (pretty . nativeParam) (nativeDataParams dd) ]
+      return (concatMap (\(a, _, _, _) -> a) parts, concatMap (\(_, b, _, _) -> b) parts, concatMap (\(_, _, c, _) -> c) parts, concatMap (\(_, _, _, d) -> d) parts)
     -- One occurrence under its rendered name, with each arm's field types
     -- as written and as rendered, so the merge can compare spellings.
     occurrence (v, ps, as) = do
       n <- cppTypeOf (VariantF v ps as)
       as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM cppTypeOf ts) as
       return (render n, [(v, ps, as')])
-    merged wireArms name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
-      Right arms -> case occs of
-        ((v, ps, _) : _) -> makeOne (Map.findWithDefault [] name wireArms) (v, ps, arms)
-        [] -> return ([], [], [], [], [])
+    merged perInstance wireArms name occs = case mergeVariantOccurrences name [((v, ps), as) | (v, ps, as) <- occs] of
+      Right ((v, ps), arms) -> makeOne perInstance (Map.findWithDefault [] name wireArms) (v, ps, arms)
       Left msg -> CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return ([], [], [], [], [])
 
-    -- A field holding a closure crosses as its wire form, converted by the
-    -- shared engine.
+    -- A field that does not write as it is held (a closure, a packed value)
+    -- crosses as its wire form, converted by the shared engine (GEN-14).
     wireField :: Int -> SerialAST -> CppTranslator (Maybe CP.WireField)
     wireField i ast
-      | containsClosure ast = do
+      | fieldConverts ast = do
           (toStmts, toE) <- nativeToWire cfg ("obj.f" <> pretty i) ast
-          rawT <- maybe (cppTypeOf (wireSerialAstToType cppClosureWireLeaf ast)) (return . renderIType)
+          rawT <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf ast))) (return . renderIType)
                     =<< lcRawDeserialAstType cfg ast
           (fromE, fromStmts) <- wireToNative cfg "mlc_r" ast
           return . Just $
@@ -2442,7 +3307,7 @@ generateCppVariants cfg closureAsts es = do
               }
       | otherwise = return Nothing
 
-    makeOne asts (FV gv (CV cvText), ps, arms) = do
+    makeOne perInstance asts (FV gv (CV cvText), ps, arms) = do
       userMapped <- variantIsUserMapped gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM cppTypeOf ts) arms
       name <- cppTypeOf (VariantF (FV gv (CV cvText)) ps arms)
@@ -2453,24 +3318,45 @@ generateCppVariants cfg closureAsts es = do
           -- slot alone, and the payload is written over its own slot.
           armSerial (c, ts) = do
             let aname = CP.armName name c
-                fields = [("f" <> pretty i, t) | (i, t) <- zip [(0 :: Int) ..] ts]
-            wfs <- case lookup c asts of
-              Just ss | length ss == length ts -> zipWithM wireField [0 ..] ss
-              _ -> return (map (const Nothing) ts)
-            return $ if all isNothing wfs
+                fields = [("f" <> pretty i, t) | (i, t) <- indexed ts]
+            wfs <- case lookup c asts >>= zipExact ts of
+              Just tss -> mapIndexedM (\i (t, s) -> (,) t <$> wireField i s) tss
+              Nothing -> return [(t, Nothing) | t <- ts]
+            return $ if all (isNothing . snd) wfs
               then ([CP.printSerializer [] aname fields, CP.printDeserializer [] aname fields], [])
-              else ([], [CP.printArmMarshallers aname (zip ts wfs)])
-          serial = CP.printCppVariantSerializers name arms'
+              else ([], [CP.printArmMarshallers aname wfs])
+          serial = CP.printCppVariantSerializers [] name arms'
           payloadArms = filter (not . null . snd) arms'
           fwds = CP.printMarshalDecls [] name : [CP.printMarshalDecls [] (CP.armName name c) | (c, _) <- payloadArms]
       (armSerials, armLate) <- bimap concat concat . unzip <$> mapM armSerial payloadArms
-      return $ if userMapped
+      let converts = any (any fieldConverts . snd) asts
+      public <- CMS.gets translatorPublic
+      ddefs <- CMS.gets translatorDataDefs
+      -- A generated template is declared once, from its definition
+      -- ('templateDecls'); an instance has only its marshalling, unless it
+      -- is named by its arguments ('Infer.instanceName'), a type of its own.
+      let named = Map.member gv ddefs && not (T.any (== '$') cvText)
+      -- A generated template whose declaration has no definition: no
+      -- instance of it can be spelled.
+      dfails <- CMS.gets translatorDataFailures
+      when (not userMapped && T.any (== '$') cvText && Map.notMember gv ddefs) $
+        CMS.modify $ \s -> s {translatorErrors = ("the generated C++ type for " <> unTVar gv <> " cannot be defined from its declaration: "
+          <> Map.findWithDefault "it does not resolve in C++" gv dfails) : translatorErrors s}
+      return $ if Map.member gv ddefs && not named && Set.notMember gv perInstance && not converts
+                 then ([], [], [], [], [])
+                 else if userMapped || (Map.member gv public && not named) || (Map.member gv ddefs && not named)
                  then ([], [], fwds, armSerials <> [serial], armLate)
-                 else ( [CP.printCppVariantDecl name arms']
-                      , [CP.printCppVariantArms name arms']
+                 else ( [CP.printCppVariantDecl [] name arms']
+                      , [CP.printCppVariantArms [] name arms']
                       , fwds
                       , armSerials <> [serial]
                       , armLate )
+
+-- | Whether a type holds a function or suspension.
+holdsFunF :: TypeF -> Bool
+holdsFunF t = case t of
+  FunF _ _ -> True
+  _ -> any holdsFunF (childrenOf t)
 
 -- | True when the concrete scope holds an entry for this type whose body
 -- names @cvText@, i.e. the user wrote @data Cpp => X = "..."@ and supplies
@@ -2488,43 +3374,486 @@ variantIsUserMapped gv cvText = do
     outerName (NamU _ (TV n) _ _) = Just n
     outerName _ = Nothing
 
+-- | The generated types this pool declares in a header of their own, one
+-- header per declaring module (GEN-6), under their qualified names (GEN-4).
+-- A type qualifies when its definition cannot depend on its uses (a
+-- record with no parameters whose uses all have the same fields, a `data`
+-- type with no parameters) and when each field names only C++ builtins,
+-- the standard library and other such types, so that the header compiles
+-- ahead of every sourced file. Any other generated type is declared in the
+-- pool under its pool-local name (GEN-10). Each header is returned with its
+-- module path.
+planPublicTypes :: [SerialManifold] -> CppTranslator [([Text], Text)]
+planPublicTypes es = do
+  homes <- CMS.gets translatorTypeHomes
+  depRoots <- CMS.gets translatorDepNamespaces
+  cscope <- CMS.gets translatorCScope
+  defs <- CMS.gets translatorGenDefs
+  let unparameterized gv = case Map.lookup gv cscope of
+        Just ((ps, _, _, _, _) : _) -> null ps
+        _ -> False
+      eligible gv = unparameterized gv && Map.member gv homes
+      -- Every generated record the pool uses has one definition, from its
+      -- declaration (GEN-9); one that refers to itself is a handle.
+      selfRef gd = recursiveRecord (gdVar gd) (gdFields gd)
+      recDefs = Map.filter ((== "struct") . gdForm) defs
+      recursive = Map.keysSet (Map.filter selfRef recDefs)
+      -- A record may be declared in its module's header when it has a
+      -- module and each of its parameters is spelled by an identifier.
+      recCands =
+        Map.filterWithKey
+          (\gv gd -> Map.member gv homes && all (isIdentifier . nativeParam) (nativeParams gd))
+          recDefs
+  ddefs <- CMS.gets translatorDataDefs
+  -- A generated template may be declared in its module's header when each
+  -- of its parameters is spelled by an identifier.
+  let dataCands = Map.filterWithKey (\gv dd -> Map.member gv homes && all (isIdentifier . nativeParam) (nativeDataParams dd)) ddefs
+  allVarOccs <- filterM (\(FV gv (CV cv), _, _) -> not <$> variantIsUserMapped gv cv) (collectCppVariants es)
+  let varOccs = [o | o@(_, ps, _) <- allVarOccs, null ps]
+  enumOccs <- filterM (\(FV gv (CV cv), _) -> not <$> variantIsUserMapped gv cv) (collectCppEnums es)
+  ex <- CMS.gets translatorExtras
+  let known =
+        Set.unions
+          [ Map.keysSet recDefs, Map.keysSet ddefs
+          , Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs] ]
+      -- An unused type (GEN-6) is declared only where a sourced file can name
+      -- it, its module's header, and only when it can be written there.
+      writable gv = Set.notMember gv known && Map.member gv homes && spellableHome gv
+      spellableHome gv = and [not (Set.member c cppReservedComponents) && isIdentifier c | Just h <- [Map.lookup gv homes], c <- typeHomePath h]
+      exRecs0 =
+        Map.filterWithKey
+          (\gv gd -> writable gv && all (isIdentifier . nativeParam) (nativeParams gd) && all ((`Set.notMember` cppKeywords) . unKey . fst) (gdFields gd))
+          (exRecords ex)
+      exDatas0 = Map.filterWithKey (\gv dd -> writable gv && all (isIdentifier . nativeParam) (nativeDataParams dd)) (exData ex)
+      exVars0 = Map.filterWithKey (\gv _ -> writable gv) (exVariants ex)
+      exEnums0 = Map.filterWithKey (\gv _ -> writable gv) (exEnums ex)
+      -- An unused type one of whose names another type's would take is left
+      -- out.
+      armsOf = Map.fromList ([(gv, map fst arms) | (FV gv _, _, arms) <- varOccs] <> [(gv, map fst (ddArms dd)) | (gv, dd) <- Map.toList (ddefs <> exDatas0)] <> [(gv, map fst arms) | (gv, arms) <- Map.toList exVars0])
+      namesFor gv =
+        let q = maybe (unTVar gv) qualifiedCppName (Map.lookup gv homes)
+         in q : [q <> "_fields" | Just gd <- [Map.lookup gv (recDefs <> exRecs0)], selfRef gd]
+              <> [CP.armNameText q c | c <- Map.findWithDefault [] gv armsOf]
+      owners =
+        Map.fromListWith Set.union
+          [ (n, Set.singleton gv)
+          | gv <- Set.toList (Set.unions [known, Map.keysSet exRecs0, Map.keysSet exDatas0, Map.keysSet exVars0, Map.keysSet exEnums0])
+          , Map.member gv homes
+          , n <- namesFor gv ]
+      clashing = Set.unions [os | os <- Map.elems owners, Set.size os > 1]
+      unclashed :: Map.Map TVar x -> Map.Map TVar x
+      unclashed = Map.filterWithKey (\gv _ -> Set.notMember gv clashing)
+      exRecs = unclashed exRecs0
+      exDatas = unclashed exDatas0
+      exVars = unclashed exVars0
+      exEnumCands = unclashed exEnums0
+      extraNames = Set.unions [Map.keysSet exRecs, Map.keysSet exDatas, Map.keysSet exVars, Map.keysSet exEnumCands]
+  let varCands = Map.fromList [(gv, arms) | (FV gv _, _, arms) <- varOccs, eligible gv] <> exVars
+      varAllArms = Map.fromListWith (<>) [(gv, [arms]) | (FV gv _, _, arms) <- varOccs]
+      enumCands = Map.fromList [(gv, ns) | (FV gv _, ns) <- enumOccs, eligible gv] <> exEnumCands
+      recCands' = recCands <> exRecs
+      dataCands' = dataCands <> exDatas
+      qualified gv = maybe (unTVar gv) (\h -> qualifiedCppName h) (Map.lookup gv homes)
+      -- A record not in its module's header is defined in the pool, after
+      -- the sourced files, under a pool-private name (GEN-10).
+      -- One flat namespace per module, at global scope, so no name a field
+      -- spells unqualified (`geom::Point`) resolves inside it.
+      privateName gv = "::" <> maybe ("mlc_pool_::" <> tvarIdentifier gv) (\h -> "mlc_pool_" <> encodeModulePath (typeHomePath h) <> "::" <> typeHomeName h) (Map.lookup gv homes)
+      install cands = do
+        let names = Map.fromList [(gv, qualified gv) | gv <- Set.toList cands]
+        CMS.modify $ \s -> s
+          { translatorPublic = names
+          , translatorRecords = recDefs
+          , translatorRecordNames = Map.mapWithKey (\gv _ -> Map.findWithDefault (privateName gv) gv names) recDefs
+          , translatorHandles =
+              Map.fromList [(gv, gdFields gd) | (gv, gd) <- Map.toList recDefs, Set.member gv recursive]
+          }
+        return (Set.fromList (Map.elems names))
+      fieldTypes gv
+        | Just gd <- Map.lookup gv recDefs = map snd (gdFields gd)
+        | Just arms <- Map.lookup gv varCands = concatMap snd arms
+        | Just dd <- Map.lookup gv ddefs = concatMap snd (ddArms dd)
+        | otherwise = []
+      -- Every occurrence of a variant must render the same arms for the
+      -- header to declare them; one that does not stays in the pool, whose
+      -- merge reports the conflict.
+      agrees gv = case Map.lookup gv varAllArms of
+        Just occs -> (== 1) . length . unique <$> mapM (mapM (\(c, ts) -> (,) c . map render <$> mapM cppTypeOf ts)) occs
+        Nothing -> return True
+      -- Which types the header holds follows from the declarations alone
+      -- (GEN-10).
+      generated = Set.unions [Map.keysSet recDefs, Set.fromList [gv | (FV gv _, _, _) <- allVarOccs], Set.fromList [gv | (FV gv _, _) <- enumOccs], extraNames]
+      fieldsOf drop' =
+        Map.fromList $
+          [(gv, map snd (gdFields gd)) | (gv, gd) <- Map.toList recCands']
+            <> [(gv, concatMap snd arms) | (gv, arms) <- Map.toList varCands, Set.notMember gv drop']
+            <> [(gv, concatMap snd (ddArms dd)) | (gv, dd) <- Map.toList dataCands']
+            <> [(gv, []) | gv <- Map.keys enumCands]
+      place drop' = placeTypes (headerSafe (Map.keysSet depRoots) Set.empty) generated (fieldsOf drop')
+  _ <- install (place Set.empty)
+  -- Every occurrence of a variant must render the same arms for the header
+  -- to declare them; one that does not stays in the pool, whose merge
+  -- reports the conflict. Rendering here is planning: its errors are the
+  -- final render's to report.
+  errors0 <- CMS.gets translatorErrors
+  disagreeing <- Set.fromList <$> filterM (fmap not . agrees) (Map.keys varCands)
+  CMS.modify $ \s -> s {translatorErrors = errors0}
+  let public = place disagreeing
+  _ <- install public
+  -- The unused types placed in a header are rendered as the used ones are.
+  CMS.modify $ \s -> s
+    { translatorHandles = translatorHandles s <> Map.fromList [(gv, gdFields gd) | (gv, gd) <- Map.toList exRecs, selfRef gd, Set.member gv public]
+    , translatorVariantNames = translatorVariantNames s <> Set.intersection public (Map.keysSet exVars)
+    }
+  mapM_ (checkComponents homes) (Set.toList (Set.union (Set.difference public extraNames) (Map.keysSet recDefs)))
+  mapM_ checkFields (Map.elems recDefs)
+  -- Every use of a generated record is an instance of its definition
+  -- (GEN-9). A user-mapped record's unpacked use is a tuple in C++, never
+  -- its form.
+  uses <- CMS.gets translatorRecordUses
+  forM_ (disagreements recDefs uses) $ \(gv, d) -> case d of
+    FieldDiffers k decl use -> do
+      dr <- render <$> cppTypeOf decl
+      ur <- render <$> cppTypeOf use
+      complain ("the generated C++ type for " <> unTVar gv <> " cannot serve one of its uses: its field `" <> unKey k
+                 <> "` is `" <> ur <> "` there but `" <> dr <> "` in the definition; give " <> unTVar gv
+                 <> " a C++ form, `record Cpp => " <> unTVar gv <> " = \"...\"`")
+    Unmatched e -> complain ("the generated C++ type for " <> unTVar gv <> " cannot serve one of its uses: " <> e)
+  checkCollisions
+    [ (n, unTVar gv)
+    | gv <- Set.toList public
+    , n <- qualified gv : [qualified gv <> "_fields" | Set.member gv recursive]
+        <> [CP.armNameText (qualified gv) c | Just arms <- [Map.lookup gv varCands], (c, _) <- arms]
+        <> [CP.armNameText (qualified gv) c | Just dd <- [Map.lookup gv dataCands'], (c, _) <- ddArms dd]
+    ]
+  let byPath = Map.fromListWith (<>) [(typeHomePath h, [gv]) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
+      pathOf = Map.fromList [(qualified gv, typeHomePath h) | gv <- Set.toList public, Just h <- [Map.lookup gv homes]]
+  handles <- CMS.gets translatorHandles
+  templates <- (<> exRecs) <$> CMS.gets translatorRecords
+  mapM (header homes recCands' templates varCands enumCands pathOf handles exDatas) (Map.toList byPath)
+  where
+    header homes recCands templates varCands enumCands pathOf handles exDatas (path, gvs) = do
+      depRoots <- CMS.gets translatorDepNamespaces
+      let leaf gv = pretty (maybe (unTVar gv) typeHomeName (Map.lookup gv homes))
+          enums = [CP.printCppEnumDecl (leaf gv) ns | gv <- gvs, Just ns <- [Map.lookup gv enumCands]]
+      ddefs <- (<> exDatas) <$> CMS.gets translatorDataDefs
+      let variantOf gv = case Map.lookup gv varCands of
+            Just arms -> Just ([], arms)
+            Nothing -> (\dd -> (map (pretty . nativeParam) (nativeDataParams dd), ddArms dd)) <$> Map.lookup gv ddefs
+      variants <- sequence
+        [ (\arms' -> (CP.printCppVariantDecl params (leaf gv) arms', CP.printCppVariantArms params (leaf gv) arms', concatMap snd arms'))
+            <$> mapM (\(c, ts) -> (,) c <$> mapM cppTypeOf ts) arms
+        | gv <- gvs, Just (params, arms) <- [variantOf gv] ]
+      -- A record that refers to itself is a handle to its fields (CPP-6).
+      let structOf gv = if Map.member gv handles then leaf gv <> "_fields" else leaf gv
+      let paramsOf gv = [pretty (nativeParam p) | Just gd <- [Map.lookup gv templates], p <- nativeParams gd]
+          fieldsOf gv = gdFields <$> Map.lookup gv templates
+      records <- sequence
+        [ (\fields -> (gv, CP.printStructTypedef (paramsOf gv) (structOf gv) (Map.notMember gv handles) fields, map snd fields))
+            <$> mapM (\(k, t) -> (,) (pretty k) <$> cppTypeOf t) fs
+        | gv <- gvs, Just fs <- [fieldsOf gv] ]
+      let recNames = Map.fromList [(qualifiedCppName h, gv) | (gv, _, _) <- records, Just h <- [Map.lookup gv homes]]
+          -- A record holds the records its fields name by value, so those
+          -- are declared first.
+          ordered =
+            Graph.flattenSCCs . Graph.stronglyConnComp $
+              [ (decl, gv, [d | tok <- concatMap (cppTokens . render) ts, Just d <- [Map.lookup tok recNames], d /= gv, Map.notMember d handles])
+              | (gv, decl, ts) <- records ]
+          used = concatMap (cppTokens . render) (concat [ts | (_, _, ts) <- records] <> concat [ts | (_, _, ts) <- variants])
+          deps = Set.toList (Set.fromList [p | tok <- used, Just p <- [Map.lookup tok pathOf], p /= path])
+          handleGvs = [gv | (gv, _, _) <- records, Map.member gv handles]
+          decls =
+            [ vsep enums
+            , vsep [w | (w, _, _) <- variants]
+            , vsep [hsep (filter (not . T.null . render) [CP.printTemplateHeader (paramsOf gv), "struct" <+> structOf gv <> ";"]) | (gv, _, _) <- records]
+            , vsep [CP.printHandleDecl (paramsOf gv) (leaf gv) | gv <- handleGvs]
+            , vsep ordered
+            , vsep [CP.printHandleDefs [] (leaf gv) | gv <- handleGvs, null (paramsOf gv)]
+            , vsep [a | (_, a, _) <- variants]
+            ]
+          -- Only the standard headers that declare a name the definitions use.
+          declTokens = cppTokens (render (vsep decls))
+          stdHeaders =
+            Set.toList . Set.fromList $
+              [ h
+              | tok <- declTokens
+              , Just h <- [Map.lookup (fromMaybe tok (T.stripPrefix "::" tok)) cppStdHeaderOf]
+              ]
+          -- The headers of the dependencies whose names the definitions use.
+          depHeaders =
+            unique
+              [ i
+              | tok <- declTokens
+              , T.isInfixOf "::" tok
+              , Just (_, is) <- [Map.lookup (nameRoot tok) depRoots]
+              , i <- is
+              ]
+          body =
+            vsep $
+              [ "// Generated by morloc; do not edit."
+              , "#pragma once"
+              ]
+                <> ["#include <" <> pretty h <> ">" | h <- stdHeaders]
+                <> ["#include <" <> pretty h <> ">" | h <- depHeaders]
+                -- A handle's node comes from the pool's allocator where one is
+                -- available (STATE-8).
+                <> (if null handleGvs then [] else ["#if __has_include(<mlc_rec.hpp>)", "#include <mlc_rec.hpp>", "#endif"])
+                <> ["#include" <+> dquotes (pretty (cppHeaderPath p)) | p <- deps]
+                <> ["namespace mlc::types::" <> pretty (T.intercalate "::" path) <+> "{"]
+                <> decls
+                <> ["}", ""]
+      return (path, render body)
+
+    -- A generated type's namespace and fields must be spellable in C++
+    -- (GEN-5), and no two generated names may coincide.
+    complain msg = CMS.modify $ \s -> s {translatorErrors = msg : translatorErrors s}
+    checkComponents homes gv =
+      mapM_
+        (\c -> complain ("the generated C++ type for " <> unTVar gv <> " cannot be written: its namespace would hold `"
+                          <> c <> "`, which is not an identifier, is a C++ keyword, or is a namespace the generated code names"))
+        [c | Just h <- [Map.lookup gv homes], c <- typeHomePath h, Set.member c cppReservedComponents || not (isIdentifier c)]
+    checkFields gd =
+      mapM_
+        (\k -> complain ("the generated C++ type for " <> unTVar (gdVar gd) <> " cannot be written: `" <> k <> "` is a C++ keyword"))
+        [unKey k | (k, _) <- gdFields gd, Set.member (unKey k) cppKeywords]
+    checkCollisions named =
+      mapM_
+        (\(n, owners) -> complain ("the generated C++ name " <> n <> " would name both " <> T.intercalate " and " owners))
+        [(n, os) | (n, os) <- Map.toList (Map.fromListWith (flip (<>)) [(n, [o]) | (n, o) <- named]), length os > 1]
+
+-- | The generated records' names and definitions, the closure's unused ones
+-- included under their public names, which only their modules' headers
+-- spell (GEN-6).
+recordsWithExtras :: CppTranslator (Map.Map TVar Text, Map.Map TVar GenDef)
+recordsWithExtras = do
+  names <- CMS.gets translatorRecordNames
+  records <- CMS.gets translatorRecords
+  extras <- CMS.gets (exRecords . translatorExtras)
+  homes <- CMS.gets translatorTypeHomes
+  let extraNames = Map.fromList [(g, qualifiedCppName h) | g <- Map.keys extras, Just h <- [Map.lookup g homes]]
+  return (names <> extraNames, records <> extras)
+
+-- | The qualified C++ name of a generated type (GEN-4).
+qualifiedCppName :: TypeHome -> Text
+qualifiedCppName h = "::mlc::types::" <> T.intercalate "::" (typeHomePath h <> [typeHomeName h])
+
+-- | Where a module's generated header lives below @types/cpp@, which is how
+-- a sourced file includes it (GEN-6).
+cppHeaderPath :: [Text] -> Text
+cppHeaderPath p = "mlc/types/" <> T.intercalate "/" p <> ".hpp"
+
+-- | The names in a rendered C++ type: identifiers with their @::@
+-- qualifiers, and numbers.
+cppTokens :: Text -> [Text]
+cppTokens = filter (not . T.null) . T.split (\c -> not (DC.isAlphaNum c || c == '_' || c == ':'))
+
+-- | Whether a rendered field type can be written in a header that comes
+-- before every sourced file: each name in it is a builtin, from the
+-- standard library, under one of the given dependency namespaces (GEN-7),
+-- or one of the given names (generated types and the definition's own
+-- parameters).
+headerSafe :: Set.Set Text -> Set.Set Text -> Text -> Bool
+headerSafe roots known = all ok . cppTokens
+  where
+    ok t
+      | Set.member t known = True
+      | T.isInfixOf "::" t && Set.member (nameRoot t) roots = True
+      | "::mlc::types::" `T.isPrefixOf` t = False
+      | "std::" `T.isPrefixOf` t = Set.member t cppStdTypeNames
+      | T.all DC.isDigit t = True
+      | otherwise = Set.member t cppBuiltinTypeWords
+
+cppBuiltinTypeWords :: Set.Set Text
+cppBuiltinTypeWords =
+  Set.fromList
+    [ "int", "double", "float", "bool", "char", "long", "short", "unsigned", "signed", "void", "const"
+    , "size_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t"
+    , "char8_t", "char16_t", "char32_t", "wchar_t"
+    ]
+
+-- | The standard names a generated header may use: those it knows a header
+-- for ('cppStdHeaderOf').
+cppStdTypeNames :: Set.Set Text
+cppStdTypeNames = Set.filter ("std::" `T.isPrefixOf`) (Map.keysSet cppStdHeaderOf)
+
+-- | The standard header declaring each standard name a generated header may
+-- use, and each fixed-width integer name it may write unqualified.
+cppStdHeaderOf :: Map.Map Text Text
+cppStdHeaderOf =
+  Map.fromList $
+    [ ("std::" <> n, h)
+    | (h, ns) <-
+        [ ("string", ["string"])
+        , ("vector", ["vector"])
+        , ("array", ["array"])
+        , ("deque", ["deque"])
+        , ("list", ["list"])
+        , ("map", ["map", "multimap"])
+        , ("set", ["set", "multiset"])
+        , ("unordered_map", ["unordered_map"])
+        , ("unordered_set", ["unordered_set"])
+        , ("tuple", ["tuple"])
+        , ("utility", ["pair", "move", "forward"])
+        , ("optional", ["optional"])
+        , ("variant", ["variant", "monostate"])
+        , ("memory", ["shared_ptr", "unique_ptr", "make_shared"])
+        , ("type_traits", ["is_same_v", "conditional_t", "is_scalar_v"])
+        , ("functional", ["function"])
+        , ("cstddef", ["size_t", "ptrdiff_t", "nullptr_t", "byte"])
+        , ("cstdint", fixedWidth)
+        ]
+    , n <- ns
+    ]
+      <> [(n, "cstdint") | n <- fixedWidth]
+      <> [("size_t", "cstddef")]
+  where
+    fixedWidth = ["int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t"]
+
+-- | Words a generated namespace component may not be (GEN-5): C++
+-- keywords, and the namespaces a generated header names without
+-- qualification, which a namespace of that name would capture.
+cppReservedComponents :: Set.Set Text
+cppReservedComponents = Set.insert "std" (Set.insert "mlc" cppKeywords)
+
+-- | C++ keywords, which no generated field may be (GEN-5).
+cppKeywords :: Set.Set Text
+cppKeywords =
+  Set.fromList
+    [ "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break", "case"
+    , "catch", "char", "char8_t", "char16_t", "char32_t", "class", "compl", "concept", "const", "consteval"
+    , "constexpr", "constinit", "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype"
+    , "default", "delete", "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern"
+    , "false", "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace"
+    , "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected"
+    , "public", "register", "reinterpret_cast", "requires", "return", "short", "signed", "sizeof"
+    , "static", "static_assert", "static_cast", "struct", "switch", "template", "this", "thread_local"
+    , "throw", "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual"
+    , "void", "volatile", "wchar_t", "while", "xor", "xor_eq"
+    ]
+
 -- | The struct, the marshaller signatures, and the marshaller definitions
 -- for every generated record, returned apart so the signatures can precede
 -- every definition in the pool.
-generateAnonymousStructs :: CppTranslator ([MDoc], [MDoc], [MDoc])
-generateAnonymousStructs = do
-  recmap <- CMS.gets translatorRecmap
-
-  xs <- mapM makeSerializers (reverse . map snd $ recmap)
-
-  return (concatMap (\(d, _, _) -> d) xs, concatMap (\(_, f, _) -> f) xs, concatMap (\(_, _, x) -> x) xs)
+-- | The generated records of the pool (GEN-9): the definition of each one
+-- its module's header does not hold, in the pool after the sourced files
+-- (GEN-10); the declaration of every record's marshalling node; and, late,
+-- the conversions of its fields (GEN-14) and the node's steps.
+generateRecords :: LowerConfig CppTranslatorM -> [SerialAST] -> CppTranslator ([MDoc], [MDoc], [MDoc])
+generateRecords cfg asts = do
+  records <- CMS.gets translatorRecords
+  names <- CMS.gets translatorRecordNames
+  public <- CMS.gets translatorPublic
+  handles <- CMS.gets translatorHandles
+  let objects = unique [o | a <- asts, o <- generatedObjectsIn a]
+  fieldModes <- concat <$> mapM objectConvs objects
+  let convs = [(gv, rt, i, doc) | (gv, rt, i, _, _, Just doc) <- fieldModes]
+      -- An instance of a template whose field converts at some instance
+      -- says so for this one too, so a missed instance does not compile.
+      noConvs =
+        unique
+          [ render (CP.printFieldNoConv rt i)
+          | (gv, rt, i, _, _, Nothing) <- fieldModes
+          , Just gd <- [Map.lookup gv records]
+          , not (null (nativeParams gd))
+          , Set.member (gv, i) convertingFields
+          ]
+      convertingFields = Set.fromList [(g, j) | (g, _, j, _) <- convs]
+  -- Two uses that are one C++ type must convert a field the same way, and
+  -- writing a field as it is held is one of those ways: a conversion
+  -- specialised for the type applies to every use of it. Two fields convert
+  -- the same way when their serial forms are one.
+  let byKey = Map.fromListWith (flip (<>)) [((render rt, i), [((gv, k), (fa, doc))]) | (gv, rt, i, k, fa, doc) <- fieldModes]
+  sequence_
+    [ complainCpp
+        ( "the generated C++ type " <> rt <> " is used at two morloc types that convert its field `"
+            <> unKey k <> "` differently, so one C++ type cannot hold both; give " <> unTVar gv
+            <> " a C++ form, `record Cpp => " <> unTVar gv <> " = \"...\"`"
+        )
+    | ((rt, _), docs@(((gv, k), _) : _)) <- Map.toList byKey
+    , length (unique [if isJust doc then Just fa else Nothing | (_, (fa, doc)) <- docs]) > 1
+    ]
+  let specs = unique ([render doc | (_, _, _, doc) <- convs] <> noConvs)
+      converting = Map.fromListWith Set.union [(gv, Set.singleton i) | (gv, _, i, _) <- convs]
+      nameOf gv = pretty (Map.findWithDefault (unTVar gv) gv names)
+      paramsOf gd = map (pretty . nativeParam) (nativeParams gd)
+      rtypeOf gd = nameOf (gdVar gd) <> CP.printRecordTemplate (paramsOf gd)
+      modeOf gd i
+        | Set.member i (Map.findWithDefault Set.empty (gdVar gd) converting) =
+            if null (nativeParams gd) then CP.AlwaysConv else CP.ConvByInstance
+        | otherwise = CP.NoConv
+  private <- privateDecls [gd | gd <- Map.elems records, Map.notMember (gdVar gd) public]
+  let fwds = [CP.printMarshalDecls (paramsOf gd) (rtypeOf gd) | gd <- Map.elems records]
+      steps =
+        [ CP.printRecordMarshallers (Map.member (gdVar gd) handles) (paramsOf gd) (rtypeOf gd)
+            [(pretty k, modeOf gd i) | (i, (k, _)) <- indexed (gdFields gd)]
+        | gd <- Map.elems records ]
+  return (private, fwds, map pretty specs <> steps)
   where
-    makeSerializers :: RecEntry -> CppTranslator ([MDoc], [MDoc], [MDoc])
-    makeSerializers rec = do
-      let templateTerms = map (("T" <>) . pretty) ([1 ..] :: [Int])
-          rs' = zip templateTerms (recFields rec)
+    complainCpp msg = CMS.modify $ \st -> st {translatorErrors = msg : translatorErrors st}
 
-      let params = [t | (t, (_, Nothing)) <- rs']
-          rname = recName rec
-          rtype = rname <> CP.printRecordTemplate [v | (v, (_, Nothing)) <- rs']
+    -- Every generated record a value of this type holds, at any depth.
+    generatedObjectsIn :: SerialAST -> [SerialAST]
+    generatedObjectsIn a = [o | o <- serialSubtrees a, generatedObject o]
 
-      let fieldNames = [k | (_, (k, _)) <- rs']
+    -- The conversion of each field of one instance that is not written as
+    -- it is held: a packed value or a closure outside any nested
+    -- generated record, which converts itself.
+    objectConvs obj@(SerialObject _ (FV gv _) _ rs) = do
+      rt <- cppTypeOf (serialAstToNativeType obj)
+      mapIndexedM (\i (k, fa) -> (\d -> (gv, rt, i, k, fa, d)) <$> fieldConv rt i fa) rs
+    objectConvs _ = return []
 
-      fieldTypes <- mapM (\(t, v) -> maybeM t cppTypeOf v) [(t', v') | (t', (_, v')) <- rs']
+    fieldConv rt i fa
+      | not (fieldConverts fa) = return Nothing
+      | otherwise = do
+          (toStmts, toE) <- nativeToWire cfg "mlc_x" fa
+          (fromE, fromStmts) <- wireToNative cfg "mlc_r" fa
+          raw <- maybe (cppTypeOf (unpackedAsTypeF (wireSerialAstToType cppClosureWireLeaf fa))) (return . renderIType)
+                   =<< lcRawDeserialAstType cfg fa
+          native <- cppTypeOf (serialAstToNativeType fa)
+          return . Just $
+            CP.printFieldConv rt i native raw
+              (map CP.printStmt toStmts, CP.printExpr toE)
+              (map CP.printStmt fromStmts, CP.printExpr fromE)
 
-      let fields = [(pretty k, v) | (k, v) <- zip fieldNames fieldTypes]
+    -- The definitions of records the header does not hold, each in its
+    -- pool-private namespace, ordered so that a record follows those it
+    -- holds by value.
+    privateDecls gds = do
+      names <- CMS.gets translatorRecordNames
+      handles <- CMS.gets translatorHandles
+      let split gd =
+            let q = Map.findWithDefault (unTVar (gdVar gd)) (gdVar gd) names
+                (ns, leaf) = T.breakOnEnd "::" (fromMaybe q (T.stripPrefix "::" q))
+             in (fromMaybe ns (T.stripSuffix "::" ns), leaf)
+          inNs gd doc = let (ns, _) = split gd in vsep ["namespace" <+> pretty ns <+> "{", doc, "}"]
+          leafOf gd = pretty (snd (split gd))
+          handle gd = Map.member (gdVar gd) handles
+          structOf gd = if handle gd then leafOf gd <> "_fields" else leafOf gd
+          params gd = map (pretty . nativeParam) (nativeParams gd)
+      decls <- mapM (\gd -> (\fs -> (gd, CP.printStructTypedef (params gd) (structOf gd) (not (handle gd)) fs, map snd fs)) <$> mapM (\(k, t) -> (,) (pretty k) <$> cppTypeOf t) (gdFields gd)) gds
+      let byName = Map.fromList [(Map.findWithDefault "" (gdVar gd) names, gdVar gd) | gd <- gds]
+          ordered =
+            Graph.flattenSCCs . Graph.stronglyConnComp $
+              [ (inNs gd decl, gdVar gd, [d | tok <- concatMap (cppTokens . render) ts, Just d <- [Map.lookup tok byName], d /= gdVar gd, Map.notMember d handles])
+              | (gd, decl, ts) <- decls ]
+      return $
+        [inNs gd (hsep (filter (not . T.null . render) [CP.printTemplateHeader (params gd), "struct" <+> structOf gd <> ";"])) | gd <- gds]
+          <> [inNs gd (CP.printHandleDecl (params gd) (leafOf gd)) | gd <- gds, handle gd]
+          <> ordered
+          <> [inNs gd (CP.printHandleDefs [] (leafOf gd)) | gd <- gds, handle gd, null (params gd)]
 
-      let structDecl = CP.printStructTypedef params rname fields
-          fwd = CP.printMarshalDecls params rtype
-          serializer = CP.printSerializer params rtype fields
-          deserializer = CP.printDeserializer params rtype fields
-
-      return ([structDecl], [fwd], [serializer, deserializer])
-
-    -- monadic form of `maybe` function
-    maybeM :: (Monad m) => a -> (b -> m a) -> Maybe b -> m a
-    maybeM _ f (Just x) = f x
-    maybeM x _ Nothing = return x
+-- | A newtype with no parameters whose C++ form is a struct's name, over a
+-- record with no parameters, holds the record's fields under its own form:
+-- the entry its marshaller is made from. (`newtype Forest = Tree` with
+-- `type Cpp => Forest = "forest_t"`.)
+newtypeRecords :: Scope -> Scope -> Scope
+newtypeRecords gscope cscope = Map.fromList
+  [ (v, [([], NamU o (TV form) [] rs, doc, b, kind)])
+  | (v, [([], VarU (TV form), doc, b, kind)]) <- Map.toList cscope
+  , ([], VarU r, _, _, TypedefNewtype) : _ <- [Map.findWithDefault [] v gscope]
+  , ([], NamU o _ [] rs, _, _, _) : _ <- [Map.findWithDefault [] r cscope]
+  ]
 
 generateSourcedSerializers ::
   Map.Map Lang Scope ->
@@ -2543,9 +3872,10 @@ generateSourcedSerializers univeralScopeMap es0 = do
   -- named records referenced in its manifolds, closed under the records
   -- their fields name. A marshaller for a record no manifold references
   -- would name a struct whose header no source pulls in.
-  gscope <- CMS.gets translatorGScope
-  let keep = closeRecordDeps scope (Set.unions (map (collectNamedRecordTVars gscope) es0))
-      typedef = Map.filterWithKey (\k entries -> Set.member k keep && not (null entries)) scope
+  newtypes <- CMS.gets translatorNewtypeRecords
+  let scope' = Map.union newtypes scope
+      keep = closeRecordDeps scope' (Set.unions (map (collectNamedRecordTVars) es0))
+      typedef = Map.filterWithKey (\k entries -> Set.member k keep && not (null entries)) scope'
 
   foldl groupTriple ([], [], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where
@@ -2612,19 +3942,15 @@ generateSourcedSerializers univeralScopeMap es0 = do
           -- format's relptr-based Optional and sidestepping C++'s
           -- incomplete-type rule for `optional<T>` inside T's body).
           --
-          -- Each TYPE-kinded entry in @ps@ maps to one positional slot
-          -- in the concrete name's @$N@ macro expansion. Kind-kinded
-          -- entries (Nat phantom dims, type-level strings) are skipped:
-          -- @$N@ counts type parameters only. Left positions become
-          -- template type variables (T<a>); Right positions are
-          -- concrete bindings selected by @selectSpecialization@ (e.g.
-          -- a @record Cpp => Foo Int@ entry) and render through
-          -- showDefType to their C++ name.
-          isTypeParam (Left (_, KindNat)) = False
-          isTypeParam (Left (_, KindStr)) = False
-          isTypeParam _ = True
+          -- Each type parameter fills one positional slot of the concrete
+          -- name's @$N@ macro; kind parameters (Nat, Str, Rec, ...) fill
+          -- none. Left positions become template type variables (T<a>);
+          -- Right positions are concrete bindings selected by
+          -- @selectSpecialization@ (e.g. a @record Cpp => Foo Int@ entry)
+          -- and render through showDefType to their C++ name.
+          isTypeParam (Left (_, k)) = k == KindType
+          isTypeParam (Right t) = isNothing (kindOfU t)
           typeParamSlots = filter isTypeParam ps
-          kindCount = length ps - length typeParamSlots
           paramAt (Left (p, _)) = "T" <> pretty p
           paramAt (Right t) = showDefType selfName ps (typeOf (evaluateTypeU scope t))
           allParams = map paramAt typeParamSlots
@@ -2640,7 +3966,7 @@ generateSourcedSerializers univeralScopeMap es0 = do
           -- `<a0, ...>` appended. Without this branching, a templated
           -- concrete name would lower to `container_t<$1><T0>` and the
           -- serializer signature would fail to compile.
-          rtype = renderTemplatedType v allParams kindCount
+          rtype = renderTemplatedType v allParams
           rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType selfName ps (typeOf t)) | (k, t) <- rs']
           fwd = CP.printMarshalDecls templateTerms rtype
@@ -2681,22 +4007,14 @@ generateSourcedSerializers univeralScopeMap es0 = do
     -- `std::shared_ptr<container_t>` (no template args) and the generated
     -- deserializer would fail to compile.
     showDefType self ps (NamT _ (TV v) args _) =
-      let (typeArgs, kindCount) = partitionKindArgs kindOfT args
+      let typeArgs = tyArgs args
           argDocs = [showDefType self ps a | a <- typeArgs]
-      in renderTemplatedType v argDocs kindCount
-    showDefType _ _ (NatLitT _) = mempty
-    showDefType _ _ (VoidT _) = mempty
+      in renderTemplatedType v argDocs
     showDefType self ps (AppT (VarT (TV v)) ts) =
-      let (typeTs, kindCount) = partitionKindArgs kindOfT ts
-      in pretty $ expandMacro v (map (render . showDefType self ps) typeTs) kindCount
+      let typeTs = tyArgs ts
+      in pretty $ expandMacro v (map (render . showDefType self ps) typeTs)
     showDefType _ _ (AppT _ _) = error "AppT is only OK with VarT, for now"
     showDefType _ _ (EffectT _ _) = error "Cannot serialize suspensions"
-    showDefType _ _ (NatAddT _ _) = mempty
-    showDefType _ _ (NatMulT _ _) = mempty
-    showDefType _ _ (NatSubT _ _) = mempty
-    showDefType _ _ (NatDivT _ _) = mempty
-    showDefType _ _ (StrLitT _) = mempty
-    showDefType _ _ (StrConcatT _ _) = mempty
     showDefType self ps (OptionalT t)
       | isRecursiveRef self t =
           "std::shared_ptr<" <> showDefType self ps t <> ">"
@@ -2709,12 +4027,18 @@ handleFlagsAndPaths :: [Source] -> MorlocMonad ([Source], [Text], [Path])
 handleFlagsAndPaths srcs = do
   state <- MM.get
   let gccversion = gccVersionFlag . foldl max 0 . map packageCppVersion $ statePackageMeta state
-  let explicitLibs = map ("-l" <>) . unique . concatMap packageDependencies $ statePackageMeta state
-  let userCxxFlags = unique . concatMap packageCxxFlags $ statePackageMeta state
+  let quoteArg = MT.pack . MS.shellQuote . MT.unpack
+  -- PKG-12: every cpp-deps entry's link names.
+  let explicitLibs = map (quoteArg . ("-l" <>)) . unique . concatMap (concat . Map.elems . packageCppLibs) $ statePackageMeta state
+  -- PKG-15: each entry is one argument.
+  let userCxxFlags = map quoteArg . unique . concatMap packageCxxFlags $ statePackageMeta state
   -- Raw `-X cpp:flags=...` (and the build-config default) passthrough: ordered,
-  -- verbatim, never deduplicated, appended after the package flags. Kept out of
+  -- never deduplicated, appended after the package flags. Kept out of
   -- `unique` because flag order and adjacency are load-bearing.
-  let cliCxxFlags = BP.lookupFlags "cpp" (stateLangParams state)
+  let cliCxxFlags = map quoteArg (BP.lookupFlags "cpp" (stateLangParams state))
+  let guestArgs = map (MT.pack . MS.shellQuote) (stateGuestObjects state) <> map quoteArg (stateGuestLinkFlags state)
+  -- PKG-13: the environment's headers and libraries, after morloc's own.
+  let envFlags = maybe [] (SC.prefixFlags P.hostPlatform) (stateEnvPrefix state)
   -- Collect sources belonging to this pool: cpp sources and any guest member
   -- whose pool host is cpp (e.g. futhark glue headers, srcLang=futhark). Their
   -- includes/-I flags must reach the cpp pool build.
@@ -2746,7 +4070,7 @@ handleFlagsAndPaths srcs = do
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
       -- guarantees it loads the same libmorloc the nexus resolved. The
       -- state/modules/lib search dir covers a user library referenced by a
-      -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
+      -- `-l` from cxx-flags; its runtime load is likewise handled
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
       -- -rdynamic exports the pool's own symbols, so the crash handler's
       -- backtrace names generated manifolds rather than printing offsets.
@@ -2754,7 +4078,7 @@ handleFlagsAndPaths srcs = do
 
   return
     ( filter (isJust . srcPath) srcs'
-    , [gccversion] <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
+    , [gccversion] <> guestArgs <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ map MT.pack (mlcPch <> mlcInclude <> mlcLib) <> envFlags <> map MT.pack (concat libflags)
     , unique (catMaybes paths <> moduleDirs)
     )
 
@@ -2913,3 +4237,7 @@ getLibraryPaths home state base sofile =
 -- (de)serializer.
 holdsClosure :: Type -> Bool
 holdsClosure t = containsFunT t || containsEffectT t
+
+-- | C++ locals take no prefix: C++ reserves none (model/runtime/issues/binder-names.md).
+cppLocals :: Text
+cppLocals = ""

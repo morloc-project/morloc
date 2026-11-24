@@ -559,6 +559,20 @@ if should_run "render"; then
     assert_http_status "POST /call/echo?render=a&render=b -> 400" "400" \
         "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout&render=plain" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
+    # A streamed render reaches a caller only from the command line
+    # (DAEMON-15); a whole render of the same handler is served.
+    assert_http_status "POST /call/pieces?render=text (@stream) -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/pieces?render=text" \
+        -X POST -H "Content-Type: application/json" -d '[1]'
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/pieces?render=text" \
+        -H "Content-Type: application/json" -d '[1]')
+    assert_contains "?render=text refusal says it streams" "streams its output" \
+        "$(json_field "$result" "error")"
+    curl -s -o "$RENDER_DIR/w.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/pieces?render=whole" \
+        -H "Content-Type: application/json" -d '[1]'
+    assert_test "?render=whole of the same handler is served" "20,21,30,31,32," \
+        "$(cat "$RENDER_DIR/w.body")"
     stop_daemon "$LAST_DAEMON_PID"
 
     # The socket protocol: a bare call is the own value; a selection is
@@ -596,6 +610,9 @@ if should_run "render"; then
         '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"guarded","arguments":{"_1":"toolong"}}}' \
         '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"readFrom","arguments":{"_1":"-"}}}' \
         '{"jsonrpc":"2.0","id":9,"method":"ping"}' \
+        '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"pieces","arguments":{"_1":1,"_render":"text"}}}' \
+        '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"pieces","arguments":{"_1":1,"_render":"whole"}}}' \
+        '{"jsonrpc":"2.0","id":12,"method":"tools/list"}' \
         | (cd "$RENDER_DIR" && timeout 60 morloc-nexus mcp ./nexus 2>/dev/null))
     mcp_get() {
         echo "$mcp_out" | python3 -c '
@@ -619,6 +636,20 @@ for line in sys.stdin:
     assert_test "MCP pool Err is isError" "True" "$(mcp_get 7 result.isError)"
     assert_test "MCP readFrom - is refused" "True" "$(mcp_get 8 result.isError)"
     assert_test "the MCP session survives it" "{}" "$(mcp_get 9 result)"
+    assert_test "MCP _render=text (@stream) is invalid params" "-32602" "$(mcp_get 10 error.code)"
+    assert_contains "MCP _render=text refusal says it streams" "streams its output" \
+        "$(mcp_get 10 error.message)"
+    assert_test "MCP _render=whole of the same handler is served" "20,21,30,31,32," \
+        "$(mcp_get 11 result.content.0.resource.text)"
+    pieces_desc=$(echo "$mcp_out" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("id") == 12:
+        print([t for t in m["result"]["tools"] if t["name"] == "pieces"][0]["description"])
+')
+    assert_contains "tools/list marks the streamed render CLI-only" \
+        "text: streams its output; runs only from the command line" "$pieces_desc"
 fi
 
 # ======================================================================

@@ -11,42 +11,59 @@
   timeout) leaves it, and later builds have other pids, so none removes it.
   The golden tree holds 8, dated 2026-09-02 to 2026-10-17, two of them
   from a suite run stopped on 2026-10-17.
-- Stale text: `morloc-nexus --help` says launchers pass the wrapper (they
-  pass the manifest); ProgramBuilder/Install.hs names
-  `exe/<name>/manifest.json` (real: `exe/<name>/<name>-build/manifest.json`);
-  schema.rs:39 and data/morloc/morloc.h:161 call Int an array of limbs (one
-  limb is inline); stream.rs:153 says the salt is per process (per
-  registry); morloc.h:436-442 lacks metadata kind 0x08 (FOOTER_STATUS);
-  kind 0x02 is defined and unused.
-- [read] morloc-runtime/src/ipc.rs `send_and_receive`: public, uncalled,
-  underflows `offset - 32`. Delete.
-- **morloc.h expression structs drift from Rust.** [read] The header's
-  `morloc_tag_test_expression_s` holds `subject, constructor` (two
-  expression pointers); `MorlocTagTestExpression` in manifest_ffi.rs holds
-  `subject, tag: u8`. The header has no ctor-field or ctor-make struct and
-  its expression union lacks those members. `c_abi_layout.rs` checks neither
-  struct, so nothing caught it. Fix: mirror both and add them to
-  `expression_structs_match_the_header`.
+- [read, 2026-11-15] A generated record missing from the pool's record
+  map ends the compiler with a Haskell `error`, not a sourced message
+  (CodeGenerator/Pools/CAbi/Members/Cpp.hs `Record missing from recmap`,
+  Rust.hs `record missing from recmap`, and Rust.hs RecF `has no concrete
+  mapping`).
+- [read, 2026-11-15] Dead code: the `IAccess` printers are never reached,
+  nothing builds an `IAccess` (Grammars/Translator/Generic.hs:1254-1259,
+  CppPrinter.hs:86-88, RustPrinter.hs:99-101). The comment at
+  data/lang/py/pymorloc.c:2191-2196 cites a code-generator note that does
+  not exist and calls the variant pair form interim.
+- [read] morloc-runtime/src/ipc.rs is dead code: `send_and_receive` (:25)
+  and `read_packet` are public and uncalled (callers use ipc_ffi.rs), and
+  `read_packet` underflows `offset - 32` (:80). Delete the module.
+- **morloc.h drifts from the Rust runtime and nothing checks it.** [read]
+  The header's `morloc_tag_test_expression_s` (morloc.h:689-692) holds
+  `subject, constructor` (two expression pointers); `MorlocTagTestExpression`
+  (manifest_ffi.rs:247) holds `subject, tag: u8`. The header has no
+  ctor-field or ctor-make struct, and its expression union lacks
+  `ctor_field_expr` and `ctor_make_expr`. morloc.h:436-442 lacks metadata
+  kinds 0x08 FOOTER_STATUS and 0x09 PROGRAM_FILE (runtime-types
+  packet.rs:191, :207); kind 0x02 XXHASH is defined and unused. c_abi_layout.rs
+  `expression_structs_match_the_header` (:525) checks neither struct, and
+  `expression_union_is_wide_enough` (:672) compares only size and
+  alignment, so missing union members pass. Neither side tests that
+  BaseTypes.hs `mlcKind*` (:195-196) equals morloc.h `MLC_KIND_*`. Fix:
+  mirror the structs and kinds, and check members and kinds in tests.
 - **ABI version never gated.** [read] Spec gap: no item covers the ABI
   version. library/Morloc/Abi.hs:18-22 says provisioning compares
   `morloc_abi_version()` and `morloc-nexus --abi-version` against
   `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
-  printed (executable/Subcommands.hs:748) and unit-tested
+  printed (executable/Subcommands.hs:795) and unit-tested
   (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
   calls the gate deferred and relies on one release tag. A runtime built
   from another release's source loads silently. [reproduced] A program
   built before `morloc init` installs a newer runtime keeps its generated
   pool code against the new libraries: after 7205b50c an older R pool fails
   every call with `could not find function ".mlc_entry"`, which the new
-  librmorloc dispatch calls. Nothing marks a built program with the runtime
-  it was built for.
+  librmorloc dispatch calls. LIFE-6 covers only skew within a run (nexus,
+  libmorloc, pymorloc, rmorloc); a built program against a newer runtime is
+  left to the ABI version, which nothing gates.
+- **Init still has windows a concurrent build can see.** [read
+  2026-11-22] Gap beside LIFE-6. `morloc init -f` removes the init-owned
+  lib and include files (SystemConfig.hs, the force clean) before the
+  language init scripts write them again, so a `morloc make` or a Python
+  or R pool started meanwhile finds them missing (a clean failure, not a
+  crash). morloc.h is written in place (`TIO.writeFile`), so a compile
+  during init can read it partly written. Each header is renamed into
+  place, but a C++ build during init can still take some headers old and
+  some new; LIFE-6 checks neither the archive nor the headers.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
-  locked with morloc-runtime" (0.110.1); scripts/bump-version.sh:36 bumps
+  locked with morloc-runtime" (0.112.0); scripts/bump-version.sh:36 bumps
   only nexus, manifest and runtime.
-- **`mlcKind*` agreement with morloc.h untested on the Haskell side.**
-  [read] library/Morloc/BaseTypes.hs:196 requires `mlcKind*` to equal
-  morloc.h `MLC_KIND_*`; no test in test-suite/ compares them.
 - **Rust crates are resolved per pool, outside the environment's solve.**
   [read] Rust pools resolve rust-deps one pool at a time against an
   environment lock the compiler maintains (Build/CargoLock.hs), while
@@ -89,27 +106,53 @@
   with a deprecation warning. Proposal and open questions:
   /work/plans/source-type-forms.md.
 
-- **Sourced files are identified loosely.** [read, d352b5d4] For
-  source-type-forms, which owns per-file scope. Python binds each file to
-  `__morloc_src_<name>`, where `makeNamespace` (Generic.hs) maps `/`, `-`
-  and `.` to `_` and lowercases, so `a-b.py` and `a_b.py`, or `Foo.py` and
-  `foo.py`, share a binding and the later import wins. Rust dedups source
-  paths before canonicalizing them (Rust.hs, the `include!` list), so one
-  file reached by two relative paths is included twice; and the Rust
-  source type-variable mask is keyed by the bare source name, so two files
-  that each define `f` share one mask.
-
+- **The Rust source type-variable mask is keyed by the bare source name.**
+  [read] Two Rust files that each define `f` share one mask (Rust.hs
+  `buildSrcTypeVarMask`). Crate-root `include!` already forbids the two
+  definitions; for source-type-forms, which owns per-file scope.
+- **A sourced file's identity is its spelling, not the file.** [read,
+  2026-11-02; needs a design] Python bindings and import paths are now
+  injective in the written path (case kept, normalised, plane-relative),
+  but identity is still lexical and settled per backend: `sub/../x.py`,
+  a symlink, or an absolute and a relative spelling of one file are two
+  files (loaded twice, or bound under two names); the C++ member includes
+  headers by spelling, source hooks run per spelling, and Nexus source
+  hashes and Realize/EffectBoundary `sameSource` compare raw paths. A
+  Python file with no extension cannot be imported (its path takes the
+  dotted branch). A dotted name resolves under the first source root that
+  has it, so a program `x/h.py` answers for a plane `x/h.py`, and a
+  program file may be found in the run-time working directory. Fixing it
+  needs one identity, settled where a Source is made, and a root model
+  that holds under `morloc install --build` (cwd inside the plane),
+  `--build-dir` and `-o dir/name` builds, and a moved build: an attempt on
+  2026-11-02 that classified roots from the build's working directory made
+  an installed program load from the plane instead of its mirror.
+  [reproduced 2026-11-02, UNSOUND; design in
+  /work/plans/error-clusters/briefs/source-identity-design.md] SRC-8 checks
+  one file while the pool loads another: a `--build-dir` program run from a
+  directory holding a decoy `x.py` loaded the decoy; a `cp -a` copy of a
+  make build loads its own edited `x.py` while SRC-8 checks the original,
+  and refuses to run once the original is moved. By reading, an installed
+  program loads its Python/R code from the plane, not its `exe/<module>`
+  mirror, which SRC-8 records. Python also appends the run-time working
+  directory to `sys.path`, so a sourced file's bare sibling import can be
+  answered from wherever the program runs; R pools have the same
+  fallback. `morloc make -o ../out/prog` with MORLOC_BUILD_HOOK set fails
+  "invalid program name": the `-o` value becomes the program key.
+  `@datafile` paths resolve against the build root, not the declaring
+  module's directory (Reduce.hs).
 - **`cargo clippy` fails on morloc-runtime.** [reproduced 2026-10-15]
   `clippy::not_unsafe_ptr_arg_deref` (deny by default) at
-  morloc-runtime/src/stream.rs `shared_write_subpacket` (3956): a safe
+  morloc-runtime/src/stream.rs `shared_write_subpacket` (:4342): a safe
   public function takes an `AbsPtr` (`*mut u8`) it passes on to
   `voidstar::flatten_portable_in_place`.
   The crate's own lint denials (json.rs casts) go unchecked while this
-  stops the run.
+  stops the run. About 60 safe `pub fn`s in morloc-runtime take raw
+  pointers (heuristic).
 - [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
   fails to compile, leaving the previous libcppmorloc.a installed. Strict
   conda mode now aborts; outside it the shim build is an `optionalStep`
-  that only warns (SystemConfig.hs:319-321).
+  that only warns (SystemConfig.hs:320).
 - [observed once] A `morloc make` run with the current compiler on PATH
   (`~/.local/bin/morloc`, built 2026-10-17) produced a Rust pool whose code
   only morloc 0.100.2 emits (`rustmorloc::FrameGuard`, removed in
@@ -120,19 +163,24 @@
   current compiler. Repro attempt: the #179 program under
   /work/plans/issues-2026-10-05/r5-rust-loop-clone/mapped, built in a new
   directory right after a compiler reinstall.
+- **A killed init leaves hidden staging files.** [read 2026-11-23] Gap
+  beside ART-2. The init scripts stage into `.<name>.tmp.<pid>` beside each
+  header, archive and library, and pymorloc into
+  `opt/.pymorloc-build.<pid>/`, removing them on exit through a trap; a
+  SIGKILL skips the trap, and nothing sweeps them later.
 - **A refused rebuild leaves its staging tree.** [reproduced, 2026-10-21]
   Against ART-2/ART-3. With a plain `q-build/` (no marker) or a symlink
   `r-build`, `morloc make -o q main.loc` fails "Refusing to overwrite
   '.../q-build': not a morloc build directory" and leaves
-  `q-build.tmp.<pid>/`. Build.hs:197 `liftIO $ swapIn ...` raises an
-  IOException (`ioError . userError`, :344) that the MorlocMonad
-  `catchError` (:199) does not catch, so `discardStagingDir` never runs;
+  `q-build.tmp.<pid>/`. Build.hs:198 `liftIO $ swapIn ...` raises an
+  IOException (`ioError . userError`, :345) that the MorlocMonad
+  `catchError` (:200) does not catch, so `discardStagingDir` never runs;
   any IO exception in `buildAll` escapes the same way. Repro: /work/plans/model-audit-2026-10-21/repro/I1/p1/.
 - **A failed owner record leaks an unsweepable run directory.** [read,
-  2026-10-21] morloc-nexus/src/process.rs make_tmpdir (1686-1713): if
-  writing or renaming `.owner.tmp` fails it returns Err after mkdtemp,
-  leaving `/tmp/morloc.XXXXXX`; the startup sweep skips directories without
-  `.owner` (process.rs:1764). Remove the directory on that path.
+  2026-10-21] morloc-nexus/src/process.rs make_tmpdir (:1691, the owner
+  write at :1715-1717): if writing or renaming `.owner.tmp` fails it
+  returns Err after mkdtemp, leaving `/tmp/morloc.XXXXXX`; the startup
+  sweep skips directories without `.owner` (process.rs:1769). Remove the directory on that path.
 - **Strings crossing two runtime-type copies.** [read, 2026-10-23]
   rustmorloc statically links its own copy of morloc-runtime-types beside
   the one in libmorloc.so. Strings and CSchema built by one copy and freed by
@@ -141,3 +189,50 @@
   (malloc_cstr), but a CSchema is Box/CString/Vec. Manifest expression
   strings (manifest_ffi.rs ~815, ~1048, ~1277) are never freed (the nexus
   is short-lived).
+- **`morloc init` rebuilds the runtime unless incremental, whatever `-f`
+  says.** [read 2026-11-04, from mim's list] SystemConfig.hs:181 is
+  `force == ForceOverwrite || not runtimeBuilt || not incremental`; the
+  comments at :172-179 and :327-330 describe other behaviour.
+- **Dead C++ search paths.** [read 2026-11-04, from mim's list]
+  CodeGenerator/Pools/CAbi/Members/Cpp.hs:2876 and :2890-2891 search
+  `STATE/src/<base>/...`, which nothing writes.
+- **The shared Rust target dir grows without bound: pool outputs.**
+  [measured 2026-11-15, again 2026-11-23] Spec gap: model/runtime/artifacts.md
+  says nothing about `STATE/cache/rust-build`, its lifetime or its bound.
+  `makeTheMaker` (CodeGenerator/Pools/CAbi/Members/Rust.hs, target dir
+  ~3830) builds every pool into that one target dir under a crate named
+  `pool_<hash>`, then `cp`s the binary out; nothing ever removes the
+  crate's outputs (`release/pool_X`, `deps/pool_X-*`, `build/pool_X-*`,
+  `.fingerprint/pool_X-*`). Each new build dir (every golden run, every
+  temp dir) adds one crate, median 24 MB, max 352 MB. In the dev env on
+  2026-11-23 the dir was 128 GB: 92 GB of pool binaries in `deps/`
+  (5247, of which 1685 were stale rebuilds of a name, no longer linked
+  from `release/`), 19 GB of `build/pool_*` build-script dirs (4.4 MB
+  each). The top-level `release/pool_*` files are hardlinks into `deps/`,
+  so removing only them frees nothing. `mim clean` (mim ENV-12) removes
+  pool outputs after the fact.
+- **The shared Rust target dir grows without bound: dependency copies.**
+  [measured 2026-11-23] Same spec gap. Libraries took about 22 GB of
+  `deps/` (rlib 16.2, rmeta 3.7, proc-macro .so 2.2), with many builds of
+  each crate: zerocopy 0.8.47 built 26 times with identical features,
+  cf1_rs 36 x ~380 MB, piscem_rs 45, arrow_array 54, morloc_nexus 19.
+  Cargo's per-unit hash covers rustc, profile and the hashes of all
+  dependencies, so a difference anywhere below a crate forks it. Observed
+  sources of difference:
+  - the release profile: `lto` is `thin` by default and `off` in test
+    runs (`rust:lto=off`), and every change to the profile `makeCargoDocs`
+    writes (Rust.hs ~3761: debug, rustflags) starts a new set; zerocopy
+    has 10 rustc/profile combinations dated 09-14 to 11-21;
+  - the rustc version (one upgrade, to 1.99.1, around 11-01);
+  - per-pool resolution: each pool is its own Cargo project with its own
+    Cargo.lock and feature unification, so syn appears with 6 feature
+    sets and 6 versions (1.0.109, 2.0.117, 3.0.5/6/9/10); same-profile
+    zerocopy builds differ only in their zerocopy-derive, which differ
+    only in their syn.
+  Superseded builds are never removed, so this part grows too, slower
+  than pool outputs.
+- **`morloc eval` leaves empty work dirs.** [observed 2026-11-15, cause
+  not found] `MORLOC_HOME/tmp` holds 342 empty `morloc-eval-*` dirs dated
+  2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
+  `bracket`. A SIGKILL (the MCP eval wall-clock kill, memguard) skips a
+  bracket; unconfirmed.

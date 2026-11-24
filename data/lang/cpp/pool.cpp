@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <exception>
 #include <optional>
+#include <atomic>
 #include <fstream>
 #include <system_error>
 #include <unordered_map>
@@ -35,12 +36,19 @@
 
 #include <limits>
 #include <utility>
+#include <typeinfo>
 #include <chrono>
 
 char* g_tmpdir;
 
 uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) __attribute__((sentinel));
 uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs);
+
+#include <memory>
+#include <type_traits>
+
+// CPP-8: the user-facing API, before the sourced headers.
+#include "cppmorloc_api.hpp"
 
 // AUTO include statements start
 // <<<BREAK>>>
@@ -261,15 +269,10 @@ static uint8_t* _dup_packet(const uint8_t* packet) {
 // unconditionally.
 static void _release_packet(const uint8_t* packet, bool owned) {
     if (packet == nullptr) return;
-    const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
-        size_t relptr = *(size_t*)(packet
-            + sizeof(morloc_packet_header_t) + hdr->offset);
-        char* resolve_err = NULL;
-        void* voidstar = rel2abs(relptr, &resolve_err);
-        PROPAGATE_INFRA_ERROR(resolve_err)
-        if (voidstar) {
-            _shm_tracker_release_one((absptr_t)voidstar);
+    if (((const morloc_packet_header_t*)packet)->command.data.source == PACKET_SOURCE_RPTR) {
+        absptr_t block = mlc_tracked_block(packet);
+        if (block) {
+            _shm_tracker_release_one(block);
         }
     }
     if (owned) free((void*)packet);
@@ -567,7 +570,13 @@ std::string _mlc_hash(const T& value, Schema* schema) {
 template <typename T>
 int _mlc_compare(const T& a, const T& b, Schema* schema) {
     void* va = to_voidstar(schema, a);
-    void* vb = to_voidstar(schema, b);
+    void* vb = nullptr;
+    try {
+        vb = to_voidstar(schema, b);
+    } catch (...) {
+        shfree_cpp(va);
+        throw;
+    }
     char* errmsg = NULL;
     int order = mlc_compare(va, vb, schema, &errmsg);
     shfree_cpp(va);
@@ -685,7 +694,44 @@ T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
 // @load :: Str -> <IO, Err> a. Missing file / decode failure throws
 // MorlocException, which `@try` catches.
 template <typename T>
+T _mlc_ifile_slice(Schema* schema, int64_t handle, std::optional<int64_t> start, std::optional<int64_t> stop);
+
+template <typename T>
 T _mlc_load(Schema* schema, const std::string& path) {
+    // A stream file of this list type is read as its whole IFile slice,
+    // each sub-packet decoded where it lies (SLOT-25); any other file, or
+    // one that does not open as an IFile, takes the general load below.
+    if constexpr (is_std_vector<T>::value) {
+        char* s = schema_to_string(schema);
+        if (s == NULL) {
+            MLC_INTERNAL_ABORT("@load: schema_to_string returned NULL (invalid compile-time schema table entry)");
+        }
+        char* open_err = NULL;
+        int64_t h = mlc_open_ifile(s, path.c_str(), &open_err);
+        free(s);
+        if (open_err == NULL && h >= 0) {
+            struct Opened {
+                int64_t h;
+                ~Opened() {
+                    if (h < 0) return;
+                    char* e = NULL;
+                    mlc_close(h, &e);
+                    free(e);
+                }
+            } opened{h};
+            T result = _mlc_ifile_slice<T>(schema, h, std::nullopt, std::nullopt);
+            char* close_err = NULL;
+            int rc = mlc_close(h, &close_err);
+            opened.h = -1;
+            if (rc != 0 || close_err != NULL) {
+                std::string msg(close_err ? close_err : "closing the file failed");
+                free(close_err);
+                throw MorlocException(std::string("@load: ") + msg);
+            }
+            return result;
+        }
+        free(open_err);
+    }
     char* errmsg = NULL;
     void* voidstar = mlc_load(path.c_str(), schema, &errmsg);
     if (errmsg != NULL) {
@@ -702,7 +748,7 @@ T _mlc_load(Schema* schema, const std::string& path) {
     return result;
 }
 
-// ── Stream-handle wrappers ───────────────────────────────────────────────
+// -- Stream-handle wrappers -------------------------------------------------
 // @close: returns void; the runtime bumps generation and frees the slot.
 inline void _mlc_close(int64_t handle) {
     char* errmsg = NULL;
@@ -759,36 +805,36 @@ auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::str
     catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
     MLC_CATCH_FORCED_UNWIND(saved)
     catch (const std::exception& e) {
-        std::string msg(e.what());
-        return err(msg + mlc::frame_take(saved));
+        std::string trace = mlc::failure_trace(saved);
+        return err(std::string(e.what()) + trace);
     }
     catch (const char* e) {
-        std::string msg(e ? e : "An unknown error occurred");
-        return err(msg + mlc::frame_take(saved));
+        std::string trace = mlc::failure_trace(saved);
+        return err(std::string(e ? e : "An unknown error occurred") + trace);
     }
-    catch (const std::string& e) { return err(e + mlc::frame_take(saved)); }
-    catch (...) { return err(std::string("An unknown error occurred") + mlc::frame_take(saved)); }
+    catch (const std::string& e) {
+        std::string trace = mlc::failure_trace(saved);
+        return err(e + trace);
+    }
+    catch (...) {
+        std::string trace = mlc::failure_trace(saved);
+        return err(std::string("An unknown error occurred") + trace);
+    }
 }
 
 // STATE-6: the catch of a closure, which code outside morloc may call and
 // whose failure it may catch. Called from that catch, so `throw;` raises the
-// failure being handled.
+// failure being handled, as it was thrown.
 [[noreturn, gnu::noinline, gnu::cold]] static void _mlc_closure_rethrow(size_t saved) {
     try {
         throw;
     }
     catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
     MLC_CATCH_FORCED_UNWIND(saved)
-    catch (const std::exception& e) {
-        std::string msg(e.what());
-        throw std::runtime_error(msg + mlc::frame_take(saved));
+    catch (...) {
+        mlc::closure_trace_add(saved);
+        throw;
     }
-    catch (const char* e) {
-        std::string msg(e ? e : "An unknown error occurred");
-        throw std::runtime_error(msg + mlc::frame_take(saved));
-    }
-    catch (const std::string& e) { throw std::runtime_error(e + mlc::frame_take(saved)); }
-    catch (...) { throw std::runtime_error(std::string("An unknown error occurred") + mlc::frame_take(saved)); }
 }
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
@@ -808,6 +854,46 @@ inline int64_t _mlc_ifile_length(int64_t handle) {
     return n;
 }
 
+// `.[start:stop]` of a list-valued IFile, each sub-packet's part decoded
+// where it lies onto the end of the list (SLOT-25).
+template <typename T>
+T _mlc_ifile_slice(Schema* schema, int64_t handle, std::optional<int64_t> start, std::optional<int64_t> stop) {
+    struct Sliced {
+        Schema* schema;
+        T acc;
+        T scratch;
+        std::exception_ptr error;
+    } ctx{schema, T{}, T{}, nullptr};
+    mlc_slice_begin_fn begin = [](void* c, uint64_t n) -> int32_t {
+        Sliced* d = static_cast<Sliced*>(c);
+        try {
+            d->acc.reserve((size_t)n);
+            return 0;
+        } catch (...) {
+            d->error = std::current_exception();
+            return 1;
+        }
+    };
+    mlc_next_decode_fn decode = [](void* c, const void* data, morloc_space_t space) -> int32_t {
+        Sliced* d = static_cast<Sliced*>(c);
+        try {
+            mlc_append_from_voidstar(d->schema, data, space, d->acc, d->scratch);
+            return 0;
+        } catch (...) {
+            d->error = std::current_exception();
+            return 1;
+        }
+    };
+    mlc_ifile_walk_arg bounds[2] = {};
+    if (start.has_value()) { bounds[0].has = 1; bounds[0].value = *start; }
+    if (stop.has_value()) { bounds[1].has = 1; bounds[1].value = *stop; }
+    char* errmsg = NULL;
+    int32_t rc = mlc_ifile_slice_with(handle, bounds, begin, decode, &ctx, &errmsg);
+    if (rc < 0) { PROPAGATE_ERROR(errmsg) }
+    if (ctx.error) { std::rethrow_exception(ctx.error); }
+    return std::move(ctx.acc);
+}
+
 // @ifile_walk: unified IFile pattern walker. The `path` encodes the
 // walk-step chain (".[]", ".[:]", ".1.foo", etc.); `args` carries the
 // runtime bracket bounds (Python-style optional ints; absent slots
@@ -819,6 +905,12 @@ T _mlc_ifile_walk(
     const std::string& path,
     std::initializer_list<std::optional<int64_t>> args
 ) {
+    if constexpr (is_std_vector<T>::value) {
+        const std::optional<int64_t>* a = args.begin();
+        if (path == ".[:]" && args.size() == 3 && (!a[2].has_value() || *a[2] == 1)) {
+            return _mlc_ifile_slice<T>(schema, handle, a[0], a[1]);
+        }
+    }
     // Pack the optional<int64_t> args into the C-ABI struct array. The
     // struct is fixed-size (16 bytes) so a contiguous vector is the
     // natural marshal target. Empty initializer -> nullptr / n_args=0.
@@ -962,24 +1054,276 @@ inline int64_t _mlc_open_stderr(Schema* schema) {
     return h;
 }
 
-// @write: serialize T to voidstar and emit one sub-packet.
+// The result of an mlc_write_* call: an errmsg is a recoverable error, the
+// pipe-closed code its own condition.
+#define MLC_WRITE_RESULT(rc, errmsg, what) \
+    do { \
+        if ((errmsg) != NULL) { PROPAGATE_ERROR(errmsg) } \
+        _mlc_throw_if_pipe_closed(rc); \
+        if ((rc) != 0) { \
+            MLC_INTERNAL_ABORT(what " returned non-zero without setting errmsg (libmorloc contract violation)"); \
+        } \
+    } while (0)
+
+// @write from a voidstar copy of the batch, which the runtime lays out;
+// `known` is its size when the caller has it, else 0.
 template <typename T>
-inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+inline void _mlc_write_copy(Schema* schema, int64_t level, const T& value, int64_t handle, size_t known = 0, MlcConverted* converted = nullptr) {
     char* errmsg = NULL;
-    // Stage value into a SHM block via to_voidstar so the runtime can
-    // read it as a contiguous voidstar payload. The eval_arena tracks
-    // the allocation; we shfree explicitly after the runtime is done.
-    size_t bytes = get_shm_size(schema, value);
+    MlcConverted own;
+    if (converted == nullptr) converted = &own;
+    size_t bytes = known != 0 ? known : get_shm_size(schema, value, converted);
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
-    to_voidstar(voidstar, &cursor, schema, value);
+    try {
+        to_voidstar(voidstar, &cursor, schema, value, converted);
+    } catch (...) {
+        shfree_cpp(voidstar);
+        throw;
+    }
+    if (static_cast<uint8_t*>(cursor) > static_cast<uint8_t*>(voidstar) + bytes) {
+        mlc_runtime_defect("@write: a value was written past the size computed for it");
+    }
     int rc = mlc_write(level, handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    _mlc_throw_if_pipe_closed(rc);
-    if (rc != 0) {
-        MLC_INTERNAL_ABORT("mlc_write returned non-zero without setting errmsg (libmorloc contract violation)");
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_write");
+}
+
+// SLOT-37: aborts the open in-place batch unless `open` was cleared.
+struct MlcWriteTxn {
+    bool open = true;
+    ~MlcWriteTxn() {
+        if (open) mlc_write_abort();
     }
+};
+
+// Element `i` of a batch. std::vector<bool>::operator[] may return a bit
+// proxy, whose address the walks would take, so a Bool is read out as bool.
+template <typename E>
+inline decltype(auto) mlc_batch_elem(const std::vector<E>& xs, size_t i) {
+    if constexpr (std::is_same_v<E, bool>) {
+        return static_cast<bool>(xs[i]);
+    } else {
+        return xs[i];
+    }
+}
+
+// The morloc number a C++ type holds byte for byte, or -1.
+template <typename T>
+constexpr int mlc_wire_type() {
+    if constexpr (std::is_same_v<T, int8_t>) return MORLOC_SINT8;
+    else if constexpr (std::is_same_v<T, int16_t>) return MORLOC_SINT16;
+    else if constexpr (std::is_same_v<T, int32_t>) return MORLOC_SINT32;
+    else if constexpr (std::is_same_v<T, int64_t>) return MORLOC_SINT64;
+    else if constexpr (std::is_same_v<T, uint8_t>) return MORLOC_UINT8;
+    else if constexpr (std::is_same_v<T, uint16_t>) return MORLOC_UINT16;
+    else if constexpr (std::is_same_v<T, uint32_t>) return MORLOC_UINT32;
+    else if constexpr (std::is_same_v<T, uint64_t>) return MORLOC_UINT64;
+    else if constexpr (std::is_same_v<T, float>) return MORLOC_FLOAT32;
+    else if constexpr (std::is_same_v<T, double>) return MORLOC_FLOAT64;
+    else return -1;
+}
+
+// Whether a C++ type can be a leaf: a std::string, or a vector of a type
+// some morloc number holds byte for byte (not std::vector<bool>, whose bits
+// have no data()).
+template <typename E>
+constexpr bool mlc_leaf_type() {
+    if constexpr (std::is_same_v<E, std::string>) {
+        return true;
+    } else if constexpr (is_std_vector<E>::value) {
+        return mlc_wire_type<typename E::value_type>() >= 0;
+    } else {
+        return false;
+    }
+}
+
+// Whether a batch element of type E is a leaf the runtime writes whole from
+// its bytes (SLOT-36): a std::string for a Str, or a vector of numbers whose
+// type is exactly the element's wire type.
+template <typename E>
+inline bool mlc_leaf_elem(const Schema* elem) {
+    if constexpr (std::is_same_v<E, std::string>) {
+        return elem->type == MORLOC_STRING;
+    } else if constexpr (is_std_vector<E>::value) {
+        using T = typename E::value_type;
+        if constexpr (mlc_wire_type<T>() >= 0) {
+            const Schema* p = elem->type == MORLOC_ARRAY ? elem->parameters[0] : nullptr;
+            return p != nullptr && static_cast<int>(p->type) == mlc_wire_type<T>() && p->width == sizeof(T);
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+// Whether a batch element of type E is a list of leaves the runtime writes
+// whole from its leaves' bytes (SLOT-36).
+template <typename E>
+inline bool mlc_leaf_list_elem(const Schema* elem) {
+    if constexpr (is_std_vector<E>::value) {
+        using L = typename E::value_type;
+        if constexpr (mlc_leaf_type<L>()) {
+            return elem->type == MORLOC_ARRAY && mlc_leaf_elem<L>(resolve_recur(elem->parameters[0]));
+        }
+    }
+    return false;
+}
+
+// Write the batch `xs` in place (SLOT-36), or from a voidstar copy when
+// the stream refuses. Each element is sized before the batch opens, except
+// leaves and lists of leaves, which the runtime sizes and writes.
+template <typename E>
+inline void _mlc_write_batch(Schema* schema, int64_t level, const std::vector<E>& xs, int64_t handle) {
+    const Schema* elem = resolve_recur(schema->parameters[0]);
+    const size_t n = xs.size();
+    const size_t w = elem->width;
+    const bool run = (elem->fixed_width || elem->type == MORLOC_INT) && w > 0;
+    const bool leaf = !run && mlc_leaf_elem<E>(elem);
+    const bool pieces = !run && !leaf && mlc_leaf_list_elem<E>(elem);
+    // A table element has no voidstar size; the stream refuses it in place.
+    const bool sized = !run && !leaf && !pieces && elem->type != MORLOC_TABLE;
+    std::vector<size_t> sizes;
+    MlcConverted converted;
+    if (sized) {
+        MlcSizeWalk sw(elem, &converted);
+        sizes.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            sw.total = 0;
+            sw.keep.clear();
+            sw.child(elem, mlc_batch_elem(xs, i), false);
+            sizes.push_back(static_cast<size_t>(sw.run()));
+        }
+    }
+    char* errmsg = NULL;
+    int rc = mlc_write_begin(level, handle, 0, &errmsg);
+    if (rc == MLC_WRITE_FALLBACK) {
+        // The list's own size: its header, the data's alignment slack, and
+        // each element's.
+        size_t known = 0;
+        if (sized) {
+            known = schema->width + (n > 0 ? elem->data_alignment - 1 : 0);
+            for (size_t s : sizes) known += s;
+        }
+        _mlc_write_copy(schema, level, xs, handle, known, &converted);
+        return;
+    }
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_write_begin");
+    if (!run && !sized && !leaf && !pieces) mlc_runtime_defect("@write: a table batch was opened in place");
+    MlcWriteTxn txn;
+    const uint8_t* reached = nullptr;
+    MlcWriteWalk ww(elem, nullptr, &converted);
+    if (run) {
+        void* no_cursor = nullptr;
+        ww.place(&no_cursor, nullptr, nullptr);
+        for (size_t i = 0; i < n;) {
+            uint8_t* slots = nullptr;
+            uint64_t k = 0;
+            rc = mlc_write_place_run(n - i, reached, &slots, &k, &errmsg);
+            MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_run");
+            char* at = reinterpret_cast<char*>(slots);
+            if constexpr (mlc_is_leaf_v<E>) {
+                mlc_write_leaves(ww, elem, at, xs, i, k);
+            } else {
+                for (size_t j = 0; j < k; j++) ww.child(elem, at + j * w, mlc_batch_elem(xs, i + j));
+                ww.run();
+                ww.keep.clear();
+            }
+            reached = slots + k * w;
+            i += k;
+        }
+    } else if (leaf) {
+        if constexpr (mlc_leaf_type<E>()) {
+            for (size_t i = 0; i < n; i++) {
+                const E& x = xs[i];
+                const uint8_t* end = nullptr;
+                int64_t bad = -1;
+                rc = mlc_write_place_bytes(reinterpret_cast<const uint8_t*>(x.data()), x.size(), 0, reached, &end, &bad, &errmsg);
+                if (rc == MLC_WRITE_NOT_TEXT) {
+                    // SLOT-36
+                    free(errmsg);
+                    txn.open = false;
+                    std::ostringstream oss;
+                    oss << "C++ produced a Str that is not valid UTF-8 (byte " << bad << " of " << x.size() << ")";
+                    throw std::runtime_error(oss.str());
+                }
+                MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_bytes");
+                reached = end;
+            }
+        }
+    } else if (pieces) {
+        if constexpr (is_std_vector<E>::value) {
+            using L = typename E::value_type;
+            if constexpr (mlc_leaf_type<L>()) {
+                std::vector<mlc_piece_t> ps;
+                for (size_t i = 0; i < n; i++) {
+                    const E& x = xs[i];
+                    ps.resize(x.size());
+                    for (size_t j = 0; j < x.size(); j++) {
+                        ps[j] = mlc_piece_t{reinterpret_cast<const uint8_t*>(x[j].data()), static_cast<uint64_t>(x[j].size())};
+                    }
+                    const uint8_t* end = nullptr;
+                    int64_t bad_piece = -1;
+                    int64_t bad = -1;
+                    rc = mlc_write_place_pieces(ps.data(), ps.size(), 0, reached, &end, &bad_piece, &bad, &errmsg);
+                    if (rc == MLC_WRITE_NOT_TEXT) {
+                        // SLOT-36
+                        free(errmsg);
+                        txn.open = false;
+                        std::ostringstream oss;
+                        oss << "C++ produced a Str that is not valid UTF-8 (byte " << bad << " of " << x[static_cast<size_t>(bad_piece)].size() << ")";
+                        throw std::runtime_error(oss.str());
+                    }
+                    MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place_pieces");
+                    reached = end;
+                }
+            }
+        }
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            mlc_room_t room;
+            rc = mlc_write_place(sizes[i], reached, &room, &errmsg);
+            MLC_WRITE_RESULT(rc, errmsg, "mlc_write_place");
+            void* cursor = room.data;
+            ww.place(&cursor, reinterpret_cast<char*>(room.base), reinterpret_cast<char*>(room.origin));
+            ww.child(elem, room.slot, mlc_batch_elem(xs, i));
+            ww.run();
+            reached = static_cast<const uint8_t*>(cursor);
+        }
+    }
+    txn.open = false;
+    rc = mlc_write_commit(reached, &errmsg);
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_write_commit");
+}
+
+// SIDE-12: a put that raises fails its sink, so a producer that catches the
+// error cannot finish with the batch missing.
+struct MlcSinkPut {
+    int64_t h;
+    bool done = false;
+    ~MlcSinkPut() { if (!done) mlc_sink_failed(h); }
+};
+
+// @write: emit one batch. An output file's batch is encoded in place
+// (SLOT-37); other streams take a voidstar copy.
+template <typename T>
+inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+    if constexpr (is_std_vector<T>::value) {
+        _mlc_write_batch(schema, level, value, handle);
+    } else if constexpr (is_non_vector_container_v<T>) {
+        _mlc_write_batch(schema, level, to_vector(value), handle);
+    } else {
+        _mlc_write_copy(schema, level, value, handle);
+    }
+}
+
+// SIDE-12, SLOT-35: a sink's write that throws fails its stream.
+template <typename T>
+inline void _mlc_sink_write(Schema* schema, int64_t level, const T& value, int64_t handle) {
+    MlcSinkPut put{handle};
+    _mlc_write(schema, level, value, handle);
+    put.done = true;
 }
 
 // @append: open existing file for append; schema must match.
@@ -1018,14 +1362,10 @@ inline void _mlc_concat(const std::vector<std::string>& paths, const std::string
 inline void _mlc_flush(int64_t handle) {
     char* errmsg = NULL;
     int rc = mlc_flush(handle, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    _mlc_throw_if_pipe_closed(rc);
-    if (rc != 0) {
-        MLC_INTERNAL_ABORT("mlc_flush returned non-zero without setting errmsg (libmorloc contract violation)");
-    }
+    MLC_WRITE_RESULT(rc, errmsg, "mlc_flush");
 }
 
-// @tell: elements written to @stdout so far (its element_count). Never fails.
+// @tell: elements written to @stdout so far (its element_count).
 inline uint64_t _mlc_tell() {
     char* errmsg = NULL;
     uint64_t n = mlc_tell(&errmsg);
@@ -1052,97 +1392,14 @@ inline void _mlc_unlink_tmp(const std::string& path) {
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
 }
 
-// -- Fold-accumulator wrappers ------------------------------------------
-// A folding stream handler carries one accumulator per thread that folds
-// into it; @cellreduce reads them all (`_mlc_cell_slots`) and merges them
-// with the handler's `combine` (`_mlc_reduce_list`).
-
-// @cellnew: create an accumulator seeded with `init`.
-template <typename B>
-int64_t _mlc_cell_new(Schema* schema, const B& init) {
-    void* voidstar = to_voidstar(schema, init);
-    char* errmsg = NULL;
-    int64_t handle = mlc_cell_new(schema, voidstar, &errmsg);
-    shfree_cpp(voidstar);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return handle;
-}
-
-// @cellget: this thread's accumulator, or the seed if it has not folded yet.
-template <typename B>
-B _mlc_cell_get(Schema* schema, int64_t handle) {
-    char* errmsg = NULL;
-    void* voidstar = mlc_cell_get(handle, schema, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    B* dummy = nullptr;
-    B result = from_voidstar(schema, voidstar, dummy);
-    shfree_cpp(voidstar);
-    return result;
-}
-
-// @cellput: replace this thread's accumulator.
-template <typename B>
-void _mlc_cell_put(Schema* schema, int64_t handle, const B& value) {
-    void* voidstar = to_voidstar(schema, value);
-    char* errmsg = NULL;
-    mlc_cell_put(handle, schema, voidstar, &errmsg);
-    shfree_cpp(voidstar);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-}
-
-// One accumulator, for the merge below.
-template <typename B>
-B _mlc_cell_slot(Schema* schema, int64_t handle, int64_t index) {
-    char* errmsg = NULL;
-    void* voidstar = mlc_cell_slot(handle, index, schema, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    B* dummy = nullptr;
-    B result = from_voidstar(schema, voidstar, dummy);
-    shfree_cpp(voidstar);
-    return result;
-}
-
-// @cellreduce: fold every accumulator into one with `combine`, then release
-// the cell. The count is never zero -- an untouched cell answers with its
-// seed -- so this always has a value to return.
-// Releases its cell however the reduce below leaves. The end-of-dispatch
-// sweep would reclaim an abandoned one, but a @try-wrapped fold that fails
-// and retries inside a single dispatch would strand a cell per attempt.
-struct MlcCellGuard {
-    int64_t handle;
-    ~MlcCellGuard() {
-        char* errmsg = NULL;
-        mlc_cell_free(handle, &errmsg);
-        free(errmsg);
-    }
-};
-
-// Every accumulator of a cell, in its wire form; with _mlc_reduce_list it
-// runs @cellreduce.
-template <typename L>
-L _mlc_cell_slots(Schema* schema, int64_t handle) {
-    MlcCellGuard guard{handle};
-    char* errmsg = NULL;
-    int64_t n = mlc_cell_count(handle, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    if (n < 1) { PROPAGATE_ERROR(strdup("@fold: the accumulator holds nothing to merge")) }
-    L xs;
-    xs.reserve((size_t)n);
-    for (int64_t i = 0; i < n; i++) {
-        xs.push_back(_mlc_cell_slot<typename L::value_type>(schema, handle, i));
-    }
-    return xs;
-}
-
-// A non-empty list folded with `combine`.
-template <typename F, typename L>
-typename L::value_type _mlc_reduce_list(F combine, L xs) {
-    if (xs.empty()) { PROPAGATE_ERROR(strdup("@fold: nothing to merge")) }
-    typename L::value_type acc = std::move(xs[0]);
-    for (size_t i = 1; i < xs.size(); i++) {
-        acc = combine(acc, xs[i]);
-    }
-    return acc;
+template <typename T>
+T _mlc_from_voidstar_freed(Schema* schema, void* voidstar) {
+    struct Freed {
+        void* p;
+        ~Freed() { shfree_cpp(p); }
+    } freed{voidstar};
+    T* dummy = nullptr;
+    return from_voidstar(schema, voidstar, dummy);
 }
 
 // @replay: call `fn` on every frame (sub-packet) of the stream, in order,
@@ -1156,11 +1413,306 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
         void* voidstar = mlc_next_frame(handle, &eof, &errmsg);
         if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
         if (eof) break;
-        std::vector<E>* dummy = nullptr;
-        std::vector<E> frame = from_voidstar(schema, voidstar, dummy);
-        shfree_cpp(voidstar);
-        fn(frame);
+        std::vector<E> frame = _mlc_from_voidstar_freed<std::vector<E>>(schema, voidstar);
+        ((void)mlc::fork_guard{}, fn(frame));
     }
+    return mlc::Unit{};
+}
+
+// -- Gathers (model/runtime/side.md) -------------------------------------
+
+struct MlcGatherBase {
+    const std::type_info* type;
+};
+
+template <typename L>
+struct MlcGatherList : MlcGatherBase {
+    std::vector<L> batches;
+    MlcGatherList() : MlcGatherBase{&typeid(L)} {}
+};
+
+template <typename L>
+void _mlc_gather_append(void* container, void* item) noexcept {
+    auto* base = static_cast<MlcGatherBase*>(container);
+    if (*base->type != typeid(L)) {
+        MLC_INTERNAL_ABORT("@gather: a batch was put with another type than its gather's");
+    }
+    try {
+        static_cast<MlcGatherList<L>*>(base)->batches.push_back(std::move(*static_cast<L*>(item)));
+    } catch (...) {
+        MLC_INTERNAL_ABORT("@gather: holding a batch failed");
+    }
+}
+
+struct MlcSideReader {
+    void* reader;
+    ~MlcSideReader() { mlc_side_reader_free(reader); }
+};
+
+template <typename L, typename F>
+void _mlc_side_each(Schema* schema, void* reader, F each) {
+    MlcSideReader guard{reader};
+    while (true) {
+        char* errmsg = NULL;
+        int32_t eof = 0;
+        void* voidstar = mlc_side_next(reader, schema, &eof, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        if (eof) break;
+        L batch = _mlc_from_voidstar_freed<L>(schema, voidstar);
+        each(batch);
+    }
+}
+
+// SIDE-6
+template <typename L, typename F>
+L _mlc_gather_native(Schema* schema, F f) {
+    MlcGatherList<L> list;
+    char* errmsg = NULL;
+    int64_t h = mlc_side_new(static_cast<MlcGatherBase*>(&list), &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    try {
+        ((void)mlc::fork_guard{}, f((uint64_t)h));
+    } catch (...) {
+        mlc_side_drop(h);
+        throw;
+    }
+    void* reader = mlc_side_take(h, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    _mlc_side_each<L>(schema, reader, [&](L& b) { list.batches.push_back(std::move(b)); });
+    if (list.batches.size() == 1) {
+        return std::move(list.batches[0]);
+    }
+    size_t n = 0;
+    for (const auto& b : list.batches) n += b.size();
+    L xs;
+    xs.reserve(n);
+    for (auto& b : list.batches) {
+        xs.insert(xs.end(), std::make_move_iterator(b.begin()), std::make_move_iterator(b.end()));
+    }
+    return xs;
+}
+
+// SIDE-4: a gather id puts to its record, a stream handle to its stream.
+template <typename L>
+void _mlc_gather_put_unguarded(Schema* schema, uint64_t h, L batch) {
+    if ((int64_t)h >= 0) {
+        _mlc_write(schema, 0, batch, (int64_t)h);
+        return;
+    }
+    char* errmsg = NULL;
+    int32_t r = mlc_side_with_native((int64_t)h, 0, &_mlc_gather_append<L>, &batch, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (r == 0) {
+        void* voidstar = to_voidstar(schema, batch);
+        mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
+        shfree_cpp(voidstar);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    }
+}
+
+template <typename L>
+mlc::Unit _mlc_gather_put(Schema* schema, uint64_t h, L batch) {
+    MlcSinkPut put{(int64_t)h};
+    _mlc_gather_put_unguarded(schema, h, std::move(batch));
+    put.done = true;
+    return mlc::Unit{};
+}
+
+// The handle is the stream.
+template <typename L, typename F>
+L _mlc_gather_file(Schema* schema, F f) {
+    std::string path = _mlc_tmpfile();
+    int64_t o = _mlc_open_ostream(schema, path);
+    ((void)mlc::fork_guard{}, f((uint64_t)o));
+    _mlc_close(o);
+    L xs = _mlc_load<L>(schema, path);
+    _mlc_unlink_tmp(path);
+    return xs;
+}
+
+// -- Native folds (model/runtime/fold.md) --------------------------------
+
+struct MlcFoldValueBase {
+    const std::type_info* type;
+};
+
+template <typename B>
+struct MlcFoldValue : MlcFoldValueBase {
+    B value;
+    explicit MlcFoldValue(const B& v) : MlcFoldValueBase{&typeid(B)}, value(v) {}
+};
+
+template <typename B, typename T>
+T* _mlc_fold_cast(void* p) {
+    auto* base = static_cast<MlcFoldValueBase*>(p);
+    if (*base->type != typeid(B)) {
+        MLC_INTERNAL_ABORT("@fold: a batch was put with another accumulator type than its fold's");
+    }
+    return static_cast<T*>(base);
+}
+
+template <typename B>
+MlcFoldValue<B>* _mlc_fold_value(void* p) {
+    return _mlc_fold_cast<B, MlcFoldValue<B>>(p);
+}
+
+// FOLD-6, FOLD-10: the fold's init, held by its bracket and by each put
+// that copies it.
+template <typename B>
+struct MlcFoldInit : MlcFoldValueBase {
+    std::atomic<size_t> refs{1};
+    const B value;
+    explicit MlcFoldInit(const B& v) : MlcFoldValueBase{&typeid(B)}, value(v) {}
+};
+
+template <typename B>
+struct MlcFoldInitRef {
+    MlcFoldInit<B>* init;
+    ~MlcFoldInitRef() {
+        if (init->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete init;
+    }
+};
+
+// FOLD-6
+template <typename B>
+void* _mlc_fold_fresh(void* init) noexcept {
+    static_cast<MlcFoldInit<B>*>(init)->refs.fetch_add(1, std::memory_order_relaxed);
+    return init;
+}
+
+template <typename B>
+MlcFoldInit<B>* _mlc_fold_init(void* p) {
+    return _mlc_fold_cast<B, MlcFoldInit<B>>(p);
+}
+
+template <typename B>
+struct MlcFoldValues {
+    void** values = NULL;
+    size_t n = 0;
+    ~MlcFoldValues() {
+        for (size_t i = 0; i < n; i++) delete _mlc_fold_value<B>(values[i]);
+        free(values);
+    }
+};
+
+// FOLD-2..4: the slots, and the side records `replay` steps from a fresh
+// init, combined; an empty fold is its init.
+template <typename B, typename C, typename F, typename R>
+B _mlc_fold_with(const B& init, C combine, F f, R replay) {
+    char* errmsg = NULL;
+    MlcFoldInitRef<B> ctx{new MlcFoldInit<B>(init)};
+    int64_t h = mlc_fold_new(ctx.init, &_mlc_fold_fresh<B>, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    try {
+        ((void)mlc::fork_guard{}, f((uint64_t)h));
+    } catch (...) {
+        MlcFoldValues<B> dropped;
+        mlc_fold_drop(h, &dropped.values, &dropped.n);
+        throw;
+    }
+    MlcFoldValues<B> vs;
+    void* reader = mlc_fold_take(h, &vs.values, &vs.n, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    std::optional<B> side = replay(reader);
+    std::optional<B> acc;
+    for (size_t i = 0; i < vs.n; i++) {
+        B& v = _mlc_fold_value<B>(vs.values[i])->value;
+        if (acc) acc = ((void)mlc::fork_guard{}, combine(std::move(*acc), std::move(v))); else acc.emplace(std::move(v));
+    }
+    if (side) {
+        if (acc) acc = ((void)mlc::fork_guard{}, combine(std::move(*acc), std::move(*side))); else acc.emplace(std::move(*side));
+    }
+    return acc ? std::move(*acc) : init;
+}
+
+template <typename B, typename L, typename S, typename C, typename F>
+B _mlc_fold(Schema* schema, const B& init, S step, C combine, F f) {
+    return _mlc_fold_with(init, combine, f, [&](void* reader) {
+        std::optional<B> side;
+        _mlc_side_each<L>(schema, reader, [&](L& b) {
+            if (!side) side.emplace(init);
+            side = ((void)mlc::fork_guard{}, step(std::move(*side), b));
+        });
+        return side;
+    });
+}
+
+// SIDE-10: a schemaless side file holds only poison records.
+template <typename B, typename L, typename S, typename C, typename F>
+B _mlc_fold_schemaless(const B& init, S, C combine, F f) {
+    return _mlc_fold_with(init, combine, f, [](void* reader) {
+        MlcSideReader guard{reader};
+        char* errmsg = NULL;
+        int32_t eof = 0;
+        mlc_side_next(reader, NULL, &eof, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        return std::optional<B>();
+    });
+}
+
+// FOLD-1: step this thread's slot, or hand the batch to `side`.
+template <typename B, typename L, typename S, typename P>
+mlc::Unit _mlc_fold_step(S step, uint64_t h, const L& batch, P side) {
+    char* errmsg = NULL;
+    void* p = NULL;
+    int32_t fresh = 0;
+    int32_t r = mlc_fold_checkout((int64_t)h, &p, &fresh, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    if (r == 0) {
+        side();
+        return mlc::Unit{};
+    }
+    std::unique_ptr<MlcFoldValue<B>> v;
+    try {
+        if (fresh) {
+            MlcFoldInitRef<B> init{_mlc_fold_init<B>(p)};
+            v.reset(new MlcFoldValue<B>(init.init->value));
+        } else {
+            v.reset(_mlc_fold_value<B>(p));
+        }
+        v->value = ((void)mlc::fork_guard{}, step(std::move(v->value), batch));
+    } catch (...) {
+        mlc_fold_failed((int64_t)h);
+        throw;
+    }
+    if (mlc_fold_store((int64_t)h, v.get(), &errmsg) == 0) v.release();
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return mlc::Unit{};
+}
+
+// FOLD-1, FOLD-9: a fold id steps its slot, a stream handle takes the batch.
+template <typename B, typename L, typename S>
+mlc::Unit _mlc_fold_put(Schema* schema, S step, uint64_t h, const L& batch) {
+    MlcSinkPut put{(int64_t)h};
+    if ((int64_t)h >= 0) {
+        _mlc_write(schema, 0, batch, (int64_t)h);
+        _mlc_flush((int64_t)h);
+    } else {
+        _mlc_fold_step<B>(step, h, batch, [&]() {
+            char* errmsg = NULL;
+            void* voidstar = to_voidstar(schema, batch);
+            mlc_side_put((int64_t)h, schema, voidstar, &errmsg);
+            shfree_cpp(voidstar);
+            if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        });
+    }
+    put.done = true;
+    return mlc::Unit{};
+}
+
+// SIDE-10: a batch with no wire form poisons the side file.
+template <typename B, typename L, typename S>
+mlc::Unit _mlc_fold_put_schemaless(S step, uint64_t h, const L& batch) {
+    MlcSinkPut put{(int64_t)h};
+    if ((int64_t)h >= 0) {
+        throw MorlocException("@fold: this fold reads its batches from a stream, but its batch type has no wire form in C++");
+    }
+    _mlc_fold_step<B>(step, h, batch, [&]() {
+        char* errmsg = NULL;
+        mlc_side_put((int64_t)h, NULL, NULL, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    });
+    put.done = true;
     return mlc::Unit{};
 }
 
@@ -1200,20 +1752,15 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
         }
     }
 
-    // Incref the result's SHM so the callee's tracker flush won't destroy
-    // data we may still need (mirrors the variadic foreign_call).
+    // SHM-13: the result's block, checked.
     {
-        const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
-        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
-            size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
-            char* resolve_err = NULL;
-            void* res_voidstar = rel2abs(relptr, &resolve_err);
-            PROPAGATE_INFRA_ERROR(resolve_err)
-            if (res_voidstar) {
-                // The callee took a reference before sending; it is ours
-                // now. Inherit it rather than adding another.
-                _shm_tracker_live().push_back({(absptr_t)res_voidstar});
-            }
+        char* resolve_err = NULL;
+        absptr_t res_block = mlc_packet_block(result, &resolve_err);
+        if (resolve_err) { free(result); }
+        PROPAGATE_INFRA_ERROR(resolve_err)
+        if (res_block) {
+            // SHM-3, SHM-8
+            _shm_tracker_live().push_back({res_block});
         }
     }
 
@@ -1288,7 +1835,7 @@ struct MorlocClosure<R(A...)> {
     std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
     std::string home = "cpp";
     typename mlc_apply1_slot<R, A...>::type apply1{};
-    // Each argument is this call's own copy, so it is handed on, not copied.
+    // Each argument is forwarded as the signature passes it (CPP-7).
     R operator()(A... args) const { return fn(std::forward<A>(args)...); }
 };
 
@@ -1375,20 +1922,23 @@ inline mlc::Unit _mlc_settle(int64_t handle) {
 
 // A closure that can cross, applied to its first arguments one at a time,
 // stays a closure of the same manifold: the arguments join its captured
-// values. `schemas` are the wire schemas of its remaining arguments, used
+// values. `encoders` turn each remaining argument into its packet, used
 // only if it is reified.
 // A closure applied to its first argument `x`: the thunk that reifies it
 // (the argument appended to the captured values) and the schemas of the
 // arguments it still takes.
+typedef std::function<std::vector<uint8_t>(const void*)> mlc_arg_encoder;
+
 template <class X>
-std::pair<std::function<mlc_captured_t()>, std::vector<Schema*>>
-mlc_pap_step(const std::function<mlc_captured_t()>& reify, const std::vector<Schema*>& schemas, const X& x) {
-    Schema* s = schemas.empty() ? nullptr : schemas.front();
-    std::vector<Schema*> rest;
-    if (!schemas.empty()) rest.assign(schemas.begin() + 1, schemas.end());
-    std::function<mlc_captured_t()> reify2 = [reify, x, s]() {
+std::pair<std::function<mlc_captured_t()>, std::vector<mlc_arg_encoder>>
+mlc_pap_step(const std::function<mlc_captured_t()>& reify, const std::vector<mlc_arg_encoder>& encoders, const X& x) {
+    mlc_arg_encoder e = encoders.empty() ? mlc_arg_encoder() : encoders.front();
+    std::vector<mlc_arg_encoder> rest;
+    if (!encoders.empty()) rest.assign(encoders.begin() + 1, encoders.end());
+    std::function<mlc_captured_t()> reify2 = [reify, x, e]() {
+        if (!e) throw MorlocException("cannot reify a closure whose argument has no wire form");
         mlc_captured_t v = reify();
-        v.push_back(_mlc_reify_arg(x, s));
+        v.push_back(e(&x));
         return v;
     };
     return {reify2, rest};
@@ -1398,14 +1948,14 @@ template <class R, class... A> struct mlc_pap;
 template <class R> struct mlc_pap<R> {
     static MorlocClosure<R()> make(std::function<R()> fn, int64_t mid,
                                    std::function<mlc_captured_t()> reify,
-                                   std::string home, std::vector<Schema*>) {
+                                   std::string home, std::vector<mlc_arg_encoder>) {
         return MorlocClosure<R()>{fn, mid, reify, home};
     }
 };
 template <class R, class A1, class... A> struct mlc_pap<R, A1, A...> {
     static MorlocClosure<R(A1, A...)> make(std::function<R(A1, A...)> fn, int64_t mid,
                                            std::function<mlc_captured_t()> reify,
-                                           std::string home, std::vector<Schema*> schemas) {
+                                           std::string home, std::vector<mlc_arg_encoder> schemas) {
         MorlocClosure<R(A1, A...)> c{fn, mid, reify, home};
         c.apply1 = [fn, mid, reify, home, schemas](const A1& x) -> std::function<R(A...)> {
             auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
@@ -1426,7 +1976,7 @@ struct mlc_staged<R, mlc_types<F1, F...>, mlc_types<Rest...>> {
     typedef std::function<std::function<R(Rest...)>(F1, F...)> stage_t;
     static MorlocClosure<R(F1, F..., Rest...)> make(std::function<R(F1, F..., Rest...)> fn, int64_t mid,
                                                     std::function<mlc_captured_t()> reify,
-                                                    std::string home, std::vector<Schema*> schemas,
+                                                    std::string home, std::vector<mlc_arg_encoder> schemas,
                                                     stage_t stage) {
         MorlocClosure<R(F1, F..., Rest...)> c{fn, mid, reify, home};
         c.apply1 = [fn, mid, reify, home, schemas, stage](const F1& x) -> std::function<R(F..., Rest...)> {
@@ -1499,6 +2049,41 @@ extern "C" void morloc_debug_record_frame(
 
 
 
+#include <variant>
+
+namespace mlc {
+// OWN-8: the result of a manifold that may return what its caller lent it,
+// or a value of its own. Read in place with get(); own() takes it, copying
+// only a lent value.
+template <class T>
+class lent_or {
+  public:
+    template <class U>
+      requires (!std::is_same_v<std::remove_cvref_t<U>, lent_or>) && std::is_constructible_v<T, U&&>
+    lent_or(U&& x) : v_(std::in_place_index<1>, std::forward<U>(x)) {}
+    lent_or(lent_or&&) = default;
+    lent_or& operator=(lent_or&&) = default;
+    lent_or(const lent_or&) = delete;
+    lent_or& operator=(const lent_or&) = delete;
+    static lent_or lend(const T& x) { return lent_or(&x); }
+    static lent_or lend(const T&&) = delete;
+    const T& get() const { return v_.index() == 0 ? *std::get<0>(v_) : std::get<1>(v_); }
+    T take() && {
+        if (v_.index() == 0) return *std::get<0>(v_);
+        return std::move(std::get<1>(v_));
+    }
+  private:
+    explicit lent_or(const T* p) : v_(std::in_place_index<0>, p) {}
+    std::variant<const T*, T> v_;
+};
+
+template <class T> lent_or<T> lent(const T& x) { return lent_or<T>::lend(x); }
+template <class T> lent_or<T> lent(const T&&) = delete;
+template <class T> T own(lent_or<T>&& r) { return std::move(r).take(); }
+template <class T> const T& place(const T& x) { return x; }
+template <class T> const T& place(const T&&) = delete;
+}
+
 // AUTO signatures statements start
 // <<<BREAK>>>
 // AUTO signatures statements end
@@ -1520,7 +2105,9 @@ extern "C" void morloc_debug_record_frame(
 // trace of named calls it unwound through (DIAG-5, STATE-6), and under
 // --debug the drained debug trace.
 static uint8_t* make_fail_packet_with_trace(const char* msg0, size_t saved) {
-    std::string withTrace = std::string(msg0) + mlc::frame_take(saved);
+    std::string withTrace = mlc::failure_trace(saved);
+    withTrace.insert(0, msg0);
+    if (saved == 0) mlc::closure_traces_drop_thread();
     const char* msg = withTrace.c_str();
     char* trace = morloc_debug_drain_frames();
     if (trace == NULL) {
@@ -1541,6 +2128,7 @@ static inline uint8_t* _mlc_dispatch_balanced(uint8_t* result, size_t saved) {
         mlc_runtime_defect("frame stack depth " + std::to_string(mlc::frame_depth())
             + " at the end of a dispatch that began at " + std::to_string(saved));
     }
+    if (saved == 0) mlc::closure_traces_drop_thread();
     return result;
 }
 
@@ -1566,8 +2154,6 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what(), saved);
     } catch (const char* e) {
-        // A sourced function's throw reaches here as thrown unless a
-        // closure's catch on the way normalized it.
         return make_fail_packet_with_trace(e ? e : "An unknown error occurred", saved);
     } catch (const std::string& e) {
         return make_fail_packet_with_trace(e.c_str(), saved);
@@ -1608,6 +2194,33 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
 }
 
 
+// WPOOL-3: what a parallel helper's job-end hook reads of this translation
+// unit's thread-local state.
+static size_t _mlc_par_tracker_size() { return _shm_tracker_live().size(); }
+static void _mlc_par_tracker_move(std::vector<absptr_t>& out) {
+    ShmTracker& t = _shm_tracker_live();
+    for (const ShmEntry& e : t) out.push_back(e.ptr);
+    t.clear();
+}
+static void _mlc_par_tracker_add(const std::vector<absptr_t>& in) {
+    ShmTracker& t = _shm_tracker_live();
+    for (absptr_t p : in) t.push_back({p});
+}
+static bool _mlc_par_reading_runtime_value() { return mlc_reading_runtime_value; }
+static bool _mlc_par_pipe_closed() {
+    try {
+        throw;
+    } catch (const MorlocPipeClosed&) {
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+static const mlc::par_tracker_ops _mlc_par_ops = {
+    _mlc_par_tracker_size, _mlc_par_tracker_move, _mlc_par_tracker_add,
+    _mlc_par_reading_runtime_value, _mlc_par_pipe_closed,
+};
+
 // Registration entry called by the member-agnostic host translation unit.
 // The host owns main() and the pool_main loop; this hook wires the C++
 // member's dispatchers, tmpdir, and schema table into the pool config.
@@ -1618,5 +2231,6 @@ void cpp_register(pool_config_t* config, const char* tmpdir) {
     config->remote_dispatch = cpp_remote_dispatch;
     config->dispatch_ctx = NULL;
     config->release_dispatch = _shm_tracker_flush;
+    mlc::par_register(&_mlc_par_ops);
     _init_schemas();
 }

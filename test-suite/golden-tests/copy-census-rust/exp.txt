@@ -1,5 +1,5 @@
 --- nestedOut ---
-[98,98]
+[98,0]
 --- nestedLoop ---
 [50,0]
 --- tagNested ---
@@ -21,13 +21,13 @@
 --- listPat ---
 [200,0]
 --- listRet ---
-[100,100]
+[100,0]
 --- twiceRead ---
 [200,0]
 --- twiceKeep ---
-[202,200]
+[202,0]
 --- twoSteps ---
-[201,100]
+[201,0]
 --- partsBorrowed ---
 [100,0]
 --- partsFresh ---
@@ -47,7 +47,7 @@
 --- closureRead ---
 [306,0]
 --- closureKeep ---
-[303,300]
+[303,0]
 --- papRead ---
 [306,0]
 --- papHof ---
@@ -61,7 +61,7 @@
 --- matchUnwrap ---
 [100,0]
 --- matchArg ---
-[100,100]
+[100,0]
 --- matchTry ---
 [100,0]
 --- throughTwo ---
@@ -83,8 +83,24 @@
 --- matchedTwice ---
 [200,0]
 --- twoLets ---
-[202,100]
+[202,0]
 --- capStaged ---
-[103,100]
+[103,0]
 --- capStagedKeep ---
-[203,100]
+[203,0]
+--- tryLet ---
+[100,0]
+--- doTwice ---
+[202,0]
+--- letAlias ---
+[1100,0]
+--- fieldsKept ---
+[200,0]
+--- fieldsNested ---
+[301,0]
+--- stagedLevels ---
+[301,200]
+--- stagedPap ---
+[301,200]
+--- mapUnpack ---
+[300,0]

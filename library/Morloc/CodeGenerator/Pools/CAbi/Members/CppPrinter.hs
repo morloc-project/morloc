@@ -26,18 +26,29 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printStructTypedef
   , printMarshalDecls
   , armName
+  , armNameText
   , printCppEnumDecl
   , printCppVariantDecl
   , printCppVariantArms
   , printCppVariantSerializers
   , printSerializer
+  , printSerializerWith
   , printDeserializer
+  , printDeserializerWith
+  , printHandleDecl
+  , printHandleDefs
+  , handleFields
   , WireField (..)
   , printArmMarshallers
+  , printRecordMarshallers
+  , printFieldConv
+  , printFieldNoConv
+  , FieldConv (..)
   , printTemplateHeader
   , printRecordTemplate
   ) where
 
+import Morloc.Data.Zip (indexed, mapIndexed)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -119,29 +130,31 @@ printExpr (IIntrinsicLoad sid Nothing path) =
   [idoc|_mlc_load(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicShow sid e) =
   [idoc|_mlc_show(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicCellNew sid e) =
-  [idoc|_mlc_cell_new(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
-printExpr (IIntrinsicCellGet sid (Just t) h) =
-  [idoc|_mlc_cell_get<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicCellGet sid Nothing h) =
-  [idoc|_mlc_cell_get(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicCellPut sid h e) =
-  [idoc|_mlc_cell_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr e})|]
-printExpr (IIntrinsicCellSlots sid (Just t) h) =
-  [idoc|_mlc_cell_slots<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicCellSlots sid Nothing h) =
-  [idoc|_mlc_cell_slots(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
-printExpr (IIntrinsicReduceList f xs) =
-  [idoc|_mlc_reduce_list(#{printExpr f}, #{printExpr xs})|]
 printExpr (IIntrinsicChannel sid) =
   [idoc|_mlc_open_channel(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicSpawn sid h f) =
   [idoc|_mlc_spawn(#{printExpr f}, #{printExpr h}, mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicSettle h) =
   [idoc|_mlc_settle(#{printExpr h})|]
-printExpr (IIntrinsicReplay sid (Just t) h f) =
+printExpr (IIntrinsicGather native sid (Just t) f) =
+  [idoc|#{gatherFn native}<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr f})|]
+printExpr (IIntrinsicGather native sid Nothing f) =
+  [idoc|#{gatherFn native}(mlc_schema_table[#{pretty sid}], #{printExpr f})|]
+printExpr (IIntrinsicGatherPut sid h v) =
+  [idoc|_mlc_gather_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr v})|]
+printExpr (IIntrinsicFold True _ _ _ _ _ _ _) =
+  error "morloc bug: a C++ fold was given the file route, which only Python and R folds take (FOLD-9)"
+printExpr (IIntrinsicFold False (Just sid) mb ml ini step comb f) =
+  [idoc|_mlc_fold#{foldTypes mb ml}(mlc_schema_table[#{pretty sid}], #{printExpr ini}, #{printExpr step}, #{printExpr comb}, #{printExpr f})|]
+printExpr (IIntrinsicFold False Nothing mb ml ini step comb f) =
+  [idoc|_mlc_fold_schemaless#{foldTypes mb ml}(#{printExpr ini}, #{printExpr step}, #{printExpr comb}, #{printExpr f})|]
+printExpr (IIntrinsicFoldPut (Just sid) mb ml step h v) =
+  [idoc|_mlc_fold_put#{foldTypes mb ml}(mlc_schema_table[#{pretty sid}], #{printExpr step}, #{printExpr h}, #{printExpr v})|]
+printExpr (IIntrinsicFoldPut Nothing mb ml step h v) =
+  [idoc|_mlc_fold_put_schemaless#{foldTypes mb ml}(#{printExpr step}, #{printExpr h}, #{printExpr v})|]
+printExpr (IIntrinsicReplay _ sid (Just t) h f) =
   [idoc|_mlc_replay<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
-printExpr (IIntrinsicReplay sid Nothing h f) =
+printExpr (IIntrinsicReplay _ sid Nothing h f) =
   [idoc|_mlc_replay(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
 printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
@@ -189,8 +202,8 @@ printExpr (IIntrinsicOpenOStream sid path) =
   [idoc|_mlc_open_ostream(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicOpenIStream sid path) =
   [idoc|_mlc_open_istream(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
-printExpr (IIntrinsicWrite sid level value handle) =
-  [idoc|_mlc_write(mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr value}, #{printExpr handle})|]
+printExpr (IIntrinsicWrite sink sid level value handle) =
+  (if sink then "_mlc_sink_write" else "_mlc_write") <> [idoc|(mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr value}, #{printExpr handle})|]
 printExpr (IIntrinsicAppend sid path) =
   [idoc|_mlc_append(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicConcat paths dest) =
@@ -228,17 +241,25 @@ printStmt :: IStmt -> MDoc
 printStmt (IAssign v Nothing e) = "auto" <+> pretty v <+> "=" <+> printExpr e <> ";"
 printStmt (IAssign v (Just t) e) = renderIType t <+> pretty v <+> "=" <+> printExpr e <> ";"
 -- C++ uses an indexed for loop with push_back
+-- The collection is evaluated once, before the loop: it may be a call.
 printStmt (IMapList resultVar resultType iterVar collection bodyStmts yieldExpr) =
   vsep
     [ resultDecl
     , block
         4
-        [idoc|for(size_t #{pretty iterVar}_idx = 0; #{pretty iterVar}_idx < #{printExpr collection}.size(); #{pretty iterVar}_idx++)|]
+        ""
         ( vsep
-            ( [idoc|auto #{pretty iterVar} = #{printExpr collection}[#{pretty iterVar}_idx];|]
-                : map printStmt bodyStmts
-                ++ [[idoc|#{pretty resultVar}.push_back(#{printExpr yieldExpr});|]]
-            )
+            [ [idoc|auto&& #{pretty iterVar}_c = #{printExpr collection};|]
+            , block
+                4
+                [idoc|for(size_t #{pretty iterVar}_idx = 0; #{pretty iterVar}_idx < #{pretty iterVar}_c.size(); #{pretty iterVar}_idx++)|]
+                ( vsep
+                    ( [idoc|const auto& #{pretty iterVar} = #{pretty iterVar}_c[#{pretty iterVar}_idx];|]
+                        : map printStmt bodyStmts
+                        ++ [[idoc|#{pretty resultVar}.push_back(#{printExpr yieldExpr});|]]
+                    )
+                )
+            ]
         )
     ]
   where
@@ -271,13 +292,14 @@ printStmt (IIfNotNull resultVar resultType source unwrapVar unwrapType bodyStmts
     ]
   where
     srcVar = unwrapVar <> "_src"
-    srcDecl = [idoc|auto #{pretty srcVar} = #{printExpr source};|]
+    -- The optional and its value are only read here, so both are references.
+    srcDecl = [idoc|auto&& #{pretty srcVar} = #{printExpr source};|]
     resultDecl = case resultType of
       Just t -> [idoc|#{renderIType t} #{pretty resultVar} = std::nullopt;|]
       Nothing -> [idoc|auto #{pretty resultVar} = std::nullopt;|]
     unwrapDecl = case unwrapType of
-      Just t -> [idoc|#{renderIType t} #{pretty unwrapVar} = #{pretty srcVar}.value();|]
-      Nothing -> [idoc|auto #{pretty unwrapVar} = #{pretty srcVar}.value();|]
+      Just t -> [idoc|const #{renderIType t}& #{pretty unwrapVar} = #{pretty srcVar}.value();|]
+      Nothing -> [idoc|const auto& #{pretty unwrapVar} = #{pretty srcVar}.value();|]
 printStmt (IReturn e) = "return(" <> printExpr e <> ");"
 printStmt (IExprStmt e) = printExpr e <> ";"
 printStmt (IFunDef _ _ _ _) = error "IFunDef not yet implemented for C++ printer"
@@ -435,31 +457,40 @@ printCppEnumDecl :: MDoc -> [Text] -> MDoc
 printCppEnumDecl name ctors =
   vsep
     [ "enum class" <+> name <+> ": uint8_t {"
-    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- indexed ctors])
     , "};"
     ]
 
-printCppVariantDecl :: MDoc -> [(Text, [MDoc])] -> MDoc
-printCppVariantDecl name arms =
+-- | A variant's wrapper and its arms' forward declarations; with template
+-- parameters, the wrapper and each arm are templates over them.
+printCppVariantDecl :: [MDoc] -> MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantDecl params name arms =
   vsep
-    [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
-    , "struct" <+> name <+> "{"
+    [ vsep [templ <> "struct" <+> armName name c <> ";" | (c, _) <- arms]
+    , templ <> "struct" <+> name <+> "{"
     , indent 4 ("std::variant<"
-                  <> hsep (punctuate "," ["std::shared_ptr<const " <> armName name c <> ">" | (c, _) <- arms])
+                  <> hsep (punctuate "," ["std::shared_ptr<const " <> armName self c <> ">" | (c, _) <- arms])
                   <> "> v;")
     , "};"
     ]
+  where
+    templ = templatePrefix params
+    self = name <> printRecordTemplate params
 
 -- | The arm bodies, emitted after every wrapper exists.
-printCppVariantArms :: MDoc -> [(Text, [MDoc])] -> MDoc
-printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
+printCppVariantArms :: [MDoc] -> MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantArms params name arms = vsep [armStruct c ts | (c, ts) <- arms]
   where
     armStruct c ts =
       vsep
-        [ "struct" <+> armName name c <+> "{"
-        , indent 4 (vsep [t <+> "f" <> pretty i <> ";" | (i, t) <- zip [(0 :: Int) ..] ts])
+        [ templatePrefix params <> "struct" <+> armName name c <+> "{"
+        , indent 4 (vsep [t <+> "f" <> pretty i <> ";" | (i, t) <- indexed ts])
         , "};"
         ]
+
+templatePrefix :: [MDoc] -> MDoc
+templatePrefix [] = ""
+templatePrefix params = printTemplateHeader params <> " "
 
 -- | The struct that holds one arm's fields: the wrapper's name with
 -- @_<Constructor>@ appended to its HEAD. For a plain name that is
@@ -468,25 +499,28 @@ printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
 -- template of its own, taking the wrapper's arguments. A user who maps a
 -- parameterized @data@ writes the arms to that convention.
 armName :: MDoc -> Text -> MDoc
-armName n c =
-  let (headT, args) = T.breakOn "<" (render n)
-  in pretty headT <> "_" <> pretty c <> pretty args
+armName n c = pretty (armNameText (render n) c)
+
+armNameText :: Text -> Text -> Text
+armNameText n c =
+  let (headT, args) = T.breakOn "<" n
+  in headT <> "_" <> c <> args
 
 -- | Emit the three walk steps of a variant wrapper.
 --
 -- The slot layout lives in the runtime; these only pick an arm. An arm with
 -- fields hands its struct to the walk, which the arm's own node marshals.
-printCppVariantSerializers :: MDoc -> [(Text, [MDoc])] -> MDoc
-printCppVariantSerializers name arms =
+printCppVariantSerializers :: [MDoc] -> MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantSerializers params name arms =
   vsep [sizeFn, "", toFn, "", fromFn]
   where
-    idxArms = zip [(0 :: Int) ..] arms
+    idxArms = indexed arms
 
     armPayload i = "*std::get<" <> pretty i <> ">(obj.v)"
 
     sizeFn =
       vsep
-        [ "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
+        [ memberHeader params <> "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
             <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
             [ "static_assert(mlc::const_arms<decltype(obj.v)>::value,"
@@ -506,7 +540,7 @@ printCppVariantSerializers name arms =
 
     toFn =
       vsep
-        [ "void MlcNode<" <> name <> ">::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const"
+        [ memberHeader params <> "void MlcNode<" <> name <> ">::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const"
             <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
             [ "switch (obj.v.index()) {"
@@ -524,7 +558,7 @@ printCppVariantSerializers name arms =
 
     fromFn =
       vsep
-        [ "void MlcNode<" <> name <> ">::read_step(MlcReadWalk& w, const Schema* schema, const void* data,"
+        [ memberHeader params <> "void MlcNode<" <> name <> ">::read_step(MlcReadWalk& w, const Schema* schema, const void* data,"
             <+> name <> "* out, size_t) {"
         , indent 4 $ vsep
             [ "switch (read_variant_tag(data)) {"
@@ -567,26 +601,30 @@ printArmMarshallers rtype fields =
       vsep
         [ "void MlcNode<" <> rtype <> ">::" <> sig <+> rtype <> post
         , "{"
-        , indent 4 (vsep (prelude <> zipWith fieldDoc [0 ..] fields))
+        , indent 4 (vsep (prelude <> mapIndexed fieldDoc fields))
         , "}"
         ]
     key i = "f" <> pretty i
     param i = "schema->parameters[" <> pretty i <> "]"
     dst i = "(char*)dest + schema->offsets[" <> pretty i <> "]"
     src i = "(const char*)data + schema->offsets[" <> pretty i <> "]"
-    kept wf =
-      wfToWire wf
-        <> [ "auto mlc_w = std::make_shared<std::decay_t<decltype(" <> wfWire wf <> ")>>(" <> wfWire wf <> ");"
-           , "w.keep.push_back(mlc_w);"
-           ]
+    -- GEN-14: the field's wire form, made once per write and shared by the
+    -- size and write walks.
+    kept i wf =
+      [ "auto mlc_make = [&] {"
+      , indent 4 (vsep (wfToWire wf <> ["return " <> wfWire wf <> ";"]))
+      , "};"
+      , "const auto& mlc_w = mlc_converted<std::decay_t<decltype(mlc_make())>>(w, " <> param i <> ", &obj."
+          <> key i <> ", &mlc_field_tag<" <> rtype <> ", " <> pretty i <> ">, mlc_make);"
+      ]
     writeField :: Int -> (MDoc, Maybe WireField) -> MDoc
     writeField i (_, Nothing) = "w.child(" <> param i <> ", " <> dst i <> ", obj." <> key i <> ");"
     writeField i (_, Just wf) =
-      braces' (kept wf <> ["w.child(" <> param i <> ", " <> dst i <> ", *mlc_w);"])
+      braces' (kept i wf <> ["w.child(" <> param i <> ", " <> dst i <> ", mlc_w);"])
     sizeField :: Int -> (MDoc, Maybe WireField) -> MDoc
     sizeField i (_, Nothing) = "w.child(" <> param i <> ", obj." <> key i <> ", true);"
     sizeField i (_, Just wf) =
-      braces' (kept wf <> ["w.child(" <> param i <> ", *mlc_w, true);"])
+      braces' (kept i wf <> ["w.child(" <> param i <> ", mlc_w, true);"])
     readField :: Int -> (MDoc, Maybe WireField) -> MDoc
     readField i (_, Nothing) = "w.child(" <> param i <> ", " <> src i <> ", &out->" <> key i <> ");"
     readField i (t, Just wf) =
@@ -606,17 +644,81 @@ printArmMarshallers rtype fields =
 printStructTypedef ::
   [MDoc] -> -- template parameters (e.g., ["T"])
   MDoc -> -- the name of the structure (e.g., "Person")
+  Bool -> -- whether it declares a defaulted equality
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printStructTypedef params rname fields = vsep [template, struct]
+printStructTypedef params rname eq fields = vsep [template, struct]
   where
     template = printTemplateHeader params
     struct =
       block
         4
         ("struct" <+> rname)
-        (vsep [t <+> k <> ";" | (k, t) <- fields])
+        (vsep ([t <+> k <> ";" | (k, t) <- fields] <> [equality | eq]))
         <> ";"
+    equality = "bool operator==(const" <+> rname <> "&) const = default;"
+
+-- | The struct holding a handle's fields: @R_fields@ for @R@, and for a
+-- template instance the suffix goes before the arguments (@R_fields<int>@).
+handleFields :: MDoc -> MDoc
+handleFields n = armName n "fields"
+
+-- | A record that refers to itself, declared as a handle to its fields
+-- (CPP-6). A template over parameters defines its constructors in the
+-- class, and takes its fields only as exactly its fields type: deciding
+-- whether the handle can be moved must not instantiate the fields struct,
+-- which holds the handle.
+printHandleDecl :: [MDoc] -> MDoc -> MDoc
+printHandleDecl params name =
+  vsep
+    [ templatePrefix params <> "struct" <+> name
+    , "{"
+    , "    std::shared_ptr<const " <> fields <> "> p;"
+    , indent 4 (vsep ctors)
+    , "    explicit " <> name <> "(std::shared_ptr<const " <> fields <> "> q) : p(std::move(q)) {}"
+    , "    " <> name <> "(const " <> name <> "&) = default;"
+    , "    " <> name <> "(" <> name <> "&&) noexcept = default;"
+    , "    " <> name <> "& operator=(const " <> name <> "&) = default;"
+    , "    " <> name <> "& operator=(" <> name <> "&&) noexcept = default;"
+    , "    const " <> fields <> "* operator->() const { return p.get(); }"
+    , "    const " <> fields <> "& operator*() const { return *p; }"
+    , "};"
+    ]
+  where
+    fields = handleFields (name <> printRecordTemplate params)
+    ctors
+      | null params = [name <> "();", "explicit " <> name <> "(" <> fields <> " f);"]
+      | otherwise =
+          [ name <> "() {"
+          , "    static const auto mlc_empty = std::shared_ptr<const " <> fields <> ">(std::make_shared<" <> fields <> ">());"
+          , "    p = mlc_empty;"
+          , "}"
+          , "template <class F> requires std::is_same_v<F, " <> fields <> ">"
+          , "#ifdef MLC_REC_HPP"
+          , "explicit " <> name <> "(F f) : p(mlc::make_arm<" <> fields <> ">(std::move(f))) {}"
+          , "#else"
+          , "explicit " <> name <> "(F f) : p(std::make_shared<" <> fields <> ">(std::move(f))) {}"
+          , "#endif"
+          ]
+
+-- | The definitions of a handle's constructors, after its fields struct; a
+-- template's are in its class.
+printHandleDefs :: [MDoc] -> MDoc -> MDoc
+printHandleDefs (_ : _) _ = ""
+printHandleDefs [] name =
+  vsep
+    [ "inline " <> name <> "::" <> name <> "() {"
+    , "    static const auto mlc_empty = std::shared_ptr<const " <> fields <> ">(std::make_shared<" <> fields <> ">());"
+    , "    p = mlc_empty;"
+    , "}"
+    , "#ifdef MLC_REC_HPP"
+    , "inline " <> name <> "::" <> name <> "(" <> fields <> " f) : p(mlc::make_arm<" <> fields <> ">(std::move(f))) {}"
+    , "#else"
+    , "inline " <> name <> "::" <> name <> "(" <> fields <> " f) : p(std::make_shared<" <> fields <> ">(std::move(f))) {}"
+    , "#endif"
+    ]
+  where
+    fields = handleFields name
 
 -- | Render the write step of a struct: each field into its slot.
 printSerializer ::
@@ -624,17 +726,27 @@ printSerializer ::
   MDoc -> -- type of thing being serialized
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printSerializer params rtype fields =
+printSerializer = printSerializerWith False
+
+-- | The write step of a struct, or of a handle (CPP-6) when the flag is set.
+printSerializerWith ::
+  Bool ->
+  [MDoc] ->
+  MDoc ->
+  [(MDoc, MDoc)] ->
+  MDoc
+printSerializerWith handle params rtype fields =
   [idoc|
 #{memberHeader params}void MlcNode<#{rtype}>::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const #{rtype}& obj, size_t)
 {
-#{block 4 "" (vsep (zipWith writeField [0 ..] (map fst fields)))}
+#{block 4 "" (vsep (mapIndexed writeField (map fst fields)))}
 }
 |]
   where
     writeField :: Int -> MDoc -> MDoc
     writeField idx key =
-      [idoc|w.child(schema->parameters[#{pretty idx}], (char*)dest + schema->offsets[#{pretty idx}], obj.#{key});|]
+      [idoc|w.child(schema->parameters[#{pretty idx}], (char*)dest + schema->offsets[#{pretty idx}], obj#{member}#{key});|]
+    member = if handle then "->" else "." :: MDoc
 
 -- | Render the read and size steps of a struct.
 printDeserializer ::
@@ -642,25 +754,152 @@ printDeserializer ::
   MDoc -> -- type of thing being deserialized
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printDeserializer params rtype fields =
+printDeserializer = printDeserializerWith False
+
+-- | The read and size steps of a struct, or of a handle (CPP-6) when the
+-- flag is set.
+printDeserializerWith ::
+  Bool ->
+  [MDoc] ->
+  MDoc ->
+  [(MDoc, MDoc)] ->
+  MDoc
+printDeserializerWith handle params rtype fields =
   [idoc|
 #{memberHeader params}void MlcNode<#{rtype}>::read_step(MlcReadWalk& w, const Schema* schema, const void* data, #{rtype}* out, size_t)
 {
-#{block 4 "" (vsep (zipWith readField [0 ..] (map fst fields)))}
+#{block 4 "" (vsep (open <> mapIndexed readField (map fst fields)))}
 }
 
 #{memberHeader params}void MlcNode<#{rtype}>::size_step(MlcSizeWalk& w, const Schema* schema, const #{rtype}& obj, size_t)
 {
     w.total += schema->width;
-#{block 4 "" (vsep (zipWith sizeField [0 ..] (map fst fields)))}
+#{block 4 "" (vsep (mapIndexed sizeField (map fst fields)))}
 }
 |]
   where
+    open =
+      [ "auto mlc_node = mlc::make_arm<" <> handleFields rtype <> ">();" | handle ]
+        <> [ "*out = " <> rtype <> "(mlc_node);" | handle ]
+    target = if handle then "mlc_node->" else "out->" :: MDoc
     readField :: Int -> MDoc -> MDoc
     readField idx key =
-      [idoc|w.child(schema->parameters[#{pretty idx}], (const char*)data + schema->offsets[#{pretty idx}], &out->#{key});|]
+      [idoc|w.child(schema->parameters[#{pretty idx}], (const char*)data + schema->offsets[#{pretty idx}], &#{target}#{key});|]
 
     -- A field's fixed width lies inside the record's, so only its tail counts.
+    member = if handle then "->" else "." :: MDoc
     sizeField :: Int -> MDoc -> MDoc
     sizeField idx key =
-      [idoc|w.child(schema->parameters[#{pretty idx}], obj.#{key}, true);|]
+      [idoc|w.child(schema->parameters[#{pretty idx}], obj#{member}#{key}, true);|]
+
+-- | How a record's field reaches the wire (GEN-14).
+data FieldConv
+  = NoConv
+  -- ^ written as it is held
+  | AlwaysConv
+  -- ^ through its 'MlcFieldConv' specialisation
+  | ConvByInstance
+  -- ^ through its specialisation for the instance at hand, if it has one
+
+-- | The write, read and size steps of a generated record, each field
+-- converted as its mode says. A converted value is made once per write
+-- (GEN-14): the size walk makes it and the write walk reuses it.
+printRecordMarshallers :: Bool -> [MDoc] -> MDoc -> [(MDoc, FieldConv)] -> MDoc
+printRecordMarshallers handle params rtype fields =
+  vsep
+    [ step "write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const" "& obj, size_t)" [] writeField
+    , step "read_step(MlcReadWalk& w, const Schema* schema, const void* data," "* out, size_t)" open readField
+    , step "size_step(MlcSizeWalk& w, const Schema* schema, const" "& obj, size_t)" ["w.total += schema->width;"] sizeField
+    ]
+  where
+    step sig post prelude fieldDoc =
+      vsep
+        [ memberHeader params <> "void MlcNode<" <> rtype <> ">::" <> sig <+> rtype <> post
+        , "{"
+        , indent 4 (vsep (prelude <> mapIndexed fieldDoc fields))
+        , "}"
+        ]
+    member = if handle then "->" else "." :: MDoc
+    open =
+      [ "auto mlc_node = mlc::make_arm<" <> handleFields rtype <> ">();" | handle ]
+        <> [ "*out = " <> rtype <> "(mlc_node);" | handle ]
+    target = if handle then "mlc_node->" else "out->" :: MDoc
+    param i = "schema->parameters[" <> pretty i <> "]"
+    dst i = "(char*)dest + schema->offsets[" <> pretty i <> "]"
+    src i = "(const char*)data + schema->offsets[" <> pretty i <> "]"
+    conv i = "using mlc_c = MlcFieldConv<" <> rtype <> ", " <> pretty i <> ">;"
+    made i key = "const auto& mlc_v = mlc_converted<typename mlc_c::raw>(w, " <> param i <> ", &obj" <> member <> key <> ", &mlc_field_tag<" <> rtype <> ", " <> "mlc_c::index>, [&] { return mlc_c::to_raw(obj" <> member <> key <> "); });"
+    byMode i mode plain converted = case mode of
+      NoConv -> plain
+      AlwaysConv -> braces' (conv i : converted)
+      ConvByInstance ->
+        vsep
+          [ "if constexpr (MlcFieldConv<" <> rtype <> ", " <> pretty i <> ">::converts) {"
+          , indent 4 (vsep (conv i : converted))
+          , "} else {"
+          , indent 4 plain
+          , "}"
+          ]
+    writeField i (key, mode) =
+      byMode i mode
+        ("w.child(" <> param i <> ", " <> dst i <> ", obj" <> member <> key <> ");")
+        [made i key, "w.child(" <> param i <> ", " <> dst i <> ", mlc_v);"]
+    sizeField i (key, mode) =
+      byMode i mode
+        ("w.child(" <> param i <> ", obj" <> member <> key <> ", true);")
+        [made i key, "w.child(" <> param i <> ", mlc_v, true);"]
+    readField i (key, mode) =
+      byMode i mode
+        ("w.child(" <> param i <> ", " <> src i <> ", &" <> target <> key <> ");")
+        [ "auto mlc_raw = std::make_shared<typename mlc_c::raw>();"
+        , "w.keep.push_back(mlc_raw);"
+        , "w.after(+[](MlcReadWalk&, const Schema*, const void* mlc_d, void* mlc_o, size_t) {"
+        , "    *static_cast<typename mlc_c::native*>(mlc_o) = mlc_c::from_raw(*static_cast<const typename mlc_c::raw*>(mlc_d));"
+        , "}, schema, mlc_raw.get(), &" <> target <> key <> ");"
+        , "w.child(" <> param i <> ", " <> src i <> ", mlc_raw.get());"
+        ]
+    braces' xs = vsep ["{", indent 4 (vsep xs), "}"]
+
+-- | The conversion of one field of one record instance (GEN-14): its native
+-- type, the type it is written as, and the statements and expression each
+-- way (from @mlc_x@, the field, and from @mlc_r@, the written value).
+printFieldConv :: MDoc -> Int -> MDoc -> MDoc -> ([MDoc], MDoc) -> ([MDoc], MDoc) -> MDoc
+printFieldConv rtype i native raw (toStmts, toE) (fromStmts, fromE) =
+  vsep
+    [ "template<>"
+    , "struct MlcFieldConv<" <> rtype <> ", " <> pretty i <> "> {"
+    , indent 4 $ vsep
+        [ "static constexpr bool converts = true;"
+        , "static constexpr size_t index = " <> pretty i <> ";"
+        , "using native = " <> native <> ";"
+        , "using raw = " <> raw <> ";"
+        , "static raw to_raw(const native& mlc_x) {"
+        , indent 4 (vsep (toStmts <> ["return " <> toE <> ";"]))
+        , "}"
+        , "static native from_raw(const raw& mlc_r) {"
+        , indent 4 (vsep (fromStmts <> ["return " <> fromE <> ";"]))
+        , "}"
+        ]
+    , "};"
+    ]
+
+-- | The field of an instance that is written as it is held (GEN-14).
+printFieldNoConv :: MDoc -> Int -> MDoc
+printFieldNoConv rtype i =
+  vsep
+    [ "template<>"
+    , "struct MlcFieldConv<" <> rtype <> ", " <> pretty i <> "> {"
+    , "    static constexpr bool converts = false;"
+    , "};"
+    ]
+
+gatherFn :: Bool -> MDoc
+gatherFn True = "_mlc_gather_native"
+gatherFn False = "_mlc_gather_file"
+
+-- | The accumulator and batch types of a fold, which its helper cannot
+-- deduce from a callable.
+foldTypes :: Maybe IType -> Maybe IType -> MDoc
+foldTypes (Just b) (Just l) = "<" <> renderIType b <> ", " <> renderIType l <> ">"
+foldTypes _ _ = ""
+

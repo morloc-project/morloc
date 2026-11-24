@@ -33,10 +33,14 @@ const ABANDONED: u32 = 2;
 
 pub(crate) const FAILED_IO: u32 = 1;
 pub(crate) const FAILED_PIPE_CLOSED: u32 = 2;
+// SLOT-35
+const MESSAGE_PENDING: u32 = 1 << 31;
 
 const ERR_BYTES: usize = 240;
 const WAIT_SLICE: Duration = Duration::from_millis(100);
 const SPIN: Duration = Duration::from_micros(50);
+// SLOT-19: how often a waiting custodian re-checks its closer
+const RELEASE_CHECK: Duration = Duration::from_millis(20);
 
 #[repr(C)]
 pub(crate) struct Entry {
@@ -91,8 +95,9 @@ pub(crate) struct CustodyQueue {
     epoch: AtomicU32,
     closer_pid: AtomicU32,
     closer_start: AtomicU64,
-    // SLOT-22: sleepers on `tail` and on `done`.
-    tail_waiters: AtomicU32,
+    // SLOT-22: the custodian's bell, its sleepers, and sleepers on `done`.
+    bell: AtomicU32,
+    bell_waiters: AtomicU32,
     done_waiters: AtomicU32,
     entries: [Entry; QUEUE_SLOTS],
     spares: [AtomicIsize; QUEUE_SLOTS],
@@ -213,11 +218,35 @@ impl CustodyQueue {
     pub(crate) fn pin_level(&self, slot_level: &AtomicU8, level: u8) -> Result<(), u8> {
         if self.pinned.load(Ordering::Acquire) == 0 {
             slot_level.store(level, Ordering::Relaxed);
-            // SLOT-12: an uncompressed batch needs little room behind its writer.
-            if level == 0 {
-                self.set_depth((self.depth() as usize).min(LEVEL0_DEPTH));
-            }
+            self.clamp_before_pin(level);
             self.pinned.store(1, Ordering::Release);
+            return Ok(());
+        }
+        self.check_level(slot_level, level)
+    }
+
+    // SLOT-12, SLOT-35
+    pub(crate) fn clamp_before_pin(&self, level: u8) -> Option<u32> {
+        if level != 0 || self.pinned.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        let was = self.depth.load(Ordering::Acquire);
+        self.set_depth((self.depth() as usize).min(LEVEL0_DEPTH));
+        Some(was)
+    }
+
+    pub(crate) fn unclamp(&self, was: u32) {
+        if self.pinned.load(Ordering::Acquire) == 0 {
+            self.set_depth(was as usize);
+        }
+    }
+
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn check_level(&self, slot_level: &AtomicU8, level: u8) -> Result<(), u8> {
+        if self.pinned.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
         let pinned = slot_level.load(Ordering::Relaxed);
@@ -246,11 +275,13 @@ impl CustodyQueue {
 
 
     pub(crate) fn failure(&self) -> Option<MorlocError> {
-        match self.failed.load(Ordering::Acquire) {
+        let failed = self.failed.load(Ordering::Acquire);
+        match failed & !MESSAGE_PENDING {
             0 => None,
             FAILED_PIPE_CLOSED => Some(MorlocError::PipeClosed),
+            _ if failed & MESSAGE_PENDING != 0 => Some(MorlocError::Other("writing the stream failed".into())),
             _ => {
-                let n = (self.err_len.load(Ordering::Acquire) as usize).min(ERR_BYTES);
+                let n = (self.err_len.load(Ordering::Relaxed) as usize).min(ERR_BYTES);
                 let bytes: Vec<u8> = self.err[..n].iter().map(|b| b.load(Ordering::Relaxed)).collect();
                 Some(MorlocError::Other(format!(
                     "writing the stream failed: {}",
@@ -269,13 +300,18 @@ impl CustodyQueue {
     }
 
     // SLOT-12: a producer holds the slot lock; it waits only on the custodian.
-    pub(crate) fn push(&self, item: Item) -> Result<u32, MorlocError> {
-        self.push_with(item, true, Closing::Wait)
+    fn push(&self, item: Item) -> Result<u32, MorlocError> {
+        self.push_with(item, true, Closing::Wait, true).map(|t| t.expect("a waiting push queues"))
+    }
+
+    // SLOT-37: `None` where `push` would sleep.
+    fn try_push(&self, item: Item) -> Result<Option<u32>, MorlocError> {
+        self.push_with(item, true, Closing::Wait, false)
     }
 
     /// Queue the close: once queued, nothing more is.
-    pub(crate) fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
-        self.push_with(Item::marker(ENTRY_CLOSE, status), false, closing)
+    fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
+        self.push_with(Item::marker(ENTRY_CLOSE, status), false, closing, true).map(|t| t.expect("a waiting push queues"))
     }
 
     // SLOT-19: a detached closer, or one that died, leaves the slot to the writer.
@@ -288,6 +324,13 @@ impl CustodyQueue {
     /// then among the spares.
     pub(crate) fn wait_room(&self) -> Result<(), MorlocError> {
         self.wait_room_for(None)
+    }
+
+    // SLOT-37: `wait_room` would sleep.
+    pub(crate) fn lacks_room(&self) -> bool {
+        self.failure().is_none()
+            && !self.is_closed()
+            && self.tail.load(Ordering::Relaxed).wrapping_sub(self.done.load(Ordering::Acquire)) >= self.depth()
     }
 
     // SLOT-12, SLOT-32: `most` outstanding, the depth when `None`.
@@ -310,7 +353,7 @@ impl CustodyQueue {
         }
     }
 
-    fn push_with(&self, item: Item, refuse_failed: bool, closing: Closing) -> Result<u32, MorlocError> {
+    fn push_with(&self, item: Item, refuse_failed: bool, closing: Closing, wait: bool) -> Result<Option<u32>, MorlocError> {
         loop {
             if refuse_failed {
                 if let Some(e) = self.failure() {
@@ -347,11 +390,14 @@ impl CustodyQueue {
                     self.closed.store(1, Ordering::Release);
                 }
                 self.tail.store(t.wrapping_add(1), Ordering::Release);
-                wake_sleepers(&self.tail, &self.tail_waiters);
-                return Ok(t.wrapping_add(1));
+                self.ring();
+                return Ok(Some(t.wrapping_add(1)));
             }
             if !self.host_alive() {
                 return Err(Self::gone());
+            }
+            if !wait {
+                return Ok(None);
             }
             sleep_on(&self.done, &self.done_waiters, d, WAIT_SLICE);
         }
@@ -401,7 +447,7 @@ impl CustodyQueue {
         wait_word::wake_all(&self.done);
     }
 
-    pub(crate) fn take_spare(&self) -> Option<RelPtr> {
+    fn take_spare(&self) -> Option<RelPtr> {
         let sh = self.spare_head.load(Ordering::Relaxed);
         let st = self.spare_tail.load(Ordering::Acquire);
         if sh == st {
@@ -412,7 +458,7 @@ impl CustodyQueue {
         Some(r)
     }
 
-    pub(crate) fn pop(&self) -> Option<Item> {
+    fn pop(&self) -> Option<Item> {
         let h = self.head.load(Ordering::Relaxed);
         let t = self.tail.load(Ordering::Acquire);
         if h == t {
@@ -434,16 +480,36 @@ impl CustodyQueue {
         Some(item)
     }
 
-    pub(crate) fn wait_pushed(&self, timeout: Duration) {
+    // SLOT-22: a push moves the bell after the push count.
+    fn ring(&self) {
+        self.bell.fetch_add(1, Ordering::SeqCst);
+        wake_sleepers(&self.bell, &self.bell_waiters);
+    }
+
+    // SLOT-22: a stop moves the bell after the stop word and wakes unconditionally.
+    fn ring_for_stop(&self) {
+        self.bell.fetch_add(1, Ordering::SeqCst);
+        wait_word::wake_all(&self.bell);
+    }
+
+    // SLOT-22: read before the custodian looks at its stop word and the queue.
+    pub(crate) fn bell(&self) -> u32 {
+        self.bell.load(Ordering::SeqCst)
+    }
+
+    // SLOT-22: sleep while the bell holds `rung`.
+    pub(crate) fn wait_pushed(&self, rung: u32, timeout: Duration) {
         let h = self.head.load(Ordering::Relaxed);
         let spin_until = std::time::Instant::now() + SPIN;
         while std::time::Instant::now() < spin_until {
-            if self.tail.load(Ordering::Acquire) != h {
+            if self.tail.load(Ordering::Acquire) != h || self.bell.load(Ordering::Acquire) != rung {
                 return;
             }
             std::hint::spin_loop();
         }
-        sleep_on(&self.tail, &self.tail_waiters, h, timeout);
+        #[cfg(test)]
+        pause_before_sleep();
+        sleep_on(&self.bell, &self.bell_waiters, rung, timeout);
     }
 
     pub(crate) fn finish(&self, n: u32) {
@@ -451,7 +517,7 @@ impl CustodyQueue {
         wake_sleepers(&self.done, &self.done_waiters);
     }
 
-    pub(crate) fn give_spare(&self, block: RelPtr) -> bool {
+    fn give_spare(&self, block: RelPtr) -> bool {
         let st = self.spare_tail.load(Ordering::Relaxed);
         let sh = self.spare_head.load(Ordering::Acquire);
         if st.wrapping_sub(sh) as usize >= QUEUE_SLOTS {
@@ -462,8 +528,9 @@ impl CustodyQueue {
         true
     }
 
+    // SLOT-35
     pub(crate) fn fail(&self, kind: u32, msg: &str) {
-        if self.failed.load(Ordering::Acquire) != 0 {
+        if self.failed.compare_exchange(0, kind | MESSAGE_PENDING, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
         }
         let b = msg.as_bytes();
@@ -471,17 +538,57 @@ impl CustodyQueue {
         for (dst, src) in self.err.iter().zip(&b[..n]) {
             dst.store(*src, Ordering::Relaxed);
         }
-        self.err_len.store(n as u32, Ordering::Release);
+        self.err_len.store(n as u32, Ordering::Relaxed);
         self.failed.store(kind, Ordering::Release);
         wait_word::wake_all(&self.done);
     }
 
-    pub(crate) fn drain_spares(&self) -> Vec<RelPtr> {
+    fn drain_spares(&self) -> Vec<RelPtr> {
         let mut out = Vec::new();
         while let Some(r) = self.take_spare() {
             out.push(r);
         }
         out
+    }
+}
+
+// SLOT-39: the producer side of a slot's queue, reached only through a guard of the slot.
+pub(crate) struct Producer<'g> {
+    q: &'static CustodyQueue,
+    _guard: std::marker::PhantomData<&'g ()>,
+}
+
+impl crate::stream::SlotGuard<'_> {
+    // SLOT-39
+    pub(crate) fn custody(&self) -> Result<Producer<'_>, MorlocError> {
+        let q = queue_at(self.slot().custody.get())?;
+        Ok(Producer { q, _guard: std::marker::PhantomData })
+    }
+}
+
+impl Producer<'_> {
+    pub(crate) fn queue(&self) -> &'static CustodyQueue {
+        self.q
+    }
+
+    pub(crate) fn push(&self, item: Item) -> Result<u32, MorlocError> {
+        self.q.push(item)
+    }
+
+    pub(crate) fn try_push(&self, item: Item) -> Result<Option<u32>, MorlocError> {
+        self.q.try_push(item)
+    }
+
+    pub(crate) fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
+        self.q.push_close(status, closing)
+    }
+
+    pub(crate) fn take_spare(&self) -> Option<RelPtr> {
+        self.q.take_spare()
+    }
+
+    pub(crate) fn drain_spares(&self) -> Vec<RelPtr> {
+        self.q.drain_spares()
     }
 }
 
@@ -502,10 +609,11 @@ pub(crate) fn queue_at(rel: RelPtr) -> Result<&'static CustodyQueue, MorlocError
 }
 
 /// The nexus's stdout and stderr writer: given the stream's handle and the
-/// `len` bytes at `bytes` (a sub-packet or a footer), read before it
-/// returns, it returns `SINK_WRITTEN`, `SINK_PIPE_CLOSED`, or `SINK_FAILED`
-/// with a malloc'd message in `*errmsg`.
-pub type StdioSink = unsafe extern "C" fn(handle: i64, bytes: *const u8, len: u64, errmsg: *mut *mut libc::c_char) -> i32;
+/// `iovcnt` parts at `iov` whose concatenation is one frame (a sub-packet
+/// or a footer), read before it returns, it returns `SINK_WRITTEN`,
+/// `SINK_PIPE_CLOSED`, or `SINK_FAILED` with a malloc'd message in `*errmsg`.
+pub type StdioSink =
+    unsafe extern "C" fn(handle: i64, iov: *const libc::iovec, iovcnt: usize, errmsg: *mut *mut libc::c_char) -> i32;
 
 pub const SINK_WRITTEN: i32 = 0;
 pub const SINK_FAILED: i32 = 1;
@@ -525,12 +633,40 @@ pub(crate) enum Out {
 
 pub(crate) const STOP_NONE: u32 = u32::MAX;
 
+#[cfg(test)]
+pub(crate) static SYNCED: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+
+// SLOT-22: the next custodian about to sleep reports when, waits `pause`,
+// then reports when the pause ended.
+#[cfg(test)]
+pub(crate) static PAUSE_BEFORE_SLEEP: std::sync::Mutex<Option<(Duration, std::sync::mpsc::Sender<std::time::Instant>)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn pause_before_sleep() {
+    let armed = PAUSE_BEFORE_SLEEP.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some((pause, tx)) = armed {
+        let _ = tx.send(std::time::Instant::now());
+        std::thread::sleep(pause);
+        let _ = tx.send(std::time::Instant::now());
+    }
+}
+
+#[cfg(test)]
+impl CustodyQueue {
+    pub(crate) fn set_test_closer(&self, pid: u32, start: u64) {
+        self.closer_start.store(start, Ordering::Relaxed);
+        self.closer_pid.store(pid, Ordering::Release);
+    }
+}
+
 pub(crate) struct Writer {
     q: &'static CustodyQueue,
     slot: &'static crate::stream::RegistrySlot,
     slot_idx: usize,
     gen: u64,
     out: Out,
+    durable: bool,
     value_schema: morloc_runtime_types::schema::Schema,
     elem_schema: morloc_runtime_types::schema::Schema,
     cursor: u64,
@@ -538,7 +674,6 @@ pub(crate) struct Writer {
     diag: morloc_runtime_types::packet::StreamDiag,
     inflight: std::collections::VecDeque<(crate::write_behind::Ticket, Item)>,
     failed: bool,
-    stdio_out: Vec<u8>,
     share: Option<Share>,
 }
 
@@ -559,6 +694,7 @@ pub(crate) struct WriterInit {
     pub slot_idx: usize,
     pub gen: u64,
     pub out: Out,
+    pub durable: bool,
     pub value_schema: morloc_runtime_types::schema::Schema,
     pub elem_schema: morloc_runtime_types::schema::Schema,
     pub cursor: u64,
@@ -569,12 +705,11 @@ pub(crate) struct WriterInit {
 impl Writer {
     pub(crate) fn new(i: WriterInit) -> Writer {
         Writer {
-            q: i.q, slot: i.slot, slot_idx: i.slot_idx, gen: i.gen, out: i.out,
+            q: i.q, slot: i.slot, slot_idx: i.slot_idx, gen: i.gen, out: i.out, durable: i.durable,
             value_schema: i.value_schema, elem_schema: i.elem_schema,
             cursor: i.cursor, entries: i.entries, diag: i.diag,
             inflight: Default::default(),
             failed: false,
-            stdio_out: Vec::new(),
             share: None,
         }
     }
@@ -601,6 +736,7 @@ impl Writer {
 
     fn serve_queue(&mut self, stop: &AtomicU32) {
         loop {
+            let rung = self.q.bell();
             let status = stop.load(Ordering::Acquire);
             if status != STOP_NONE {
                 self.commit_all();
@@ -622,13 +758,17 @@ impl Writer {
                     }
                 }
                 None if !self.inflight.is_empty() => self.commit_front(),
-                None => self.q.wait_pushed(WAIT_SLICE),
+                None => self.q.wait_pushed(rung, WAIT_SLICE),
             }
         }
     }
 
     // SLOT-10
     fn serve(&mut self, item: Item) -> bool {
+        // SLOT-32: a stream its writer failed is no longer counted.
+        if self.q.is_failed() {
+            self.go_idle();
+        }
         match item.kind {
             ENTRY_BUFFER | ENTRY_BLOCK => {
                 if self.failed {
@@ -689,14 +829,20 @@ impl Writer {
     // SLOT-13, SLOT-19
     fn await_release(&self, stop: &AtomicU32) {
         loop {
-            if !crate::stream::slot_generation_is_pub(self.slot, self.gen) || stop.load(Ordering::Acquire) != STOP_NONE {
+            if !crate::stream::slot_generation_is_pub(self.slot, self.gen) {
                 return;
             }
+            // SLOT-19: the stop is read before the closer, so a closer gone before the stop is seen.
+            let stopped = stop.load(Ordering::Acquire) != STOP_NONE;
             if self.q.closer_gone() {
                 crate::stream::release_closed_slot(self.slot_idx, self.gen);
                 return;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            if stopped {
+                return;
+            }
+            // SLOT-22: a stop wakes this wait.
+            wait_word::wait(stop, STOP_NONE, RELEASE_CHECK);
         }
     }
 
@@ -798,19 +944,17 @@ impl Writer {
         }
     }
 
-    fn send_stdio(&mut self, parts: &[&[u8]]) -> Result<(), (u32, String)> {
+    fn send_stdio(&self, parts: &[&[u8]]) -> Result<(), (u32, String)> {
         let Some(sink) = STDIO_SINK.get() else {
             return Err((FAILED_IO, "no stdout writer in this process".into()));
         };
-        self.stdio_out.clear();
-        for p in parts {
-            self.stdio_out.extend_from_slice(p);
-        }
+        let iov: Vec<libc::iovec> = parts
+            .iter()
+            .map(|p| libc::iovec { iov_base: p.as_ptr() as *mut libc::c_void, iov_len: p.len() })
+            .collect();
         let mut err: *mut libc::c_char = std::ptr::null_mut();
-        // SAFETY: SLOT-16: the sink reads `len` bytes at `bytes` before returning.
-        let res: Result<i32, (u32, String)> = Ok(unsafe {
-            sink(self.handle(), self.stdio_out.as_ptr(), self.stdio_out.len() as u64, &mut err)
-        });
+        // SAFETY: SLOT-16: the sink reads the parts before returning.
+        let res: Result<i32, (u32, String)> = Ok(unsafe { sink(self.handle(), iov.as_ptr(), iov.len(), &mut err) });
         let msg = if err.is_null() {
             String::from("the stdout writer failed")
         } else {
@@ -828,12 +972,21 @@ impl Writer {
 
     // SLOT-14: a failed or discarded stream keeps its temporary footer.
     fn close(&mut self, status: u32) {
+        // SLOT-28: a stream its writer failed keeps its temporary footer.
+        self.failed |= self.q.is_failed();
         if !self.failed && status != STATUS_DISCARD {
-            let footer = morloc_runtime_types::packet::make_final_footer_packet(&self.diag, &self.entries, status as u8);
-            let res = match self.out {
+            let res = morloc_runtime_types::packet::make_final_footer_packet(&self.diag, &self.entries, status as u8)
+                .map_err(|e| (FAILED_IO, e.to_string()))
+                .and_then(|footer| match self.out {
                 Out::File(fd) => crate::stream_format::pwrite_all_fd(fd, &footer, self.cursor)
                     .map_err(|e| (FAILED_IO, e.to_string()))
                     .and_then(|_| {
+                        // SLOT-15
+                        if !self.durable {
+                            return Ok(());
+                        }
+                        #[cfg(test)]
+                        SYNCED.lock().unwrap_or_else(|e| e.into_inner()).push(self.handle());
                         // SAFETY: SLOT-10: fd is the writer's open descriptor.
                         if unsafe { crate::utility::sync_file_data(fd) } != 0 {
                             Err((FAILED_IO, std::io::Error::last_os_error().to_string()))
@@ -842,7 +995,7 @@ impl Writer {
                         }
                     }),
                 Out::Stdio => self.send_stdio(&[&footer]),
-            };
+            });
             if let Err((kind, msg)) = res {
                 self.fail(kind, &msg);
             }
@@ -850,7 +1003,12 @@ impl Writer {
         if let Out::File(fd) = self.out {
             if fd >= 0 {
                 // FORK-3: unlock first; a copy of the descriptor may outlive this one.
-                crate::stream::unlock_and_close(fd);
+                if let Err(e) = crate::stream::unlock_and_close_checked(fd) {
+                    // SLOT-15
+                    if !self.failed && status != STATUS_DISCARD {
+                        self.fail(FAILED_IO, &e.to_string());
+                    }
+                }
             }
             self.out = Out::File(-1);
         }
@@ -865,12 +1023,19 @@ impl Writer {
             return;
         }
         // SLOT-32: at most one spare, and only within the depth.
-        if item.kind == ENTRY_BUFFER
-            && self.q.spares_held() == 0
-            && self.q.outstanding() <= self.q.depth()
-            && self.q.give_spare(item.block)
-        {
-            return;
+        if item.kind == ENTRY_BUFFER && self.q.spares_held() == 0 && self.q.outstanding() <= self.q.depth() {
+            // SLOT-32: under MORLOC_SHM_POISON a spare is released bytes, filled whole.
+            if crate::shm::poison_on_free() {
+                if let Ok(abs) = crate::shm::rel2abs(item.block) {
+                    // SAFETY: SLOT-32: the custodian owns the written block, `shm_block_size` bytes long.
+                    if let Some(n) = unsafe { crate::shm::shm_block_size(abs) } {
+                        unsafe { std::ptr::write_bytes(abs, crate::shm::POISON_BYTE, n) };
+                    }
+                }
+            }
+            if self.q.give_spare(item.block) {
+                return;
+            }
         }
         if let Ok(abs) = crate::shm::rel2abs(item.block) {
             crate::shm::free_uncounted(abs);
@@ -1019,8 +1184,10 @@ pub(crate) fn host_stop(slot_idx: usize, status: u8) {
 fn signal_stop(taken: &[Hosted], status: u8) {
     for h in taken {
         h.stop.store(status as u32, Ordering::Release);
+        // SLOT-22: stopping wakes unconditionally.
+        wait_word::wake_all(&h.stop);
         if !h.share.ended.load(Ordering::Acquire) {
-            wait_word::wake_all(&h.queue.tail);
+            h.queue.ring_for_stop();
         }
     }
 }
@@ -1354,6 +1521,21 @@ mod tests {
         assert!(began.elapsed() >= Duration::from_millis(150));
         taker.join().unwrap();
         assert_eq!(q.pop().unwrap().kind, ENTRY_CLOSE);
+    }
+
+    // SLOT-35
+    #[test]
+    fn the_first_failure_of_a_queue_is_the_one_reported() {
+        let (_a, q) = fresh();
+        q.fail(FAILED_IO, "disk full");
+        q.fail(FAILED_PIPE_CLOSED, "reader gone");
+        let e = q.failure().unwrap();
+        assert!(e.to_string().contains("disk full"), "{e}");
+        q.reset_for_open(3);
+        q.failed.store(FAILED_PIPE_CLOSED | MESSAGE_PENDING, Ordering::Release);
+        assert!(matches!(q.failure(), Some(MorlocError::PipeClosed)));
+        q.fail(FAILED_IO, "late");
+        assert!(matches!(q.failure(), Some(MorlocError::PipeClosed)));
     }
 
     #[test]

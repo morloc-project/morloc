@@ -54,7 +54,7 @@ Code: unaudited
 error.
 
 ### NEWT-7 A newtype with a representation can be unwrapped
-Intent: ruled 2026-10-18
+Intent: ruled 2026-11-15
 Tests: spec-newt-7-1, spec-newt-7-2, spec-newt-7-3, spec-newt-7-4, spec-newt-7-5, spec-newt-7-6, spec-newt-7-7, spec-newt-7-8, spec-newt-7-9, spec-newt-7-10, spec-newt-7-11, spec-newt-7-12
 Code: conforms 2026-10-21
 
@@ -63,16 +63,17 @@ scope, gives `unpack :: N vs -> T`, as if `instance Packable T (N vs)` gave
 it. A `deriving (Packable)` clause where that class is not in scope is an
 error. Records, `data` and
 the runtime handles (`IFile`, `IStream`, `OStream`, `Cell`,
-`PatternChain`) are not covered, and only the compiler's `Packable` class
+`PatternChain`, `Collect`) are not covered, and only the compiler's `Packable` class
 (methods `pack` and `unpack`) is given these instances. The conversion
 changes no value, so a more specific instance never hides it. Within
-one language `L` it is available only when `N` declares no form in `L`;
+one language `L` it is available only when `N` declares no form in `L` at
+the cast's arguments (NATIVE-1);
 otherwise it runs where `N` has none, and the value crosses to it, or the
 build is rejected (REAL-3). Explicit instances for the same head are
 alternatives to it (REAL-1).
 
 ### NEWT-8 `deriving (Packable)` adds `pack`
-Intent: ruled 2026-10-18
+Intent: ruled 2026-11-15
 Tests: spec-newt-8-1, spec-newt-8-2, spec-newt-8-3, spec-newt-8-4, spec-newt-8-5, spec-newt-8-6, spec-newt-8-7, spec-newt-8-8, spec-newt-8-9
 Code: conforms 2026-10-21
 
@@ -80,7 +81,7 @@ Code: conforms 2026-10-21
 representation cast realized as in NEWT-7. It is rejected unless every
 parameter of `N` occurs in `T` outside Nat arithmetic and type functions,
 so that `T` determines the newtype a value is packed into. Only a newtype
-may derive `Packable`, and a runtime handle may not.
+may derive `Packable`, and a runtime handle (NEWT-7's list) may not.
 
 Why: `pack` asserts what `N` adds to `T`; a parameter `T` does not
 determine (a dimension, a phantom tag) would be claimed unchecked.
@@ -99,3 +100,15 @@ no `Packable` instance.
 Why: a wire form fixed at the declaration is the same for every program
 that uses the type; one given only by instances could differ between
 programs that exchange data.
+
+### NEWT-10 A map of a representation cast is a cast
+Intent: ruled 2026-11-22
+Tests: spec-newt-10-1
+Code: conforms 2026-11-22
+
+`map unpack xs` and `map pack xs`, where the cast is the representation
+cast of NEWT-7 or NEWT-8, are the cast of `xs` itself: the cast changes no
+value, and a `map` of a function that changes no value is the identity,
+by the functor law `map id == id`. The compiler assumes this law of every
+`map` an instance provides, sourced ones included, and does not walk the
+container.

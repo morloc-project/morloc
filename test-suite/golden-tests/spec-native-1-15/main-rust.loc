@@ -1,0 +1,30 @@
+-- NATIVE-1: the Rust twin of main.loc. The unpacked value of a record rebuilt
+-- field by field crosses as a tuple, so `PointT` and `WT<f64>` hold only
+-- native fields.
+module main (readPt, mkPt, readPts, readOpt, readW)
+
+import root-rust
+
+newtype Tenths = Int
+type Rust => Tenths = "f64"
+
+instance Packable Int Tenths where
+  source Rust from "p.rs" ("packTenths" as pack, "unpackTenths" as unpack)
+
+record Pair a where
+  fst :: a
+  snd :: a
+record Rust => Pair a = "PairT<$1>" a
+
+newtype Point = Pair Tenths
+type Rust => Point = "PointT"
+
+newtype W a = Pair (a, a)
+type Rust => W a = "WT<$1>" a
+
+source Rust from "p.rs" ("readPt", "mkPt", "readPts", "readOpt", "readW")
+readPt :: Point -> Int
+mkPt :: Int -> Point
+readPts :: [Point] -> Int
+readOpt :: ?Point -> Int
+readW :: W Tenths -> Int
