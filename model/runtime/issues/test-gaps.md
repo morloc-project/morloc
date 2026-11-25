@@ -57,3 +57,33 @@ timing (from the 2026-11-12 audit of the output-path work).
   every C++ pool. `test-only` requires the value to be compiled only into
   tests, and `counter` describes an atomic; the row says `counter` for
   want of a better class. Gap in the class list of model/runtime/state.md.
+- **WorkerPool's nest scenario never grows past one helper.** WPOOL-1,
+  WPOOL-6: WorkerPool.cfg (nest) has Spans = 2 and Cap = 2, so WS = 2 and
+  MaxH = Grow = Min(2, 1) = 1, although its comment says two callers, two
+  helpers. Read, and checked with a temporary invariant `count <= 1` on
+  nest (47,465 states, no violation). Only fair, nestfail and cap have
+  two or more active helpers, so no config checks two helpers on two
+  callers' nested jobs.
+- **WorkerPool defines a scenario no config runs.** `wake3` (three
+  helpers, Cap 3) is defined and described in the header; no .cfg uses
+  it. Read.
+- **A forked child's new helper can reuse a name an old job's `hon`
+  holds.** WorkerPool.tla, FORK-8: harmless while the child never waits
+  on its parent's jobs; if it ever does, WaitsOnlyOnLiveThreads could
+  pass falsely. Read.
+- **RouterForward's StartIf hardcodes `next > 3`.** RouterForward.tla
+  uses the literal rather than `Cardinality(Gens)`, so changing Gens
+  would silently change what the model checks. Read.
+- **ForkSide's failed gather take leaves the entry live.** SIDE-1: in
+  ForkSide.tla's TakeBegin, the failed branch in gather mode (FAILED or
+  putFailed) does not move the state word to TAKEN, drain the native
+  list or close an open side, so owner puts after it still append and
+  return ok, and a child can keep writing a side nobody reads. The
+  runtime does follow SIDE-1 (fork_side.rs `end` moves every state to
+  TAKEN before `finish` checks the failure), so the model checks
+  behaviour the code cannot have and never checks a failed take's
+  TAKEN state; TakeHoldsEveryReturnedPut applies only to a take that
+  succeeded. Fold mode does seal in that branch. Read.
+- **ForkSide's AFailedStepFailsTheFold also covers gather.**
+  ForkSide_failed_put_unmarked.bug (gather) is caught by it; the name
+  says fold only. Read.

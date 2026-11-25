@@ -126,6 +126,7 @@ Init ==
     /\ notRunLie = FALSE
 
 WorkerOpen(x) == cs[x] \in {"open", "cclosed"}
+CallerOpen(x) == cs[x] \in {"open", "wclosed"}
 CloseCaller(c, x) == IF c[x] = "wclosed" THEN "closed" ELSE "cclosed"
 CloseWorker(c, x) == IF c[x] = "cclosed" THEN "closed" ELSE "wclosed"
 Fresh == {x \in Conns : cs[x] = "unused"}
@@ -133,6 +134,14 @@ Live == {w \in Workers : ws[w] \in {"idle", "computing", "blocked"}}
 Blocked == {w \in Workers : ws[w] = "blocked"}
 
 \* ---- callers ----
+
+\* What is queued to a closed caller end, and whether its connection was
+\* kept or killed, is never read (CallerEndsOpen); forgetting it merges
+\* states that differ only there.
+Forget(D) ==
+    /\ outbox' = [y \in Conns |-> IF y \in D THEN <<>> ELSE outbox[y]]
+    /\ kept' = [y \in Conns |-> IF y \in D THEN FALSE ELSE kept[y]]
+    /\ killed' = [y \in Conns |-> IF y \in D THEN FALSE ELSE killed[y]]
 
 \* A fresh connection carrying r, queued on the listening socket; the caller
 \* end of `drop` (a dead or revoked connection) closes with it.
@@ -145,6 +154,7 @@ Connect(t, r, drop) ==
           /\ inbox' = [inbox EXCEPT ![x] = r]
           /\ backlog' = backlog \cup {x}
           /\ cur' = [cur EXCEPT ![t] = x]
+          /\ Forget(IF drop = None THEN {} ELSE {drop})
 
 \* A send on a cached connection whose callee end is open is delivered; one
 \* whose callee end is closed fails having delivered nothing (EPIPE).
@@ -155,7 +165,7 @@ StartCall(t, r, cb) ==
     /\ IF cache[t] # None /\ WorkerOpen(cache[t])
        THEN /\ inbox' = [inbox EXCEPT ![cache[t]] = r]
             /\ cur' = [cur EXCEPT ![t] = cache[t]]
-            /\ UNCHANGED <<cs, backlog, cache>>
+            /\ UNCHANGED <<cs, backlog, cache, outbox, kept, killed>>
        ELSE /\ cache' = [cache EXCEPT ![t] = None]
             /\ Connect(t, r, cache[t])
 
@@ -164,7 +174,7 @@ CallOwn(t) ==
     /\ own[t] < Own(t)
     /\ ~(cbBy = t /\ cbState = "taken")
     /\ StartCall(t, [who |-> t, n |-> calls[t] + 1], FALSE)
-    /\ UNCHANGED <<calls, own, outbox, kept, killed, revoked>>
+    /\ UNCHANGED <<calls, own, revoked>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED otherVars
 
@@ -186,7 +196,7 @@ CallCb(t) ==
     /\ cbBy = t
     /\ cbState' = "sent"
     /\ StartCall(t, [who |-> t, n |-> calls[t] + 1], TRUE)
-    /\ UNCHANGED <<calls, own, outbox, kept, killed, revoked>>
+    /\ UNCHANGED <<calls, own, revoked>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED <<runs, poolUp, deaths, retired, failed, cbBy, falseCrash, wrongReply, notRunLie>>
 
@@ -195,6 +205,9 @@ Finish(t) ==
     /\ own' = IF isCb[t] THEN own ELSE [own EXCEPT ![t] = @ + 1]
     /\ ts' = [ts EXCEPT ![t] = "idle"]
     /\ cbState' = IF isCb[t] THEN "done" ELSE cbState
+    /\ cur' = [cur EXCEPT ![t] = None]
+    /\ curReq' = [curReq EXCEPT ![t] = NoReq]
+    /\ isCb' = [isCb EXCEPT ![t] = FALSE]
 
 \* The next message on the call's connection: its reply, or a notice that
 \* the request was not run, which is retried on a fresh connection. A read
@@ -205,22 +218,22 @@ Receive(t) ==
     /\ LET x == cur[t] IN
          /\ outbox[x] # <<>>
          /\ IF Head(outbox[x]) = NotRun
-            THEN /\ outbox' = [outbox EXCEPT ![x] = Tail(@)]
-                 /\ notRunLie' = (notRunLie \/ runs[curReq[t]] > 0)
+            THEN /\ notRunLie' = (notRunLie \/ runs[curReq[t]] > 0)
                  /\ cache' = [cache EXCEPT ![t] = None]
                  /\ Connect(t, curReq[t], x)
-                 /\ UNCHANGED <<ts, calls, own, cbState, wrongReply>>
+                 /\ UNCHANGED <<ts, calls, own, cbState, wrongReply, curReq, isCb>>
             ELSE \E more \in IF Len(outbox[x]) > 1 THEN BOOLEAN ELSE {FALSE} :
-                 /\ outbox' = [outbox EXCEPT ![x] = IF more THEN <<>> ELSE Tail(@)]
                  /\ wrongReply' = (wrongReply \/ Head(outbox[x]) # curReq[t])
                  /\ IF kept[x] /\ (~more \/ Variant = "read_past_frame")
                     THEN /\ cache' = [cache EXCEPT ![t] = x]
-                         /\ UNCHANGED cs
+                         /\ outbox' = [outbox EXCEPT ![x] = IF more THEN <<>> ELSE Tail(@)]
+                         /\ UNCHANGED <<cs, kept, killed>>
                     ELSE /\ cache' = [cache EXCEPT ![t] = None]
                          /\ cs' = [cs EXCEPT ![x] = CloseCaller(cs, x)]
+                         /\ Forget({x})
                  /\ Finish(t)
-                 /\ UNCHANGED <<notRunLie, cur, inbox, backlog>>
-    /\ UNCHANGED <<curReq, isCb, kept, killed, revoked>>
+                 /\ UNCHANGED <<notRunLie, inbox, backlog>>
+    /\ UNCHANGED revoked
     /\ UNCHANGED workerVars
     /\ UNCHANGED <<runs, poolUp, deaths, retired, failed, cbBy, falseCrash>>
 
@@ -234,8 +247,9 @@ PeerGone(t) ==
          /\ falseCrash' = (falseCrash \/ ~killed[x])
          /\ cs' = [cs EXCEPT ![x] = "closed"]
          /\ cache' = [cache EXCEPT ![t] = None]
+         /\ Forget({x})
     /\ Finish(t)
-    /\ UNCHANGED <<cur, curReq, isCb, inbox, outbox, kept, killed, revoked, backlog>>
+    /\ UNCHANGED <<inbox, revoked, backlog>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED <<runs, poolUp, deaths, retired, failed, cbBy, wrongReply, notRunLie>>
 
@@ -251,8 +265,9 @@ Exit(t) ==
     /\ IF cache[t] # None
        THEN cs' = [cs EXCEPT ![cache[t]] = CloseCaller(cs, cache[t])]
        ELSE UNCHANGED cs
+    /\ Forget(IF cache[t] # None THEN {cache[t]} ELSE {})
     /\ cache' = [cache EXCEPT ![t] = None]
-    /\ UNCHANGED <<cur, curReq, isCb, calls, own, inbox, outbox, kept, killed, revoked, backlog>>
+    /\ UNCHANGED <<cur, curReq, isCb, calls, own, inbox, revoked, backlog>>
     /\ UNCHANGED workerVars
     /\ UNCHANGED otherVars
 
@@ -263,6 +278,7 @@ Spawn ==
     /\ Cardinality(Blocked) >= Cardinality(Live)
     /\ \E w \in Workers :
          /\ ws[w] \in {"absent", "gone"}
+         /\ w = CHOOSE v \in Workers : ws[v] \in {"absent", "gone"}
          /\ ws' = [ws EXCEPT ![w] = "idle"]
          /\ held' = [held EXCEPT ![w] = {}]
          /\ srv' = [srv EXCEPT ![w] = None]
@@ -302,7 +318,7 @@ Accept(w) ==
          IN /\ backlog' = backlog \ {x}
             /\ cs' = [y \in Conns |-> IF y \in C THEN CloseWorker(cs, y) ELSE cs[y]]
             /\ inbox' = [y \in Conns |-> IF y \in C \/ y = x THEN NoReq ELSE inbox[y]]
-            /\ outbox' = [y \in Conns |-> IF y \in N
+            /\ outbox' = [y \in Conns |-> IF y \in N /\ CallerOpen(y)
                                           THEN Append(outbox[y], NotRun) ELSE outbox[y]]
             /\ revoked' = revoked \cup (S \cap N)
             /\ runs' = [runs EXCEPT ![inbox[x]] = @ + 1]
@@ -352,13 +368,14 @@ Reply(w) ==
     /\ ws[w] = "computing"
     /\ CallsBack(req[w]) => cbState = "done"
     /\ LET x == srv[w] IN
-         /\ outbox' = [outbox EXCEPT ![x] = Append(@, req[w])]
-         /\ kept' = [kept EXCEPT ![x] = TRUE]
+         /\ outbox' = [outbox EXCEPT ![x] = IF CallerOpen(x) THEN Append(@, req[w]) ELSE @]
+         /\ kept' = [kept EXCEPT ![x] = CallerOpen(x)]
          /\ held' = [held EXCEPT ![w] = @ \cup {x}]
     /\ srv' = [srv EXCEPT ![w] = None]
+    /\ req' = [req EXCEPT ![w] = NoReq]
     /\ ws' = [ws EXCEPT ![w] = "idle"]
     /\ UNCHANGED callerVars
-    /\ UNCHANGED <<cs, inbox, killed, revoked, backlog, req>>
+    /\ UNCHANGED <<cs, inbox, killed, revoked, backlog>>
     /\ UNCHANGED otherVars
 
 \* The reply is not sent whole: the connection closes and the call fails.
@@ -372,13 +389,14 @@ ReplyFail(w) ==
          THEN /\ held' = [held EXCEPT ![w] = @ \cup {x}]
               /\ UNCHANGED <<cs, killed>>
          ELSE /\ cs' = [cs EXCEPT ![x] = CloseWorker(cs, x)]
-              /\ killed' = [killed EXCEPT ![x] = TRUE]
+              /\ killed' = [killed EXCEPT ![x] = CallerOpen(x)]
               /\ UNCHANGED held
     /\ srv' = [srv EXCEPT ![w] = None]
     /\ ws' = [ws EXCEPT ![w] = "idle"]
+    /\ req' = [req EXCEPT ![w] = NoReq]
     /\ failed' = 1
     /\ UNCHANGED callerVars
-    /\ UNCHANGED <<inbox, outbox, kept, revoked, backlog, req>>
+    /\ UNCHANGED <<inbox, outbox, kept, revoked, backlog>>
     /\ UNCHANGED <<runs, poolUp, deaths, retired, cbState, cbBy, falseCrash, wrongReply, notRunLie>>
 
 \* A held connection whose caller closed it is closed and let go.
@@ -407,7 +425,7 @@ Retire(w) ==
            C == IF notice THEN {} ELSE S
        IN /\ cs' = [y \in Conns |-> IF y \in C THEN CloseWorker(cs, y) ELSE cs[y]]
           /\ inbox' = [y \in Conns |-> IF y \in C THEN NoReq ELSE inbox[y]]
-          /\ outbox' = [y \in Conns |-> IF y \in S /\ notice
+          /\ outbox' = [y \in Conns |-> IF y \in S /\ notice /\ CallerOpen(y)
                                         THEN Append(outbox[y], NotRun) ELSE outbox[y]]
           /\ revoked' = IF notice THEN revoked \cup S ELSE revoked
     /\ held' = [held EXCEPT ![w] = {}]
@@ -431,7 +449,7 @@ Die ==
     /\ req' = [w \in Workers |-> NoReq]
     /\ backlog' = {}
     /\ cs' = [x \in Conns |-> IF WorkerOpen(x) THEN CloseWorker(cs, x) ELSE cs[x]]
-    /\ killed' = [x \in Conns |-> killed[x] \/ WorkerOpen(x)]
+    /\ killed' = [x \in Conns |-> killed[x] \/ (WorkerOpen(x) /\ CallerOpen(x))]
     /\ inbox' = [x \in Conns |-> NoReq]
     /\ revoked' = {}
     /\ UNCHANGED callerVars
@@ -487,6 +505,14 @@ Spec ==
 
 \* ---- properties ----
 
+\* A caller reads only connections whose caller end is open, and a closed
+\* caller end has nothing left that Forget would drop.
+CallerEndsOpen ==
+    /\ \A t \in Threads : cache[t] # None => CallerOpen(cache[t])
+    /\ \A t \in Threads : ts[t] = "waiting" => CallerOpen(cur[t])
+    /\ \A x \in Conns : ~CallerOpen(x) =>
+         outbox[x] = <<>> /\ ~kept[x] /\ ~killed[x]
+
 AtMostOnce == \A r \in ReqIds : runs[r] <= 1
 NoWrongReply == ~wrongReply
 \* A call fails only when the pool died or its reply was not sent.
@@ -498,10 +524,16 @@ HoldsOnlyWhenIdle == \A w \in Workers :
     /\ Cardinality(held[w]) <= 1
     /\ ws[w] # "idle" => held[w] = {}
 
-\* Every call ends, in a reply or a failure.
-NoStrandedCall == \A t \in Threads : ts[t] = "waiting" ~> ts[t] # "waiting"
+\* Every call ends, in a reply or a failure. P ~> ~P is []<>~P, which TLC
+\* checks without a tableau.
+NoStrandedCall == \A t \in Threads : []<>(ts[t] # "waiting")
 
-\* A held connection its caller closed is let go.
-EofLetsGo == \A w \in Workers, x \in Conns :
-    (x \in held[w] /\ cs[x] = "cclosed") ~> (x \notin held[w])
+\* A held connection its caller closed is let go: Closed(w, x) ~> x \notin
+\* held[w]. A step leaves Closed(w, x) only by letting x go, so the
+\* leads-to is the conjunction below.
+Closed(w, x) == x \in held[w] /\ cs[x] = "cclosed"
+EofLetsGo ==
+    /\ \A w \in Workers, x \in Conns : []<>~Closed(w, x)
+    /\ [][\A w \in Workers, x \in Conns :
+            Closed(w, x) => Closed(w, x)' \/ x \notin held'[w]]_vars
 ================================================================================

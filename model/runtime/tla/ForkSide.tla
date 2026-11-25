@@ -115,8 +115,7 @@ VARIABLES
     cur,        \* thread -> put id in flight
     snap,       \* thread -> prepare's snapshot found an entry it owns
     kid,        \* thread -> the child its fork will make
-    did,        \* thread -> one-shot ops done: "take", "start"
-    waited,     \* thread -> children it has reaped
+    did,        \* thread -> one-shot ops done: "take", "reenter"
     know,       \* thread -> returned puts in its causal past
     res,        \* put id -> "none" | "pending" | "ok" | "late" | "lost"
                 \*   | "reentrant" | "failed"
@@ -137,12 +136,12 @@ VARIABLES
     peak        \* ghost: most slots ever checked out (BUSY or FAILED) at once
 
 vars == <<st, nat, drained, count, alive, born, pid, sideSt, side, closedBy,
-          openFailed, pc, cur, snap, kid, did, waited, know, res, before,
+          openFailed, pc, cur, snap, kid, did, know, res, before,
           nextId, tk, takeRes, result, natPtr, slot, held, initObj, counted,
           sideV, putFailed, badOk, overlap, peak>>
 procVars == <<st, nat, drained, count, alive, born, pid>>
 sideVars == <<sideSt, side, closedBy, openFailed, putFailed>>
-threadVars == <<pc, cur, snap, kid, did, waited, know>>
+threadVars == <<pc, cur, snap, kid, did, know>>
 putVars == <<res, before, nextId>>
 takeVars == <<tk, takeRes, result>>
 foldVars == <<natPtr, slot, held, initObj, counted, sideV, badOk, overlap, peak>>
@@ -166,7 +165,6 @@ Init ==
     /\ snap = [t \in Threads |-> FALSE]
     /\ kid = [t \in Threads |-> "none"]
     /\ did = [t \in Threads |-> {}]
-    /\ waited = [t \in Threads |-> {}]
     /\ know = [t \in Threads |-> {}]
     /\ res = [i \in Ids |-> "none"]
     /\ before = [i \in Ids |-> {}]
@@ -209,6 +207,13 @@ Route(p, s) ==
                [] OTHER -> "lost"
     ELSE IF s = "SIDE" THEN "side" ELSE "lost"
 
+\* The returned puts a put that begins on thread t must follow. A gather
+\* orders by causality: per thread, fork and waitpid. A fold's order
+\* property holds only for a sequential producer, which may hand each put
+\* to any of the owner's worker threads, so every put returned so far is
+\* in its past.
+Past(t) == IF Mode = "fold" THEN {i \in Ids : res[i] = "ok"} ELSE know[t]
+
 BeginPut(t) ==
     LET p == ProcOf(t)
         id == nextId
@@ -216,8 +221,6 @@ BeginPut(t) ==
     IN
     /\ pc[t] = "Idle" /\ nextId <= MaxPuts /\ st[p] /= "none"
     /\ nextId' = nextId + 1
-    /\ before' = [before EXCEPT ![id] = know[t]]
-    /\ cur' = [cur EXCEPT ![t] = id]
     /\ \/ /\ IF r \in {"late", "lost"}
              THEN /\ res' = [res EXCEPT ![id] = r]
                   /\ UNCHANGED pc
@@ -238,13 +241,16 @@ BeginPut(t) ==
              ELSE /\ side' = IF sideSt = "open" THEN Append(side, Poison) ELSE side
                   /\ UNCHANGED putFailed
     /\ overlap' = (overlap \/ \E j \in Ids : res[j] = "pending")
-    /\ UNCHANGED <<procVars, sideSt, closedBy, openFailed, snap, kid, did, waited,
+    /\ UNCHANGED <<procVars, sideSt, closedBy, openFailed, snap, kid, did,
                    know, takeVars, natPtr, slot, held, initObj, counted, sideV, badOk,
                    peak>>
+    \* cur and before are read only while the put is in flight.
+    /\ cur' = [cur EXCEPT ![t] = IF pc'[t] = "Idle" THEN 0 ELSE id]
+    /\ before' = [before EXCEPT ![id] = IF pc'[t] = "Idle" THEN {} ELSE Past(t)]
 
 Returned(t, id) ==
     /\ res' = [res EXCEPT ![id] = "ok"]
-    /\ know' = [know EXCEPT ![t] = @ \cup {id}]
+    /\ know' = IF Mode = "gather" THEN [know EXCEPT ![t] = @ \cup {id}] ELSE know
 
 \* Under the list's mutex: one step.
 NatAppend(t) ==
@@ -256,8 +262,9 @@ NatAppend(t) ==
        ELSE /\ nat' = [nat EXCEPT ![p] = Append(@, id)]
             /\ Returned(t, id)
     /\ pc' = [pc EXCEPT ![t] = "Idle"]
-    /\ UNCHANGED <<st, drained, count, alive, born, pid, sideVars, cur, snap,
-                   kid, did, waited, before, nextId, takeVars, foldVars>>
+    /\ cur' = [cur EXCEPT ![t] = 0]
+    /\ UNCHANGED <<st, drained, count, alive, born, pid, sideVars, snap,
+                   kid, did, before, nextId, takeVars, foldVars>>
 
 \* Under the slot lock: one step (StreamQueue).
 SideWrite(t) ==
@@ -269,8 +276,9 @@ SideWrite(t) ==
          [] OTHER -> /\ res' = [res EXCEPT ![id] = "lost"]
                      /\ UNCHANGED <<side, know>>
     /\ pc' = [pc EXCEPT ![t] = "Idle"]
-    /\ UNCHANGED <<procVars, sideSt, closedBy, openFailed, putFailed, cur, snap, kid, did,
-                   waited, before, nextId, takeVars, foldVars>>
+    /\ cur' = [cur EXCEPT ![t] = 0]
+    /\ UNCHANGED <<procVars, sideSt, closedBy, openFailed, putFailed, snap, kid, did,
+                   before, nextId, takeVars, foldVars>>
 
 \* ---- fork: prepare, open, fork, after-fork ----
 
@@ -287,7 +295,7 @@ ForkBegin(t) ==
     /\ count' = [count EXCEPT ![p] = @ + 1]
     /\ snap' = [snap EXCEPT ![t] = st[p] /= "none" /\ IsOwner(p)]
     /\ pc' = [pc EXCEPT ![t] = "Prep"]
-    /\ UNCHANGED <<st, nat, drained, born, pid, sideVars, cur, did, waited,
+    /\ UNCHANGED <<st, nat, drained, born, pid, sideVars, cur, did,
                    know, putVars, takeVars, foldVars>>
 
 Prep(t) ==
@@ -300,7 +308,7 @@ Prep(t) ==
        ELSE /\ pc' = [pc EXCEPT ![t] = "ForkNow"]
             /\ UNCHANGED st
     /\ UNCHANGED <<nat, drained, count, alive, born, pid, sideVars, cur, snap,
-                   kid, did, waited, know, putVars, takeVars, foldVars>>
+                   kid, did, know, putVars, takeVars, foldVars>>
 
 Open(t) ==
     LET p == ProcOf(t) IN
@@ -315,7 +323,7 @@ Open(t) ==
           /\ UNCHANGED sideSt
     /\ pc' = [pc EXCEPT ![t] = "ForkNow"]
     /\ UNCHANGED <<nat, drained, count, alive, born, pid, side, closedBy, putFailed,
-                   cur, snap, kid, did, waited, know, putVars, takeVars, foldVars>>
+                   cur, snap, kid, did, know, putVars, takeVars, foldVars>>
 
 ForkNow(t) ==
     LET p == ProcOf(t) c == kid[t] IN
@@ -333,30 +341,21 @@ ForkNow(t) ==
     /\ natPtr' = [natPtr EXCEPT ![c] = natPtr[p]]
     /\ slot' = [slot EXCEPT ![c] = slot[p]]
     /\ pc' = [pc EXCEPT ![t] = "Idle", ![c] = "Idle"]
-    /\ UNCHANGED <<sideVars, cur, snap, kid, did, waited, putVars, takeVars,
+    /\ snap' = [snap EXCEPT ![t] = FALSE]
+    /\ kid' = [kid EXCEPT ![t] = "none"]
+    /\ UNCHANGED <<sideVars, cur, did, putVars, takeVars,
                    held, initObj, counted, sideV, badOk, overlap, peak>>
 
-\* waitpid: the child's causal past joins the waiter's.
+\* waitpid: the child's causal past joins the waiter's. An exited child's
+\* past is fixed, so a second waitpid on it would change nothing.
 Reap(t) ==
     LET p == ProcOf(t) IN
-    /\ pc[t] = "Idle"
+    /\ Mode = "gather" /\ pc[t] = "Idle"
     /\ \E c \in KidSet(p) :
-         /\ alive[c] = "exited" /\ c \notin waited[t]
-         /\ waited' = [waited EXCEPT ![t] = @ \cup {c}]
+         /\ alive[c] = "exited" /\ ~(know[c] \subseteq know[t])
          /\ know' = [know EXCEPT ![t] = @ \cup know[c]]
     /\ UNCHANGED <<procVars, sideVars, pc, cur, snap, kid, did, putVars, takeVars,
                    foldVars>>
-
-\* A sequential producer in another process hands its next put to another
-\* of the owner's worker threads: the returned puts it knows of become
-\* that thread's causal past.
-Pass(t) ==
-    /\ Mode = "fold" /\ t \in PThreads /\ pc[t] = "Idle"
-    /\ \E u \in PThreads \ {t} :
-         /\ pc[u] = "Idle" /\ ~(know[t] \subseteq know[u])
-         /\ know' = [know EXCEPT ![u] = @ \cup know[t]]
-    /\ UNCHANGED <<procVars, sideVars, pc, cur, snap, kid, did, waited, putVars,
-                   takeVars, foldVars>>
 
 \* ---- fold put: checkout, step, store ----
 
@@ -400,7 +399,8 @@ Checkout(t) ==
             /\ peak' = IF Out(slot'[p]) > peak THEN Out(slot'[p]) ELSE peak
             /\ pc' = [pc EXCEPT ![t] = "Step"]
             /\ UNCHANGED res
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, waited, know, before,
+    /\ cur' = [cur EXCEPT ![t] = IF pc'[t] = "Idle" THEN 0 ELSE @]
+    /\ UNCHANGED <<procVars, sideVars, snap, kid, did, know, before,
                    nextId, takeVars, natPtr, initObj, counted, sideV, badOk, overlap>>
 
 \* The slot a thread's put has checked out.
@@ -417,7 +417,7 @@ StepIt(t) ==
           /\ IF x.ref THEN /\ initObj' = Append(initObj, id) /\ UNCHANGED held
                       ELSE /\ held' = [held EXCEPT ![t].v = Append(@, id)]
                            /\ UNCHANGED initObj
-          /\ UNCHANGED <<res, slot>>
+          /\ UNCHANGED <<res, slot, cur>>
        \/ /\ StepMayFail
           /\ res' = [res EXCEPT ![id] = "failed"]
           /\ held' = [held EXCEPT ![t] = NoValue]
@@ -425,8 +425,9 @@ StepIt(t) ==
                      THEN [slot EXCEPT ![p][Mine(slot[p], t)].st = "FAILED"]
                      ELSE slot
           /\ pc' = [pc EXCEPT ![t] = "Idle"]
+          /\ cur' = [cur EXCEPT ![t] = 0]
           /\ UNCHANGED initObj
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, waited, know, before,
+    /\ UNCHANGED <<procVars, sideVars, snap, kid, did, know, before,
                    nextId, takeVars, natPtr, counted, sideV, badOk, overlap, peak>>
 
 \* A sink the user's step calls on its own thread (a stashed handle): one
@@ -436,7 +437,6 @@ ReEnter(t) ==
     /\ pc[t] = "Step" /\ nextId <= MaxPuts /\ "reenter" \notin did[t]
     /\ did' = [did EXCEPT ![t] = @ \cup {"reenter"}]
     /\ nextId' = nextId + 1
-    /\ before' = [before EXCEPT ![id] = know[t]]
     /\ overlap' = TRUE
     /\ IF ~natPtr[p]
        THEN /\ res' = [res EXCEPT ![id] = "late"]
@@ -452,8 +452,9 @@ ReEnter(t) ==
             /\ Returned(t, id)
        ELSE /\ UNCHANGED <<slot, initObj, know>>
             /\ res' = [res EXCEPT ![id] = "reentrant"]
-    /\ UNCHANGED <<procVars, sideVars, pc, cur, snap, kid, waited, takeVars, natPtr,
+    /\ UNCHANGED <<procVars, sideVars, pc, cur, snap, kid, takeVars, natPtr,
                    held, counted, sideV, badOk, peak>>
+    /\ before' = [before EXCEPT ![id] = IF res'[id] = "ok" THEN Past(t) ELSE {}]
 
 \* Under the entry lock: phase 3, into the slot the thread holds. A late
 \* store drops the value after unlocking.
@@ -469,7 +470,8 @@ Store(t) ==
             /\ badOk' = (badOk \/ ~natPtr[p] \/ takeRes /= "none")
     /\ held' = [held EXCEPT ![t] = NoValue]
     /\ pc' = [pc EXCEPT ![t] = "Idle"]
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, waited, before, nextId,
+    /\ cur' = [cur EXCEPT ![t] = 0]
+    /\ UNCHANGED <<procVars, sideVars, snap, kid, did, before, nextId,
                    takeVars, natPtr, initObj, counted, sideV, overlap, peak>>
 
 \* ---- take ----
@@ -499,7 +501,7 @@ TakeBegin(t) ==
                ELSE UNCHANGED <<counted, natPtr>>
             /\ UNCHANGED takeRes
     /\ UNCHANGED <<nat, drained, count, alive, born, pid, sideVars, cur, snap,
-                   kid, waited, know, putVars, result, slot, held, initObj, sideV,
+                   kid, know, putVars, result, slot, held, initObj, sideV,
                    badOk, overlap, peak>>
 
 TakeEnd ==
@@ -514,7 +516,7 @@ TakeDrain(t) ==
     /\ pc' = [pc EXCEPT ![t] = "TakeClose"]
     /\ UNCHANGED <<st, takeRes>>
     /\ UNCHANGED <<nat, count, alive, born, pid, sideVars, cur, snap, kid, did,
-                   waited, know, putVars, tk, foldVars>>
+                   know, putVars, tk, foldVars>>
 
 \* For a fold, the slot_after_take variant seals here, after the count.
 TakeClose(t) ==
@@ -535,7 +537,7 @@ TakeClose(t) ==
             /\ pc' = [pc EXCEPT ![t] = "TakeReplay"]
             /\ UNCHANGED <<st, takeRes, result>>
     /\ UNCHANGED <<nat, drained, count, alive, born, pid, side, openFailed, putFailed, cur, snap,
-                   kid, did, waited, know, putVars, tk, slot, held, initObj,
+                   kid, did, know, putVars, tk, slot, held, initObj,
                    counted, sideV, badOk, overlap, peak>>
 
 \* The side records, each through step, into a value of their own that
@@ -549,7 +551,7 @@ TakeReplay(t) ==
        ELSE /\ sideV' = [ref |-> FALSE, v |-> recs]
             /\ UNCHANGED initObj
     /\ pc' = [pc EXCEPT ![t] = "TakeCombine"]
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, waited, know, putVars,
+    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, know, putVars,
                    takeVars, natPtr, slot, held, counted, badOk, overlap, peak>>
 
 \* The slots in index order, then the replayed side.
@@ -573,53 +575,48 @@ TakeCombine(t) ==
        ELSE /\ takeRes' = "ok"
             /\ result' = CatSlots(1, <<>>) \o Deref(sideV)
     /\ pc' = [pc EXCEPT ![t] = "Idle"]
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, waited, know, putVars,
+    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, know, putVars,
                    tk, foldVars>>
 
-\* A non-owner's take fails. An owner by pid takes its own copy and closes
-\* the side.
+\* A non-owner's take fails and changes nothing, so only a take that closes
+\* the side (an owner by pid, or take_in_child_closes) is a step.
 ChildTake(t) ==
     LET p == ProcOf(t) IN
-    /\ t \in Kids /\ pc[t] = "Idle" /\ "take" \notin did[t] /\ st[p] /= "none"
-    /\ did' = [did EXCEPT ![t] = @ \cup {"take"}]
-    /\ IF (Variant = "take_in_child_closes" \/ IsOwner(p)) /\ sideSt = "open"
-       THEN /\ sideSt' = "closed"
-            /\ closedBy' = p
-       ELSE UNCHANGED <<sideSt, closedBy>>
-    /\ UNCHANGED <<procVars, side, openFailed, putFailed, pc, cur, snap, kid, waited, know,
+    /\ t \in Kids /\ pc[t] = "Idle" /\ st[p] /= "none"
+    /\ (Variant = "take_in_child_closes" \/ IsOwner(p)) /\ sideSt = "open"
+    /\ sideSt' = "closed"
+    /\ closedBy' = p
+    /\ UNCHANGED <<procVars, side, openFailed, putFailed, threadVars,
                    putVars, takeVars, foldVars>>
 
-\* A gather starting in a child waits for the child's forking count.
+\* A gather starting in a child waits for the child's forking count. The
+\* count of a process whose one thread is idle changes only by that
+\* thread's forks, so a start that finds it raised waits forever, and one
+\* that finds it zero changes nothing.
 ChildStart(t) ==
-    /\ t \in Kids /\ pc[t] = "Idle" /\ "start" \notin did[t]
-    /\ did' = [did EXCEPT ![t] = @ \cup {"start"}]
+    /\ t \in Kids /\ pc[t] = "Idle" /\ count[ProcOf(t)] /= 0
     /\ pc' = [pc EXCEPT ![t] = "StartOwn"]
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, waited, know, putVars, takeVars,
+    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, know, putVars, takeVars,
                    foldVars>>
 
-StartOwn(t) ==
-    /\ pc[t] = "StartOwn"
-    /\ count[ProcOf(t)] = 0
-    /\ pc' = [pc EXCEPT ![t] = "Idle"]
-    /\ UNCHANGED <<procVars, sideVars, cur, snap, kid, did, waited, know, putVars,
-                   takeVars, foldVars>>
-
+\* An owner thread that is idle may stay idle for good (Terminating), so
+\* only a child's exit, which its parent can reap, is a step.
 Stop(t) ==
-    /\ pc[t] = "Idle"
+    /\ t \in Kids /\ pc[t] = "Idle"
     /\ pc' = [pc EXCEPT ![t] = "Done"]
-    /\ alive' = IF t \in Kids THEN [alive EXCEPT ![t] = "exited"] ELSE alive
+    /\ alive' = [alive EXCEPT ![t] = "exited"]
     /\ UNCHANGED <<st, nat, drained, count, born, pid, sideVars, cur, snap, kid,
-                   did, waited, know, putVars, takeVars, foldVars>>
+                   did, know, putVars, takeVars, foldVars>>
 
 Thread(t) ==
     \/ Start(t) \/ BeginPut(t) \/ NatAppend(t) \/ SideWrite(t)
-    \/ ForkBegin(t) \/ Prep(t) \/ Open(t) \/ ForkNow(t) \/ Reap(t) \/ Pass(t)
+    \/ ForkBegin(t) \/ Prep(t) \/ Open(t) \/ ForkNow(t) \/ Reap(t)
     \/ Checkout(t) \/ StepIt(t) \/ ReEnter(t) \/ Store(t)
     \/ TakeBegin(t) \/ TakeDrain(t) \/ TakeClose(t) \/ TakeReplay(t) \/ TakeCombine(t)
-    \/ ChildTake(t) \/ ChildStart(t) \/ StartOwn(t) \/ Stop(t)
+    \/ ChildTake(t) \/ ChildStart(t) \/ Stop(t)
 
 Terminating ==
-    /\ \A t \in Threads : pc[t] \in {"None", "Done"}
+    /\ \A t \in Threads : pc[t] \in {"None", "Done"} \/ (t \in PThreads /\ pc[t] = "Idle")
     /\ UNCHANGED vars
 
 Next == (\E t \in Threads : Thread(t)) \/ Terminating

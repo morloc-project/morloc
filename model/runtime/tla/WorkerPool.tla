@@ -62,8 +62,6 @@ CONSTANTS Variant, Scenario
 \*   "fail_wakes_own"    a failed timer start wakes only its own job
 \*   "no_cascade"        a helper joining a job does not pass the wake on
 
-Procs == {"P", "C"}   \* the process and its one forked child
-
 \* ---- Scenarios ------------------------------------------------------------
 \* nest:     two callers, two helpers; job 1's first span posts job 3; no
 \*           failures (nest1, nestfail and forknest have them).
@@ -117,6 +115,8 @@ Nest(j, k) == CASE Scenario = "nest" /\ j = 1 /\ k = 1 -> 3
 FailOK      == Scenario \in {"nest1", "forknest", "nestfail"}
 EscapeOK    == Scenario = "nest1"
 ForkOK      == Scenario \in {"fork", "forknest"}
+\* The process and, where a scenario forks, its one forked child.
+Procs       == IF ForkOK THEN {"P", "C"} ELSE {"P"}
 ExitOK      == Scenario = "exit"
 RetireOK    == Scenario \in {"nest1", "cap"}
 SpawnFailOK == Scenario \in {"nest1", "cap"}
@@ -177,6 +177,21 @@ JobsOn(p, t) == {s[p].stk[t][i].j : i \in 1..Len(s[p].stk[t])}
 LiveHelpers(P) == Helpers \cap P.alive
 Sleepers(P) == {h \in LiveHelpers(P) : P.hpc[h] = "sleep"}
 Awake(P) == {h \in LiveHelpers(P) : P.hpc[h] \in {"idle", "acq"}}
+\* Helpers g and h are twins when swapping their names leaves the state as
+\* it is. Nothing in the spec or its properties tells helper names apart, so
+\* choosing h, of twins g and h, leads to the mirror image of the states
+\* choosing g leads to; of a set of helpers to choose from, only the first
+\* of each set of twins is explored.
+HIdx(h) == CHOOSE i \in 1..Len(HSeq) : HSeq[i] = h
+Named(P, h) == \/ P.holder = h
+               \/ \E j \in Jobs : \/ h \in P.hon[j] \/ h \in P.esc[j]
+                               \/ P.ftrace[j] = h \/ P.jm[j] = h
+Twins(P, g, h) == /\ P.hpc[g] = P.hpc[h] /\ P.timed[g] = P.timed[h]
+                  /\ P.res[g] = P.res[h] /\ P.stk[g] = P.stk[h]
+                  /\ (g \in P.alive) = (h \in P.alive)
+                  /\ (g \in P.created) = (h \in P.created)
+                  /\ ~Named(P, g) /\ ~Named(P, h)
+FirstOf(P, X) == {h \in X : ~\E g \in X : HIdx(g) < HIdx(h) /\ Twins(P, g, h)}
 \* Jobs posted, not yet woken, with spans left.
 Waiting(P) == {j \in Jobs : InQueueOf(P, j) /\ ~P.woken[j] /\ P.next[j] <= Spans /\ ~P.stop[j]}
 \* Woken jobs a helper could join.
@@ -185,7 +200,7 @@ Open(P) == {j \in EligOf(P) : P.woken[j]}
 WakeSet(P, j) ==
   LET W == [P EXCEPT !.woken[j] = TRUE] IN
   IF Variant = "post_no_wake" \/ Sleepers(W) = {} THEN {W}
-  ELSE {[W EXCEPT !.hpc[w] = "idle"] : w \in Sleepers(W)}
+  ELSE {[W EXCEPT !.hpc[w] = "idle"] : w \in FirstOf(W, Sleepers(W))}
 \* With no sleeper to wake, start a helper for an open job.
 StartFor(P) == Sleepers(P) = {} /\ \E j \in Open(P) : P.count < Grow(j)
 
@@ -202,11 +217,15 @@ Fork(p, t) ==
                      !["P"].live = FALSE]
 
 \* ---- Callers ---------------------------------------------------------------
+\* What a post read of the timer before taking the lock; only that variant
+\* reads it, so the others record nothing.
+SeenArmed(p) == Variant = "armed_read_early" /\ s[p].tarmed
+
 Pre(p, c) ==
   /\ c \in Callers /\ s[p].live /\ c \in s[p].alive /\ s[p].cpc[c] = "pre"
   /\ \/ Fork(p, c)
      \/ /\ s' = [s EXCEPT ![p].cpc[c] = "busy",
-                          ![p].stk[c] = <<[Frame("own", TopJob(c), "acq_post") EXCEPT !.sa = s[p].tarmed]>>]
+                          ![p].stk[c] = <<[Frame("own", TopJob(c), "acq_post") EXCEPT !.sa = SeenArmed(p)]>>]
         /\ UNCHANGED forked
 
 \* The instance is looked up at the post; a new generation gets a fresh one.
@@ -296,7 +315,7 @@ TimerFailed(p, t) ==
 \* the reservation back under the lock.
 StartHelper(P) == {[P EXCEPT !.alive = @ \cup {h}, !.created = @ \cup {h}, !.nres = @ - 1,
                              !.hpc[h] = "idle", !.timed[h] = FALSE, !.res[h] = {}, !.stk[h] = <<>>]
-                   : h \in Helpers \ P.alive}
+                   : h \in FirstOf(P, Helpers \ P.alive)}
 FailStart(P) == [P EXCEPT !.count = IF Variant = "spawn_fail_keeps" THEN @ ELSE @ - 1, !.nres = @ - 1]
 
 CallerSpawn(p, t) ==
@@ -388,7 +407,7 @@ Complete(p, t, fail) ==
                  ![p].res[t] = @ \cup {j},
                  ![p].esc[j] = IF e THEN @ \cup {t} ELSE @,
                  ![p].stk[t] = SetTop(@, [f EXCEPT !.st = IF fail THEN fst ELSE "after",
-                                                   !.fl = fail])]
+                                                   !.fl = fail, !.sp = 0, !.nf = FALSE])]
        /\ UNCHANGED forked
 
 \* User code: a span returns, fails, posts a nested job, or forks.
@@ -399,7 +418,7 @@ Run(p, t) ==
      /\ IF n # 0
         THEN /\ s' = [s EXCEPT ![p].stk[t] =
                         Append(SetTop(@, [f EXCEPT !.st = "nest_ret"]),
-                               [Frame("own", n, "acq_post") EXCEPT !.sa = s[p].tarmed])]
+                               [Frame("own", n, "acq_post") EXCEPT !.sa = SeenArmed(p)])]
              /\ UNCHANGED forked
         ELSE /\ Blocking => s[p].next[f.j] > Spans
              /\ \/ Complete(p, t, FALSE)
@@ -450,7 +469,7 @@ After(p, t) ==
   IN /\ At(p, t, "after")
      /\ IF GenCheck /\ P.gen # P.jgen[f.j]
         THEN s' = [s EXCEPT ![p].live = FALSE]
-        ELSE s' = [s EXCEPT ![p].stk[t] = SetTop(@, [f EXCEPT !.st = nst])]
+        ELSE s' = [s EXCEPT ![p].stk[t] = SetTop(@, [f EXCEPT !.st = nst, !.fl = FALSE])]
      /\ UNCHANGED forked
 
 AcqRemove(p, t) ==
@@ -477,6 +496,11 @@ FinishEff(p, t) ==
         !.queue = Remove(@, j),
         !.fin[j] = @ + 1,
         !.jst[j] = IF P.first[j] THEN "failed" ELSE "done",
+        \* Nothing reads these of a freed job again; clearing them keeps
+        \* states that differ only in them from counting apart.
+        !.woken[j] = FALSE, !.next[j] = 1, !.stop[j] = FALSE, !.first[j] = FALSE,
+        !.jgen[j] = 0, !.ftrace[j] = "none", !.handed[j] = FALSE, !.esc[j] = {},
+        !.bypass[j] = 0,
         !.lost = @ \/ (P.first[j] /\ P.ftrace[j] = "none"),
         !.res[t] = nres,
         !.stk[t] = nq,
@@ -549,7 +573,7 @@ Pick(p, h) ==
              ELSE s' = [s EXCEPT ![p].holder = "none", ![p].hpc[h] = "sleep",
                                  ![p].timed[h] = FALSE]
         ELSE IF pass /\ Sleepers(P2) # {}
-             THEN \E w \in Sleepers(P2) : s' = [s EXCEPT ![p] = [P2 EXCEPT !.hpc[w] = "idle"]]
+             THEN \E w \in FirstOf(P2, Sleepers(P2)) : s' = [s EXCEPT ![p] = [P2 EXCEPT !.hpc[w] = "idle"]]
              ELSE IF pass /\ StartFor(P2)
              THEN s' = [s EXCEPT ![p] = [P2 EXCEPT !.count = @ + 1, !.nres = @ + 1,
                                                   !.stk[h] = <<Frame("help", k, "hspawn")>>]]

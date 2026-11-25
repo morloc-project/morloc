@@ -121,6 +121,9 @@ define
     SlotNamesLiveBlock == (lock = NONE /\ slotBlk /= 0) => used[slotBlk]
     LayoutAgrees == slotCap = slotLayout
     RingFits == rtail <= K
+    \* Free blocks are interchangeable, so a block is taken from the lowest
+    \* free one: any other choice only renames the blocks.
+    FirstFree == {x \in 1..NB : ~used[x] /\ \A y \in 1..(x - 1) : used[y]}
 end define;
 
 macro alloc(v) begin
@@ -128,7 +131,7 @@ macro alloc(v) begin
         v := rslot[rhead + 1];
         rhead := rhead + 1;
     else
-        with b \in {x \in 1..NB : ~used[x]} do
+        with b \in FirstFree do
             v := b;
             used[b] := TRUE;
         end with;
@@ -284,7 +287,7 @@ begin
         or
             await ~roomed;
             roomed := TRUE;
-            with b \in {x \in 1..NB : ~used[x]} do
+            with b \in FirstFree do
                 used := [used EXCEPT ![b] = TRUE, ![wblk] = FALSE];
                 dirty := [dirty EXCEPT ![b] = dirty[wblk], ![wblk] = {}];
                 if wblk = slotBlk /\ Variant /= "room_free_before_commit" then
@@ -486,6 +489,9 @@ SizedIsWritten == ~sizeMismatch
 SlotNamesLiveBlock == (lock = NONE /\ slotBlk /= 0) => used[slotBlk]
 LayoutAgrees == slotCap = slotLayout
 RingFits == rtail <= K
+
+
+FirstFree == {x \in 1..NB : ~used[x] /\ \A y \in 1..(x - 1) : used[y]}
 
 VARIABLES wbuf, wblk, pend, sealed, i, start, startBlk, startCap, sz, grown, 
           roomed, nb, out, pt, pushed, firstBlk, handed, leaf, pieces, cb, ct
@@ -837,7 +843,7 @@ Alloc(self) == /\ pc[self] = "Alloc"
                                 THEN /\ nb' = [nb EXCEPT ![self] = rslot[rhead + 1]]
                                      /\ rhead' = rhead + 1
                                      /\ used' = used
-                                ELSE /\ \E b \in {x \in 1..NB : ~used[x]}:
+                                ELSE /\ \E b \in FirstFree:
                                           /\ nb' = [nb EXCEPT ![self] = b]
                                           /\ used' = [used EXCEPT ![b] = TRUE]
                                      /\ rhead' = rhead
@@ -882,7 +888,7 @@ Room(self) == /\ pc[self] = "Room"
                     /\ UNCHANGED <<slotBlk, used, dirty, wblk, startBlk, roomed>>
                  \/ /\ ~roomed[self]
                     /\ roomed' = [roomed EXCEPT ![self] = TRUE]
-                    /\ \E b \in {x \in 1..NB : ~used[x]}:
+                    /\ \E b \in FirstFree:
                          /\ used' = [used EXCEPT ![b] = TRUE, ![wblk[self]] = FALSE]
                          /\ dirty' = [dirty EXCEPT ![b] = dirty[wblk[self]], ![wblk[self]] = {}]
                          /\ IF wblk[self] = slotBlk /\ Variant /= "room_free_before_commit"
