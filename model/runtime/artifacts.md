@@ -21,7 +21,8 @@ symlink) carrying the marker.
 Status: draft
 
 ### ART-4 A launcher declares its manifest on a `# morloc-manifest: ` line
-Status: draft
+Status: implemented
+Checked by: resolves_absolute_wrapper_to_manifest_path, resolves_self_relative_wrapper_against_its_own_directory, resolves_a_launcher_through_file_links_against_the_launchers_directory, resolves_bare_manifest_to_itself, a_declared_absolute_path_ignores_the_launcher_directory, golden:launcher-location
 
 A relative path resolves against the launcher's directory. Every nexus mode
 that names a program accepts a launcher or a manifest path.

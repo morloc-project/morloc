@@ -83,7 +83,7 @@ located at the second.
 
 ### ALIAS-10 A type is spelled at its most specific common unfolding
 Intent: ruled 2026-10-08
-Code: deviates (unfiled: an inference variable takes the spelling of the first constraint that solves it)
+Code: deviates (issues/aliases.md)
 
 A spelling is a type expression as written, aliases included. `S ->1 S'`
 replaces one alias application in `S` by its body; `->*` is its

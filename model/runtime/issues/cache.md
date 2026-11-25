@@ -9,9 +9,9 @@ There is no cache spec yet; these are gaps until one is written.
   it is listed under `hash-include`.
 - **A Python or R pool finds a sourced file by searching, not by the path
   that was hashed.** [read] The Python pool searches `_mlc_source_roots`
-  (data/lang/py/lang.yaml:34, walked in pool.py:108-121): the program dir,
+  (data/lang/py/lang.yaml:45, walked in pool.py:116-122): the program dir,
   then `.`, then `{{lib}}`; the R pool's `.morloc.source`
-  (data/lang/r/lang.yaml:34) does the same. SRC-8 checks the absolute path recorded at build, which refuses
+  (data/lang/r/lang.yaml:42) does the same. SRC-8 checks the absolute path recorded at build, which refuses
   the run when that file is missing; but if the recorded path is not the
   first match of the search (a build run from another directory), the pool
   can load a file that was never hashed.

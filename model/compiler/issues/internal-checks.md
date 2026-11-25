@@ -24,10 +24,10 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
   fallback faults when an application has more arguments than variable
   parameters; Serial.hs appliedTypeToSerialAST calls it unguarded.
   TypeEval.hs dataCtorsOf is given no arguments for a bare head.
-- **Intrinsic arguments left unchecked.** Typecheck.hs:2142: the
+- **Intrinsic arguments left unchecked.** Typecheck.hs:2155: the
   checkIntrinsicArgs catch-all `_ -> return g` accepts an intrinsic with no
   listed case without checking its arguments (an arity `intrinsicArity`
-  fixes is refused first, :2098). Ownership.hs:154-155: an intrinsic
+  fixes is refused first, :2111). Ownership.hs (:574-575 and alike): an intrinsic
   argument pattern `(x : _)` falls through to Nothing.
 - **Selector leaf with a missing key is dropped.** Typecheck/Internal.hs
   selectorGetter `maybe [] ...` drops the leaf, so a multi-key selection
@@ -43,13 +43,13 @@ changes that remove each class are in /work/plans/gadt/type-audit.md. All
   recursive mapping loses them. Rust.hs renders RecF from the CVar slot
   that Namespace.hs documents as unreliable (C++ looks the name up in
   cscope instead).
-- **Closure capture types filtered, then paired.** Rust.hs:1714 and
-  Cpp.hs:686 build `ctxTs` by keeping only captures with a native type
+- **Closure capture types filtered, then paired.** Rust.hs:2083 and
+  Cpp.hs:933 build `ctxTs` by keeping only captures with a native type
   (`orNativeType`), then pair it with the closure table's schemas
-  (`zip3Same` Rust.hs:1729, `zipSame` Cpp.hs:694); one untyped capture is
+  (`zip3Same` Rust.hs:2099, `zipSame` Cpp.hs:941); one untyped capture is
   a compiler fault rather than a located error, and the filter hides which
   capture it was.
 - **Two tuple pairings bypass Morloc.Data.Zip.** [read, 2026-11-14]
-  Cleanup. Frontend/Typecheck.hs:1279 and :2748 pair with `NE.zip es0
+  Cleanup. Frontend/Typecheck.hs:1279 and :2761 pair with `NE.zip es0
   slots`; the lengths are equal by construction, but the repo rule is to
   pair through `Morloc.Data.Zip` (`zipSame`).

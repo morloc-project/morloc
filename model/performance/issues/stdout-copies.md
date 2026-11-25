@@ -9,13 +9,13 @@ stream-copies.md; this file covers stdout. Fix plan:
 mosm `filter` (gencode v50, 1.5 GB out, `-t 1`): copies of a batch after
 the handler returns its `Str`:
 
-1. `_mlc_write_copy` (data/lang/cpp/pool.cpp:1063) stages it with
+1. `_mlc_write_copy` (data/lang/cpp/pool.cpp:1071) stages it with
    `to_voidstar` into SHM;
-2. `append_one_element` (stream.rs:4256) into the slot write buffer;
+2. `append_one_element` (stream.rs:4284) into the slot write buffer;
 3. `compact_sealed_buffer` (write_behind.rs:318), no memmove in practice.
 
 Item 3 runs in the nexus, which then writes header, payload and padding
-as one iovec (custody.rs:865). A list batch to an unstaged stdout is
+as one iovec (custody.rs:951). A list batch to an unstaged stdout is
 encoded in place (SLOT-36) and skips items 1-2. A stdout batch is
 compressed only for packet output (SLOT-33).
 

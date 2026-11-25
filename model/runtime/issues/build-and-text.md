@@ -62,7 +62,7 @@
   some new; LIFE-6 checks neither the archive nor the headers.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
-  locked with morloc-runtime" (0.112.0); scripts/bump-version.sh:36 bumps
+  locked with morloc-runtime" (0.113.0); scripts/bump-version.sh:36 bumps
   only nexus, manifest and runtime.
 - **Rust crates are resolved per pool, outside the environment's solve.**
   [read] Rust pools resolve rust-deps one pool at a time against an

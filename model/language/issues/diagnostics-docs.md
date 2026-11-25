@@ -118,14 +118,6 @@
   `Map.insert`), overwriting a documented top-level term of the same name;
   help and `@with` lookups for that term then show the local docstring.
   Needs a repro.
-- **A term with no implementation is reported as a compiler bug.**
-  [reproduced, 2026-10-25] Violates DIAG-2. `morloc typecheck --realize`
-  on a module whose exported terms have signatures but no implementation
-  (golden-tests/infix-polyglot/ops/main.loc, scoping-13/foo/main.loc,
-  type-alias-transitive/types/main.loc) prints "Compiler bug, broken index
-  7 with attached error: No implementation found for '<*>'": the error is
-  raised at a node with no source location, so the user error is labelled a
-  compiler bug.
 - **A DIAG-5 trace lists a function passed as a value twice per call.**
   [reproduced 2026-11-02] `safe down 0` makes one call of the named
   recursive `down` and prints two `at down` lines: the closure wrapper
@@ -148,11 +140,17 @@
   most common variable name, is almost never shown by its source name.
   Plain words should be matched only where they could be read as the
   variable (type positions), not against all of the prose.
-- **A C++ type with no concrete mapping kills the compiler with a Haskell
-  `error`.** [reproduced, 2026-11-14] Violates DIAG-1 and DIAG-2.
-  library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs:399-404
-  `leakError` calls `error`, so `morloc make` exits 2 printing "Recursive
-  type alias `Vector` has no concrete C++ mapping ..." followed by
-  "CallStack (from HasCallStack): error, called at ... Cpp.hs:400:9",
-  with no source location. Reached by the nested-Vector source in
-  values.md (`makeN :: Int -> Vector n (Vector 2 Real)` from C++).
+- **A C++ type with no concrete mapping is rejected with no location.**
+  [read, 2026-11-25] Violates DIAG-2. library/Morloc/CodeGenerator/Pools/
+  CAbi/Members/Cpp.hs:491-508 `leakError` records a pool error, thrown as
+  "C++ pool: Recursive type alias `Vector` has no concrete C++ mapping
+  ..." with no source location (it no longer calls `error`, since
+  8d05dc60c). Reached by the nested-Vector source in values.md
+  (`makeN :: Int -> Vector n (Vector 2 Real)` from C++).
+- **A user primitive that crosses languages is refused with an internal
+  message.** [reproduced, 2026-11-25] DIAG-1, NEWT-5. `type Foo` with Py
+  and Cpp forms, `mk :: Int -> Foo` from Python and `un :: Foo -> Int`
+  from C++, `f n = un (mk n)`: the build fails "Cannot find constructor in
+  VarF "Foo"  finalType=Foo" at the call. The refusal is right (NEWT-5);
+  the message should say that `Foo` has no morloc form and cannot cross.
+  The same program with both functions from C++ builds and runs.

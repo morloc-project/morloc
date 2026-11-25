@@ -4,7 +4,7 @@ Choosing an implementation and a language for each call; merged implementations 
 
 ### REAL-1 Implementations of one term may substitute for each other
 Intent: ruled 2026-11-07
-Code: unaudited
+Code: conforms 2026-11-25
 
 Declaring several implementations under one name, in one language or
 several, permits the compiler to run any of them at any use of the term,

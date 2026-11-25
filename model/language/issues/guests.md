@@ -10,6 +10,9 @@ Guest-language signatures (GUEST) against the code. Reproduced on 0.109.0
   entry fails "Futhark entry pick: unknown opaque type bool". Gap: GUEST-3
   says "fixed-width numeric scalars"; whether `Bool` is allowed is
   unstated. Repro: /work/plans/model-audit-2026-10-21/repro/F/fut/k.fut, g1.loc.
+  Separately, the code accepts non-nested tuples (at most 8 fields) and
+  Tensor3..5 in a Futhark signature (Futhark.hs classifyMorloc and
+  morlocToFT), which GUEST-3 does not list.
 - **A GUEST-3 rejection names no term or location.** [reproduced,
   2026-10-21] "Futhark: unsupported type Int (only fixed-width numeric
   scalars, ...)". Repro: /work/plans/model-audit-2026-10-21/repro/F/fut/g1.loc.

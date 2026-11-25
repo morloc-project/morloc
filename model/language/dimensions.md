@@ -108,7 +108,7 @@ and an Unknown one is a type error at that term.
 ### DIM-8 A Nat is a length only through Vector or a Table's rows
 Intent: proposed
 Tests: spec-dim-8-1
-Code: deviates (issues/kinds-dimensions.md)
+Code: conforms 2026-11-25
 
 The first parameter of `Vector n a` is the length of its list, and the
 `n` of `Table n r` is its row count. A Nat parameter of any other type is

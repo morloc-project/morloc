@@ -69,7 +69,7 @@ on 0.109.0 unless marked.
 - **Table column sum fails in Python.** [reproduced] Violates WIRE-1.
   Census table built with `addCol`; `summarize t = fold (+) 0 (getCol "pop"
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:960-963, py_size_step: MORLOC_INT requires PyLong_Check). The
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:1282-1283, py_size_step: MORLOC_INT requires PyLong_Check). The
   manual shows `54585374`.
 - **No rule forbids a sourced function mutating its argument.** [read] A
   gap in EVAL-7. In Python a morloc value read twice is one shared object,
@@ -84,7 +84,7 @@ on 0.109.0 unless marked.
   "pathlib.Path"`, Py `mk :: Str -> Path` returning `pathlib.Path(s)`, Cpp
   caller `u s = unpack (mk s)`: builds with no warning; running `u
   notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
-  PosixPath (pymorloc.c:1000)" [reproduced 2026-11-14]. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
+  PosixPath (pymorloc.c:1321)" [reproduced 2026-11-14]. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
 - **A Python record class form is accepted and ignored.** [reproduced,
   2026-10-21] Gap in GEN-11, which rules user class forms a future feature
   (2026-11-18). `record Py => P = "MyCls"` builds; the Python function
@@ -92,7 +92,7 @@ on 0.109.0 unless marked.
   because its function is an identity and the output is JSON. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
 - **Reading a field of a Python `object` emits attribute access on a dict.**
   [read, 2026-11-15, not reproduced] Violates GEN-11. genericRecordAccessor
-  (Grammars/Translator/Generic.hs:768-769) emits `.f` for `NamObject`, but
+  (Grammars/Translator/Generic.hs:855) emits `.f` for `NamObject`, but
   pymorloc builds the value as a dict, so `.f p` on an `object Py` record
   should fail at run time. object-1-py never reads a field.
 - **Python equality of class records is the class's, not morloc's.**
@@ -204,7 +204,10 @@ on 0.109.0 unless marked.
   `./nexus f 1` prints `[44,1]`. Likewise `x :: Int; x = 3000000000 + 1`
   under root-cpp builds and prints -1294967295
   (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc). No literal
-  fit check exists; CppPrinter.hs:73 emits `static_cast<T>(i)`.
+  fit check exists; CppPrinter.hs:73 emits `static_cast<T>(i)`. The same
+  cast prints the elements of a C++ Packable literal (`[300, 1] :: Vector
+  2 U8`), so they are not checked as a sent value is: NATIVE-8 [read
+  2026-11-25, not reproduced].
 - **An element of a Python Vector of an enumeration is a uint8, not a
   member.** [read, 2026-11-18] Open: NATIVE-7 against GEN-12. A `Vector n D`
   of an all-nullary `data` type is a numpy uint8 array (one byte a value),

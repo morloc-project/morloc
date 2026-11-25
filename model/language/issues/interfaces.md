@@ -48,7 +48,7 @@ re-checked.
   NET-4..NET-7 cover the transport, but nothing states the LP request and
   response (methods, fields, `media`, packet mode, error kinds).
 - **An `IFile` given as JSON skips the existence check.** [read] Violates
-  IFACE-17. morloc-nexus/src/dispatch.rs `check_ifile_arg` (:836-871)
+  IFACE-17. morloc-nexus/src/dispatch.rs `check_ifile_arg` (:835-869)
   walks `Value`, `Many` and `Group` arguments but skips `ArgValue::Json`;
   a test asserts a JSON `"-"` passes (:2079). IFACE-17 makes a JSON `"-"` a path named `-`; whether
   the pool then opens that file or standard input is unchecked.

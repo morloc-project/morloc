@@ -5,7 +5,7 @@ Kinds of types (types, naturals, strings, constructors) and kind checking. Prefi
 ### KIND-1 The kinds are `Type`, `Nat`, `Int`, `Str`, `Rec`, `List` and `Set`
 Intent: proposed
 Tests: spec-kind-1-1, spec-kind-1-2
-Code: unaudited
+Code: conforms 2026-11-25
 
 A parameter is given a kind as `(n :: K)` in its type's declaration; an
 unannotated parameter has kind `Type`, except an alias parameter (ALIAS-8). Any other kind name is a parse error.
@@ -26,7 +26,7 @@ that kind.
 
 ### KIND-3 Nat arithmetic is integer arithmetic
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 `+ - * /` on `Nat` and `Int` are integer operations: a part of an expression may be
 negative (`(3 - 10) + 20` is 13), and `/` truncates toward zero. They are

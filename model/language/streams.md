@@ -87,7 +87,7 @@ that returns from the call it was forked in ends there (FORK-17).
 
 ### STRM-6 A batch handed to a sink is not changed afterwards
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 A producer that hands a batch to its sink does not change that batch, or
 any value inside it, afterwards. A whole-list gather may keep the batch

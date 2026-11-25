@@ -30,7 +30,7 @@ Used as a value, each is the function of two `Bool`s it denotes. `&&` is
 ### BASE-4 A `Str` value survives every language that can hold it
 Intent: proposed
 Tests: spec-base-4-1
-Code: deviates 2026-11-08 (runtime/issues/strings.md)
+Code: conforms 2026-11-25
 
 A `Str` is a sequence of Unicode characters that may include U+0000. Passed
 to a language that cannot represent it, it is rejected: a literal when the

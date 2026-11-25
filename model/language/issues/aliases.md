@@ -21,7 +21,7 @@
   ALIAS-13 first narrows the choice.
 - **A record literal's fields are checked at the record's full
   unfolding.** [read] Violates ALIAS-10. `checkE (NamS rs)`
-  (Frontend/Typecheck.hs:2621) checks each field against
+  (Frontend/Typecheck.hs:2634) checks each field against
   `TE.evaluateType` of the whole record type and returns that unfolding, so
   `?(Inner Str)` in a field is spelled as the expanded record. The TupS case
   beside it reduces one step and returns the written type. Reachable

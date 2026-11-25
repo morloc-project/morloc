@@ -112,7 +112,7 @@ preference, then size).
   where the ruling wants none, with nothing failing when a language is missed.
 - **An argument computable in the caller is computed by a callback.**
   [reproduced, 2026-10-23] A cut is a subtree (Express.hs `expressPolyExpr`: the
-  cross-pool AppS, PatS and eta clauses; `expressContainer`, Express.hs:2178): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
+  cross-pool AppS, PatS and eta clauses; `expressContainer`, Express.hs:2208): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
   calls back into Python for the inner `inc x`, two round trips where one
   would do; `inc (add (inc x) (inc y))` takes three. A `where` value used
   only inside the foreign argument is placed there too. EVAL-1/2 permit

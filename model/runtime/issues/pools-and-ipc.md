@@ -55,22 +55,16 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   callers connect accumulates them. The retry has no bound; it ends as soon
   as a fork does not land in the few microseconds between the two steps.
 
-- **A one-pool C++ program takes about 55 ms on an empty input; the same
-  work native takes 3 ms.** [reproduced, compiler 4443cc47] biolib
-  `stream/bench` `ingestFa` on a one-entry FASTA. Under `strace -f -tt`
-  (128 ms traced), the parts that are not work:
-  - the nexus lists all of `/tmp` at startup (40 `getdents64` calls over
-    12,222 entries here, about 20 ms traced); the cost grows with
-    `/tmp`, which holds many leaked `morloc-daemon.*`, `morloc-mcp.*`
-    entries;
-  - connecting to the pool polls with sleeps of 1, 2, 4 and 8 ms
-    (15 ms) while the pool links libstdc++ and binds;
-  - at exit the main thread joins the `morloc-custody` thread, which
-    after its `fdatasync` sleeps 20 ms in `clock_nanosleep`; the join
-    waits out the sleep (about 17 ms);
-  - `fdatasync` of the output stream file (6 ms);
-  - the `/bin/sh` wrapper forks `dirname` before exec'ing the nexus.
-  `-h`, which starts no pool, takes 25-48 ms.
+- **A one-pool C++ program's fixed cost is mostly not work.**
+  [reproduced, compiler 4443cc47] biolib `stream/bench` `ingestFa` on a
+  one-entry FASTA took about 55 ms against 3 ms native. The connect
+  backoff and the custody thread's 20 ms sleep at exit were cut by
+  fec0023d0 and the launcher's `dirname` fork by 04ecb61ea; still open
+  from that trace:
+  - the nexus lists all of `/tmp` at startup (see the /tmp scan entry
+    below);
+  - `fdatasync` of the output stream file (6 ms).
+  Not remeasured since those fixes.
 
 - Host state is not shared across a fork pool's workers. [reproduced
   2026-10-26, cause read] The spec says nothing on whether state a sourced
@@ -100,9 +94,9 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   py->cpp I64 is 23.0 us = 1.9 us Python marshalling + 21.2 us
   foreign_call, against the 13.6 us floor (XL-1); copies and schemas are
   not where the rest goes.
-- **Generated callers rebuild the socket path on every call.** [measured,
-  2026-11-13] Python calls os.path.join per call (0.28 us); C++
-  foreign_call_v builds a std::string per call.
+- **Generated C++ callers rebuild the socket path on every call.**
+  [measured, 2026-11-13] C++ foreign_call_v builds a std::string per call
+  (well under 0.1 us). Python joins each path once since 4dcd24b32.
 - **Every R pool leaves an `Rtmp*` directory in /tmp.** [reproduced
   2026-11-14] One run of any program with an R pool adds one empty
   `/tmp/RtmpXXXXXX` (R's per-session temp dir): the pool ends without R's
@@ -127,8 +121,10 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   SendFail::Other, or PeerClosed on a fresh connection; the message now
   ends with the send's reason and OS error. Hypothesis: XNU returns
   EPROTOTYPE (not EPIPE) when a send races the peer closing, so a reused
-  connection the R pool revoked (NET-7) is not retried. Next step: read
-  the reason from the next macOS CI failure. Separately, an exception
+  connection the R pool revoked (NET-7) is not retried. 9c1585c37
+  (2026-11-24) now retries on ENOTCONN, the reason macOS gave for the
+  same failure into Python; whether it cures this R case is unconfirmed.
+  Next step: rerun fold-native on macOS CI and read the reason if it fails. Separately, an exception
   escaping a user-spawned C++ thread ends the pool by std::terminate; the
   test's producer does not catch, so this is the expected crash shape.
 - **perf: a small parallel map nested inside a running one costs 6-10x

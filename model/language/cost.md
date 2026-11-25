@@ -147,7 +147,7 @@ is the least placement found (COST-11).
 ### COST-16 Languages are preferred in one fixed order
 Intent: proposed
 Tests: spec-cost-16-1
-Code: deviates (../compiler/issues/realization.md)
+Code: conforms 2026-11-25
 
 The order is shipped with the compiler and is the only place it is stated:
 compiled languages first, then interpreted ones (cpp, rust, futhark, py,

@@ -68,7 +68,7 @@ deletes its move constructor (EVAL-7).
 
 ### CPP-5 A mapped C++ type may be read from several threads at once
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-11-25
 
 Calling a `const` member function of a mapped type, or reading it through
 a `const T&`, is safe while other threads do the same with the same object

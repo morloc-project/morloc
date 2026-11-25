@@ -61,14 +61,14 @@ instance whose implementations are alternatives, as with `root-py` and
 
 ### CLS-7 A class may give a method a default body
 Intent: ruled 2026-10-09
-Code: deviates (unfiled; a body in a class is a parse error)
+Code: deviates (issues/typeclasses.md)
 
 Inside a `class` block, a definition of a method declared in that block is
 the method's default.
 
 ### CLS-8 A default is one more implementation at every instance
 Intent: ruled 2026-10-09
-Code: deviates (unfiled; defaults do not exist)
+Code: deviates (issues/typeclasses.md)
 
 At each instance of the class, the default is an implementation of the
 method alongside those the instance gives. Realization chooses among them
@@ -84,7 +84,7 @@ covers it.
 
 ### CLS-9 What a class body may define
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/typeclasses.md)
 
 A definition in a class block that names anything other than a method
 declared in that block is a compile error. Several definitions of one
@@ -92,7 +92,7 @@ method in a class block are alternative defaults (SIG-2).
 
 ### CLS-10 A default is typed once, at the class
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/typeclasses.md)
 
 A default is checked at its method's general type, assuming only the
 class's own constraint and, through CLS-5, its superclasses. A default that
@@ -102,7 +102,7 @@ import them.
 
 ### CLS-11 A default reaches every declared instance
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/typeclasses.md)
 
 The default of `m` is an implementation of `m` at every instance of the
 class in the program, whether or not the instance declaration has a body,

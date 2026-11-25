@@ -8,7 +8,7 @@ on 0.109.0 (dev 3a238d96) unless marked.
   <IO> Int`, `mk :: <IO> Int -> Box; mk t = {act = t}` fails "Inescapable
   effect 'IO' appear(s) in an argument but not in the result row"; the
   same through a tuple alias or a list is accepted. Cause [read]:
-  `checkDeclaredEffects.inescapableLeak` (Frontend/Treeify.hs:416-421)
+  `checkDeclaredEffects.inescapableLeak` (Frontend/Treeify.hs:436-441)
   collects result labels syntactically and does not look inside a named
   record, `data` or newtype. Repro: /work/plans/model-audit-2026-10-21/repro/D/effleak/m2.loc, m3.loc.
 - **A `do` block's suspension tail is run or returned by expected type.**

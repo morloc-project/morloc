@@ -53,7 +53,7 @@ signature's variable.
 ### POLY-5 A closed local definition is generalized; an open one has one type
 Intent: ruled 2026-11-08
 Tests: spec-poly-5-1, spec-poly-5-2
-Code: deviates (compiler/issues/specialization.md)
+Code: deviates (../compiler/issues/specialization.md)
 
 A local (`where`, `let`) definition without a signature is generalized, as
 a top-level one is (POLY-8), if it is closed: each free variable of its body
@@ -87,7 +87,7 @@ are rarely used at two types, and a local signature (POLY-4) covers those.
 ### POLY-8 An unsigned top-level definition is generalized
 Intent: ruled 2026-11-08
 Tests: spec-poly-8-1, spec-poly-8-2, spec-poly-8-3, spec-poly-8-4, spec-poly-8-5, spec-poly-8-6, spec-poly-8-7, spec-poly-8-8
-Code: deviates (compiler/issues/specialization.md)
+Code: deviates (../compiler/issues/specialization.md)
 
 A top-level definition without a signature is given the most general type
 its body has, its constraints included, and each use instantiates it, with

@@ -10,9 +10,6 @@ Waiting on a ruling:
 - features-patterns.asc:22-27 teaches "anonymous record types"
   (`pts :: [{x = Int, y = Int}]`); whether they stay depends on the
   decision in records.md.
-- features-records.asc:43-44, 172-173 write `record Py => Person = "dict"` and
-  `record R => Person = "list"` in every example; NATIVE-5 is open, and a
-  record literal currently needs them (records.md).
 - SRC-4 open: features-source.asc says backtick names are emitted verbatim,
   any two-argument infix operator, against SRC-1's name check.
 - CLI-4 open: cli-reference.asc:56 documents `@default <json>`;
