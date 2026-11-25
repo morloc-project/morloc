@@ -21,7 +21,7 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   where the same in C++ takes 2.0 s (NET-9; 2026-10-13).
 - [measured] The daemon answers every HTTP request with `Connection: close`,
   so each request pays a TCP connect, accept and close. The soak client in
-  test-suite/daemon-tests says its requests ride persistent connections and
+  test-suite/integration/suites/daemon says its requests ride persistent connections and
   exercise the keep-alive path; there is none.
 - **On macOS a descriptor is not close-on-exec from birth.** [read]
   Against FORK-3 and NET-7. On non-Linux hosts morloc-runtime-types fd.rs

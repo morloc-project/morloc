@@ -22,24 +22,24 @@ import Morloc.Test.Common
 -- | A workload: a golden test directory + calls to make against its nexus
 data Workload = Workload
   { wlName :: String -- label (e.g. "cpp", "py-r")
-  , wlTestDir :: String -- relative to test-suite/golden-tests/
+  , wlTestDir :: String -- relative to test-suite/golden/
   , wlCalls :: [(String, [String])] -- (subcommand, args) pairs
   }
 
 workloads :: [Workload]
 workloads =
-  [ Workload "cpp" "argument-form-1-c" [("foo", ["2"])]
-  , Workload "py" "argument-form-1-py" [("foo", ["2"])]
-  , Workload "r" "argument-form-1-r" [("foo", ["2"])]
-  , Workload "cpp-py" "interop-3a-cp" [("foo", ["[1,2,3]"])]
-  , Workload "cpp-r" "interop-3a-rc" [("foo", ["[1,2,3]"])]
-  , Workload "py-r" "interop-3a-pr" [("foo", ["[1,2,3]"])]
+  [ Workload "cpp" "cli/argument-form-1-c" [("foo", ["2"])]
+  , Workload "py" "cli/argument-form-1-py" [("foo", ["2"])]
+  , Workload "r" "cli/argument-form-1-r" [("foo", ["2"])]
+  , Workload "cpp-py" "interop/interop-3a-cp" [("foo", ["[1,2,3]"])]
+  , Workload "cpp-r" "interop/interop-3a-rc" [("foo", ["[1,2,3]"])]
+  , Workload "py-r" "interop/interop-3a-pr" [("foo", ["[1,2,3]"])]
   ]
 
 -- | Compile a golden test into a temp directory, returning the work dir
 compileWorkload :: TestEnv -> Workload -> IO FilePath
 compileWorkload env wl = do
-  let goldenDir = teSuiteDir env </> "golden-tests" </> wlTestDir wl
+  let goldenDir = teSuiteDir env </> "golden" </> wlTestDir wl
   tmpBase <- getCanonicalTemporaryDirectory
   workDir <- createTempDirectory tmpBase "morloc-stress"
 

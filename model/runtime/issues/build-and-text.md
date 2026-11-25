@@ -42,7 +42,7 @@
   `morloc_abi_version()` and `morloc-nexus --abi-version` against
   `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
   printed (executable/Subcommands.hs:795) and unit-tested
-  (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
+  (test-suite/unit/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
   calls the gate deferred and relies on one release tag. A runtime built
   from another release's source loads silently. [reproduced] A program
   built before `morloc init` installs a newer runtime keeps its generated

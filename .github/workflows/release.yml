@@ -122,7 +122,7 @@ jobs:
   test:
     needs: rust-binary
     # Three jobs, each running a third of the golden tests (MORLOC_TEST_SHARD,
-    # see test-suite/GoldenShard.hs). Shard 1 also runs the unit tests, the
+    # see test-suite/harness/GoldenShard.hs). Shard 1 also runs the unit tests, the
     # runtime and integration suites, and uploads the release tables. The
     # shard count appears in the matrix and in the "Run tests" step; change
     # both together. The release job waits for every shard.
@@ -255,7 +255,7 @@ jobs:
         if: matrix.shard == 1
         env:
           MORLOC_STRESS_WORKLOADS: "cpp py-r"
-        run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
+        run: ./test-suite/run lint typecheck-bench concurrency daemon packet-io expose
         timeout-minutes: 30
 
       # And morloc-integration-test alongside the unit and golden suites. That
@@ -264,12 +264,14 @@ jobs:
       # for them.
       - name: Run tests
         env:
-          MORLOC_TEST_SHARD: "${{ matrix.shard }}/3"
-        run: stack test --system-ghc --no-install-ghc morloc:morloc-test
+          STACK_ARGS: "--system-ghc --no-install-ghc"
+        run: ./test-suite/run --shard ${{ matrix.shard }}/3 haskell
         timeout-minutes: 45
       - name: Run integration tests
         if: matrix.shard == 1
-        run: stack test --system-ghc --no-install-ghc morloc:morloc-integration-test
+        env:
+          STACK_ARGS: "--system-ghc --no-install-ghc"
+        run: ./test-suite/run integration
         timeout-minutes: 45
 
       # As in the push workflow: golden-test stderr goes to the log, and the
@@ -279,7 +281,7 @@ jobs:
         run: |
           echo "=== non-empty golden-test stderr ==="
           found=0
-          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
+          for f in $(find test-suite/golden -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
             if [ -s "$f" ]; then
               found=1
               echo "----- $f -----"
@@ -295,10 +297,10 @@ jobs:
         with:
           name: golden-test-errs-release-shard${{ matrix.shard }}
           path: |
-            test-suite/golden-tests/**/build.err
-            test-suite/golden-tests/**/obs.err
-            test-suite/golden-tests/**/make.err
-            test-suite/golden-tests/**/obs.txt
+            test-suite/golden/**/build.err
+            test-suite/golden/**/obs.err
+            test-suite/golden/**/make.err
+            test-suite/golden/**/obs.txt
           if-no-files-found: ignore
           retention-days: 7
 

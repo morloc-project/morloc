@@ -150,7 +150,10 @@ executables:
 tests:
   morloc-test:
     main:          Main.hs
-    source-dirs:   test-suite
+    source-dirs:
+      - test-suite
+      - test-suite/harness
+      - test-suite/unit
     ghc-options:
       - -threaded
       - -rtsopts

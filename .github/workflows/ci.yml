@@ -5,7 +5,7 @@ name: CI
 # never cancels the (authoritative) Linux leg.
 #
 # Each platform runs as three jobs. Every job builds morloc and runs a third of
-# the golden tests (MORLOC_TEST_SHARD, see test-suite/GoldenShard.hs); shard 1
+# the golden tests (MORLOC_TEST_SHARD, see test-suite/harness/GoldenShard.hs); shard 1
 # also runs the unit tests and the runtime suites. The shard count appears in
 # the matrix and in the "Test morloc" step; change both together.
 on:
@@ -248,10 +248,7 @@ jobs:
       # by mistake fails visibly instead of killing the runner.
       - name: Test rust runtime and nexus
         if: matrix.shard == 1
-        run: |
-          perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' cargo test --workspace --manifest-path data/rust/Cargo.toml
-        env:
-          MORLOC_REQUIRE_NAMESPACES: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: ./test-suite/run --ci rust
         timeout-minutes: 20
 
       # The daemon, concurrency, packet and module-exposure suites. These
@@ -266,9 +263,7 @@ jobs:
       # plausible zeros.
       - name: Test the runtime suites
         if: matrix.shard == 1
-        env:
-          MORLOC_SHM_POISON: "1"
-        run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
+        run: ./test-suite/run --ci lint typecheck-bench concurrency daemon packet-io expose
         timeout-minutes: 20
 
       ##### TEMPORARY DISABLE
@@ -283,7 +278,7 @@ jobs:
       #   if: runner.os == 'Linux'
       #   env:
       #     MORLOC_STRESS_WORKLOADS: "cpp py-r"
-      #   run: ./test-suite/test.sh stress
+      #   run: ./test-suite/run stress
       #   timeout-minutes: 20
 
       # Recursion depth over recursive values in every pool language, with
@@ -294,16 +289,13 @@ jobs:
       # to keep the macOS leg short.
       - name: Test recursion depth (Linux)
         if: runner.os == 'Linux' && matrix.shard == 1
-        env:
-          MORLOC_STRESS_LANGS: "py cpp rust"
-        run: ./test-suite/stress/deep-recursion.sh
+        run: ./test-suite/run --ci recursion-depth
         timeout-minutes: 15
 
       - name: Test morloc
         env:
-          MORLOC_TEST_SHARD: "${{ matrix.shard }}/3"
-        run: |
-          stack test --system-ghc --no-install-ghc morloc:morloc-test
+          STACK_ARGS: "--system-ghc --no-install-ghc"
+        run: ./test-suite/run --ci --shard ${{ matrix.shard }}/3 haskell
         timeout-minutes: 60
 
       - name: Dump failing golden-test stderr to log
@@ -315,7 +307,7 @@ jobs:
           # convenient to fetch. Cap each file so the log stays readable.
           echo "=== non-empty golden-test stderr ==="
           found=0
-          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
+          for f in $(find test-suite/golden -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
             if [ -s "$f" ]; then
               found=1
               echo "----- $f -----"
@@ -349,10 +341,10 @@ jobs:
         with:
           name: golden-test-errs-${{ matrix.os }}-shard${{ matrix.shard }}
           path: |
-            test-suite/golden-tests/**/build.err
-            test-suite/golden-tests/**/obs.err
-            test-suite/golden-tests/**/make.err
-            test-suite/golden-tests/**/obs.txt
+            test-suite/golden/**/build.err
+            test-suite/golden/**/obs.err
+            test-suite/golden/**/make.err
+            test-suite/golden/**/obs.txt
             crash-reports/**
             system-info.txt
           if-no-files-found: ignore

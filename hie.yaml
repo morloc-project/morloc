@@ -15,5 +15,14 @@ cradle:
     - path: "./executable/Paths_morloc.hs"
       component: "morloc:exe:morloc"
 
-    - path: "./test-suite"
+    - path: "./test-suite/Main.hs"
       component: "morloc:test:morloc-test"
+
+    - path: "./test-suite/harness"
+      component: "morloc:test:morloc-test"
+
+    - path: "./test-suite/unit"
+      component: "morloc:test:morloc-test"
+
+    - path: "./test-suite/integration"
+      component: "morloc:test:morloc-integration-test"

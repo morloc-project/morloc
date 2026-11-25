@@ -73,10 +73,11 @@ Every rule is one item with a stable ID:
 
 - A test is named `spec-<prefix>-<rule>-<n>`, prefix in lower case:
   `spec-mod-14-1` is the first example of MOD-14.
-- A unit test is the default: a case in `test-suite/SpecTests.hs`, or in
-  another `test-suite/` module for a compiler item, whose name is its ID.
+- A unit test is the default: a case in `test-suite/unit/Spec/` (one
+  module per chapter), or in another `test-suite/unit/` module for a
+  compiler item, whose name is its ID.
   It covers anything decided without building a program.
-- A golden test is `test-suite/golden-tests/spec-*/`, used only when the
+- A golden test is `test-suite/golden/spec/<prefix>/spec-*/`, used only when the
   rule needs a build, a run, or more than one language.
 - A rejection test has an accept twin that differs only in the rule's
   subject, since a rejection test passes on any error.

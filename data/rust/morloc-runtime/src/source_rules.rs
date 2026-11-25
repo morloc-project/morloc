@@ -82,6 +82,29 @@ fn walk(dir: &Path, exts: &[&str], skip: &[&str]) -> Vec<PathBuf> {
     out
 }
 
+/// Names of the golden test directories (those holding a Makefile) anywhere
+/// under the grouped golden tree.
+fn golden_test_names(dir: &Path) -> HashSet<String> {
+    fn go(dir: &Path, out: &mut HashSet<String>) {
+        if dir.join("Makefile").exists() {
+            if let Some(name) = dir.file_name() {
+                out.insert(name.to_string_lossy().into_owned());
+            }
+            return;
+        }
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
+            if p.is_dir() && !hidden {
+                go(&p, out);
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    go(dir, &mut out);
+    out
+}
+
 fn rust_sources() -> Vec<PathBuf> {
     CRATES.iter().flat_map(|k| walk(&rust_root().join(k).join("src"), &["rs"], &[])).collect()
 }
@@ -972,7 +995,7 @@ fn every_raw_read_is_reviewed_against_its_framing() {
 fn model_items_are_checked() {
     let scan = scan_rust();
     let items = model_items();
-    let repo = repo_root();
+    let golden_tests = golden_test_names(&repo_root().join("test-suite/golden"));
     let mut problems = Vec::new();
     let mut ids: HashMap<&str, &Path> = HashMap::new();
     for item in &items {
@@ -987,7 +1010,7 @@ fn model_items_are_checked() {
                 }
                 for check in &item.checks {
                     let exists = if let Some(dir) = check.strip_prefix("golden:") {
-                        repo.join("test-suite/golden-tests").join(dir).join("Makefile").exists()
+                        golden_tests.contains(dir)
                     } else if let Some(cfg) = check.strip_prefix("tla:") {
                         model_dir().join("tla").join(format!("{cfg}.cfg")).exists()
                     } else {

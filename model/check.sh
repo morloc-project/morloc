@@ -14,7 +14,7 @@ root = sys.argv[1]
 only = sys.argv[2]
 model = os.path.join(root, "model")
 unit = os.path.join(root, "test-suite")
-golden = os.path.join(root, "test-suite", "golden-tests")
+golden = os.path.join(root, "test-suite", "golden")
 
 errors = []
 warnings = []
@@ -97,10 +97,17 @@ if os.path.exists(readme):
                 complete.add(os.path.join("language", m[1]))
 
 unit_tests = set()
-for f in sorted(os.listdir(unit)) if os.path.isdir(unit) else []:
-    if f.endswith(".hs"):
-        unit_tests |= set(re.findall(r'"(spec-[a-z]+-\d+-\d+)"', open(os.path.join(unit, f)).read()))
-golden_tests = {d for d in os.listdir(golden) if d.startswith("spec-")} if os.path.isdir(golden) else set()
+for d, dirs, files in os.walk(unit):
+    if os.path.abspath(d) == os.path.abspath(unit):
+        dirs[:] = [x for x in dirs if x not in ("golden", "integration")]
+    for f in files:
+        if f.endswith(".hs"):
+            unit_tests |= set(re.findall(r'"(spec-[a-z]+-\d+-\d+)"', open(os.path.join(d, f)).read()))
+golden_tests = set()
+for d, dirs, files in os.walk(golden):
+    dirs[:] = [x for x in dirs if not x.startswith(".")]
+    if os.path.basename(d).startswith("spec-") and "Makefile" in files:
+        golden_tests.add(os.path.basename(d))
 for t in sorted(unit_tests & golden_tests):
     errors.append(f"{t} is both a unit and a golden test")
 existing = unit_tests | golden_tests

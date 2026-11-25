@@ -1,5 +1,5 @@
 //! The runtime pattern check agrees with the compiler's (PAT-5) on the
-//! table the compiler's test suite also reads (test-suite/SpecTests.hs,
+//! table the compiler's test suite also reads (test-suite/unit/Spec/Patterns.hs,
 //! spec-pat-9-1).
 
 use morloc_runtime_types::pattern::{check_pattern_against_schema, parse_pattern};

@@ -2,9 +2,12 @@
 -- Module      : Main
 -- Description : Test suite entry point combining unit, property, and golden tests
 --
--- Golden tests are not listed here. Every directory under
--- test-suite/golden-tests is discovered and run; see GoldenMakefileTests.
+-- Golden tests are not listed here. Every test directory under
+-- test-suite/golden is discovered and run; see GoldenMakefileTests.
+--
+-- MORLOC_TEST_SELECT=unit or =golden runs only that part (default: both).
 import qualified System.Directory as SD
+import System.Environment (lookupEnv)
 import Test.Tasty
 
 import AbiTests (abiTests)
@@ -34,14 +37,14 @@ import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
-import SpecTests (specTests)
+import Spec (specTests)
 import VariantMergeTests (variantMergeTests)
 import GenDefsTests (genDefsTests)
 import NominalTests (nominalTests)
 import ValueArgsTests (valueArgsTests, kindOfTests)
 import ManifoldNameTests (manifoldNameTests)
 import SystemConfigTests (systemConfigTests)
-import UnitTypeTests
+import Types
 import LastReadTests (lastReadTests)
 import OwnershipCheckTests (ownershipCheckTests)
 import VersionConstraintTests (versionConstraintTests)
@@ -154,9 +157,22 @@ main :: IO ()
 main = do
   wd <- SD.getCurrentDirectory >>= SD.makeAbsolute
   shard <- lookupShard
-  goldens <- discoverGoldenTests shard (wd ++ "/test-suite/golden-tests")
+  select <- lookupEnv "MORLOC_TEST_SELECT"
+  (wantUnits, wantGoldens) <- case select of
+    Nothing -> return (True, True)
+    Just "" -> return (True, True)
+    Just "all" -> return (True, True)
+    Just "unit" -> return (True, False)
+    Just "golden" -> return (False, True)
+    Just other -> ioError . userError $
+      "MORLOC_TEST_SELECT='" ++ other ++ "' is not one of unit, golden, all"
+  goldens <-
+    if wantGoldens
+      then discoverGoldenTests shard (wd ++ "/test-suite/tools/shims") (wd ++ "/test-suite/golden")
+      else return []
   -- Unit tests are cheap; one shard runs them.
   let units = case shard of
         Just (Shard i _) | i /= 1 -> []
-        _ -> unitTests
+        _ | wantUnits -> unitTests
+        _ -> []
   defaultMain $ testGroup "Morloc tests" (units ++ goldens)

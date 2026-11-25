@@ -28,7 +28,7 @@ import Morloc.Test.Common
 -- | Compile the SHM stress test program into a temp directory
 compileStressProgram :: TestEnv -> IO FilePath
 compileStressProgram env = do
-  let srcDir = teSuiteDir env </> "shm-tests"
+  let srcDir = teSuiteDir env </> "integration" </> "suites" </> "shm"
   tmpBase <- getCanonicalTemporaryDirectory
   workDir <- createTempDirectory tmpBase "morloc-shm"
   entries <- listDirectory srcDir

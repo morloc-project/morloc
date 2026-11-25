@@ -18,7 +18,7 @@ import Morloc.Test.Common
 
 compileDaemonProgram :: TestEnv -> String -> IO FilePath
 compileDaemonProgram env locFile = do
-  let srcDir = teSuiteDir env </> "daemon-tests"
+  let srcDir = teSuiteDir env </> "integration" </> "suites" </> "daemon"
   tmpDir <- do
     tmpBase <- getCanonicalTemporaryDirectory
     createTempDirectory tmpBase "morloc-daemon"
