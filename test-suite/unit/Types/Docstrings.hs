@@ -8,6 +8,7 @@ module Types.Docstrings
   , epilogueDocstringTests
   , parseDocstringTests
   , withDocstringTests
+  , removedDirectiveTests
   ) where
 
 import Text.RawString.QQ
@@ -16,6 +17,25 @@ import qualified Data.Text as MT
 import Test.Tasty (TestTree, localOption, mkTimeout, testGroup)
 import Test.Tasty.HUnit
 import Types.Common
+import Morloc.Frontend.Desugar (processArgDocLines)
+import Morloc.Namespace.Type (ArgDocVars (..), SourceAtom (..))
+
+-- | `@literal` is gone; `@source inline` is its spelling. The old directive
+-- is an unrecognized one: it sets nothing and its line stays description.
+removedDirectiveTests :: TestTree
+removedDirectiveTests =
+  testGroup "removed docstring directives"
+    [ testCase "@literal is not recognized" $ do
+        let (errs, ws, v) = processArgDocLines ["@literal true"]
+        assertEqual "errors" [] errs
+        assertEqual "one warning" 1 (length ws)
+        assertEqual "kept as description" ["@literal true"] (docLines v)
+        assertEqual "no source" Nothing (docSource v)
+    , testCase "@source inline sets the source" $ do
+        let (errs, _, v) = processArgDocLines ["@source inline"]
+        assertEqual "errors" [] errs
+        assertEqual "source" (Just SourceInline) (docSource v)
+    ]
 
 -- | @datafile is resolved at build time, so its argument must be a string
 -- literal (directly, or through a name bound to one).

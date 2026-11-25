@@ -2049,10 +2049,6 @@ data ArgOptDocSet = ArgOptDocSet
   , -- free description
     argOptDocMetavar :: Text
   , -- a variable used in the interface to refer to this argument term
-    argOptDocLiteral :: Maybe Bool
-  , -- if Just True, require an argument be literal rather than from a file
-    -- if Just False, require an argument be from a file
-    -- if Nothing, infer as usual
     argOptDocMany :: Bool
   , -- if True, the option accepts many tokens that are assembled into a List;
     -- only legal when the argument type is List a
@@ -2093,10 +2089,6 @@ data ArgPosDocSet = ArgPosDocSet
   , -- free description
     argPosDocMetavar :: Maybe Text
   , -- a variable used in the interface to refer to this argument term
-    argPosDocLiteral :: Maybe Bool
-  , -- if Just True, require an argument be literal rather than from a file
-    -- if Just False, require an argument be from a file
-    -- if Nothing, infer as usual
     argPosDocMany :: Bool
     -- if True, the positional accepts many tokens that are assembled into a
     -- List; only legal when the argument type is List a and the positional

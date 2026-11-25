@@ -64,11 +64,8 @@
   Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/bin.loc, nomod.loc, cfg/.
 - **Wrong or internal wording.** [reproduced, 2026-10-21] `@render` on an
   argument is reported as `@with` (Frontend/Desugar.hs:1131-1137
-  `rejectWithHere`). A bare `--' @literal` reads as false
-  (Desugar.hs:793-794 `parseDocBool`, where other flags use `flagValue`),
-  so it is neither applied nor warned deprecated; `@literal true` is
-  warned. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc,
-  lit*.loc. Open: a duplicate morloc definition (`f :: Int -> Int`,
+  `rejectWithHere`). Repro:
+  /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc. Open: a duplicate morloc definition (`f :: Int -> Int`,
   `f x = x` twice) now builds and runs with no warning [reproduced
   2026-11-14]; no item says whether two morloc definitions of one term are
   two implementations (REAL-1) or an error.

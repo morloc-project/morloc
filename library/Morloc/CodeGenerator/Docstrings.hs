@@ -289,15 +289,14 @@ processArgDoc i t r = do
 -- | Reject argument-only directives that appear at the command /
 -- function level (i.e. on the docstring lines above `name ::`
 -- instead of inside the signature next to a specific type). Without
--- this check the directive is silently dropped: `@literal`
+-- this check the directive is silently dropped: `@many`
 -- above a function only affects the command's metadata record,
 -- never any argument, so the user's intent never reaches the
 -- manifest.
 validateCommandLevelDirectives :: MDoc -> ArgDocVars -> MorlocMonad ()
 validateCommandLevelDirectives loc r =
   mapM_ check
-    [ ("literal",     isJust (docLiteral r))
-    , ("many",        isJust (docMany r))
+    [ ("many",        isJust (docMany r))
     , ("unroll",      isJust (docUnroll r))
     , ("default",     isJust (docDefault r))
     , ("metavar",     isJust (docMetavar r))
@@ -520,11 +519,11 @@ resolveAlt loc t r ctorDocs = do
     MM.throwRejected $ loc <> " cannot combine `@stdin` with `@unroll`."
   -- The value is assembled from the arms, so nothing reads a token for the
   -- argument as a whole and the shape directives have nothing to act on.
-  when (isJust (docSource r) || isJust (docForm r) || isJust (docLiteral r)
+  when (isJust (docSource r) || isJust (docForm r)
           || not (null (docChecks r)) || isJust (docListSource r)
           || isJust (docListForm r) || not (null (docListChecks r))) $
     MM.throwRejected $
-      loc <> ": `@source`, `@form`, `@literal` and `@check` do not apply to an"
+      loc <> ": `@source`, `@form` and `@check` do not apply to an"
         <> " unrolled `data` argument; each constructor's values are read as"
         <> " arguments of their own types"
   scope <- MM.gets stateGeneralTypedefs
@@ -652,7 +651,6 @@ resolveFlag loc r = do
           , argPosDocName = docName r
           , argPosDocDesc = docLines r
           , argPosDocMetavar = docMetavar r <|> Just "BOOL"
-          , argPosDocLiteral = docLiteral r
           , argPosDocMany = False
           , argPosDocStdin = False
           , argPosDocSource = docSource r
@@ -695,34 +693,19 @@ resolveOpt loc t r = do
     (Just opt, Nothing)
       -- `many` options without an explicit default fall back to "[]".
       | many -> makeOpt many opt "[]"
-      -- literal ?Str: auto-default to null (the only way to get null is to omit the flag)
-      | isLiteralOptStr -> makeOpt many opt "null"
       | otherwise ->
           MM.throwRejected $
             loc <> ": optional argument " <> pretty (makeArg opt)
               <> " must be given a default value"
-    (Just opt, Just def)
-      -- literal ?Str with non-null default is an error
-      | isLiteralOptStr && def /= "null" ->
-          MM.throwRejected $
-            loc <> ": optional argument " <> pretty (makeArg opt)
-            <> " has type ?Str with @literal, so default must be null (got \""
-            <> pretty def <> "\")"
-      | otherwise -> do
-          def' <- canonicalCtorDefault t def
-          makeOpt many opt def'
+    (Just opt, Just def) -> do
+      def' <- canonicalCtorDefault t def
+      makeOpt many opt def'
   where
-    isLiteralOptStr = docLiteral r == Just True && isOptionalStrType t
-
-    isOptionalStrType (OptionalT (VarT v)) = v == MBT.str
-    isOptionalStrType _ = False
-
     makeOpt many opt def = return $
       ArgOptDocSet
         { argOptDocType = t
         , argOptDocDesc = docLines r
         , argOptDocMetavar = fromMaybe (makeOptMeta t) (docMetavar r)
-        , argOptDocLiteral = docLiteral r
         , argOptDocMany = many
         , argOptDocArg = opt
         , argOptDocDefault = def
@@ -799,7 +782,6 @@ resolvePos t r = do
       , argPosDocName = docName r
       , argPosDocDesc = docLines r
       , argPosDocMetavar = docMetavar r
-      , argPosDocLiteral = docLiteral r
       , argPosDocMany = many
       , argPosDocStdin = stdin
       , argPosDocSource = docSource r
@@ -1365,8 +1347,7 @@ validateCmdArg _ _ (CmdArgAlt _)  = Right Nothing
 -- consulted at JSON-emit time but are irrelevant to shape validation.
 argDocVarsFromPos :: ArgPosDocSet -> ArgDocVars
 argDocVarsFromPos r = defaultValue
-  { docLiteral      = argPosDocLiteral r
-  , docSource       = argPosDocSource r
+  { docSource       = argPosDocSource r
   , docForm         = argPosDocForm r
   , docChecks       = argPosDocChecks r
   , docListSource   = argPosDocListSource r
@@ -1376,8 +1357,7 @@ argDocVarsFromPos r = defaultValue
 
 argDocVarsFromOpt :: ArgOptDocSet -> ArgDocVars
 argDocVarsFromOpt r = defaultValue
-  { docLiteral      = argOptDocLiteral r
-  , docSource       = argOptDocSource r
+  { docSource       = argOptDocSource r
   , docForm         = argOptDocForm r
   , docChecks       = argOptDocChecks r
   , docListSource   = argOptDocListSource r

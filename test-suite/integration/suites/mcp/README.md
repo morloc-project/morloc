@@ -105,8 +105,8 @@ inner `required` fields are enforced by the pool, not the nexus).
 
 These CLI-shape docstrings describe how bytes are *sourced/parsed* on the command
 line and have **no** MCP representation (MCP always delivers typed JSON): `--'
-@source ...`, `--' @form ...`, `--' @check.path ...`, `--' @list.* ...`,
-`--' @literal`. They remain visible via `--json-help`.
+@source ...`, `--' @form ...`, `--' @check.path ...` and `--' @list.* ...`. They
+remain visible via `--json-help`.
 
 ### Exclusions (dropped from `tools/list`)
 

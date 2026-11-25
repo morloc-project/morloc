@@ -74,7 +74,7 @@ Reproduced on 0.109.0 unless marked.
   `@arg` sets no `docArg`. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis3.loc, dirarg.loc.
 - **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Source
   file not found: ./nofile.py" (Grammars/Translator/Generic.hs:367-368,
-  Pools/CAbi/Members/Cpp.hs:2800); unknown-directive and `@literal` warnings;
+  Pools/CAbi/Members/Cpp.hs:2800); unknown-directive warnings;
   `morloc eval` allow-list refusal. `morloc eval -e 'import root-py;
   @write "x" 1'` is located at `<expr>:3:1-12`, a generated wrapper line.
 - **Program rules with no item.** [reproduced, 2026-10-21]
@@ -110,11 +110,3 @@ Reproduced on 0.109.0 unless marked.
   demos/fasta, flu-case-study) writes `import x` for a local `x.loc`, which
   now names an installed module only. The repo is documented as outdated;
   migrate to `import .x` when it is next updated.
-- **The deprecated `@literal` skips the checks `@source inline` gets.**
-  [reproduced, 2026-11-25] Gap in docstrings.md / arguments-and-output.md
-  (no item names `@source inline`). `--' @literal true` on an `Int`
-  argument, or with `@many true` on `[?Str]`, builds with only a
-  deprecation warning; the same programs with `@source inline` are refused
-  (test-suite/integration/suites/errors/cli-literal-on-int and
-  cli-many-literal-on-opt, which use `@source inline`). Desugar.hs reads
-  `literal` as its own directive, apart from `source`.

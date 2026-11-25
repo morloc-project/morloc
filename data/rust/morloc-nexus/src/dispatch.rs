@@ -478,7 +478,7 @@ fn check_parent_writable(argv: &str, mode: &str) -> Result<(), String> {
 }
 
 /// An argv token after `-` substitution, `@check.path` validation and
-/// `@literal` quoting. A failed check ends the run, prefixed by
+/// quoting of a `Str` argument. A failed check ends the run, prefixed by
 /// `error_prefix`.
 pub fn preprocess_cli_value(
     val: String,
@@ -533,7 +533,7 @@ pub enum ArgValue {
     /// `parent`, whose definition carries its source, form and checks.
     AsParent { value: Box<ArgValue>, parent: usize, arg: usize },
     /// A `@many` argument's tokens, read as one list; `literal` is the
-    /// `@literal` flag.
+    /// manifest's `quoted` flag: each token is a string as written.
     Many { tokens: Vec<String>, literal: bool },
 }
 

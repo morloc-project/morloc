@@ -22,6 +22,7 @@ module Morloc.Frontend.Desugar
   , D
   , ParseError (..)
   , showParseError
+  , processArgDocLines
   ) where
 
 import Morloc.Data.Zip (indexed, indexedFrom, mapIndexed, zipExact, zipPrefix, zipSame)
@@ -392,7 +393,7 @@ cliOptLongName (CliOptShort _)  = Nothing
 -- unknown-key warning even though full keys are dotted.
 argDocDirectiveKeys :: [Text]
 argDocDirectiveKeys =
-  [ "name", "literal", "many", "stdin", "unroll", "default", "metavar"
+  [ "name", "many", "stdin", "unroll", "default", "metavar"
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
@@ -794,17 +795,6 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         | otherwise -> (errs, ws, d {docLines = docLines d <> [v]})
       DocDirective k v -> case T.splitOn "." k of
         ["name"] -> (errs, ws, d {docName = Just v})
-        ["literal"] ->
-          let parsed = parseDocBool v
-              warn =
-                if parsed
-                  then
-                    [ "warning: docstring directive `@literal` is deprecated; "
-                        <> "use `@source inline` instead. Both work today, but "
-                        <> "`@literal` will be removed in a future release."
-                    ]
-                  else []
-           in (errs, ws <> warn, d {docLiteral = Just parsed})
         ["many"] -> (errs, ws, d {docMany = Just (flagValue v)})
         ["stdin"] -> (errs, ws, d {docStdin = Just (flagValue v)})
         ["unroll"] -> (errs, ws, d {docUnroll = Just (flagValue v)})
@@ -1110,7 +1100,6 @@ rejectDirectivesOnCtor pos name v =
   where
     directives =
       [ ("name", isJust (docName v))
-      , ("literal", isJust (docLiteral v))
       , ("many", isJust (docMany v))
       , ("stdin", isJust (docStdin v))
       , ("unroll", isJust (docUnroll v))

@@ -818,8 +818,8 @@ pub enum Arg {
         #[serde(default)]
         metavar: Option<String>,
         /// If true, the user's CLI value is JSON-wrapped before being
-        /// passed to the pool. Used for `Str`-typed positionals
-        /// declared with `--' @literal`.
+        /// passed to the pool. Used for `Str`- and `IFile`-typed
+        /// positionals not read from a file (`@source file`).
         #[serde(default)]
         quoted: bool,
         /// If true, the positional is variadic (`--' @many`):
@@ -1251,8 +1251,8 @@ impl Arg {
     }
 
     /// True if the user's CLI value should be JSON-wrapped before
-    /// being passed to the pool. Used for `Str`-typed arguments
-    /// declared with `--' @literal`. Always false for flags and
+    /// being passed to the pool. Used for `Str`- and `IFile`-typed
+    /// arguments not read from a file. Always false for flags and
     /// groups.
     pub fn is_quoted(&self) -> bool {
         match self {

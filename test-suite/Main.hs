@@ -115,6 +115,7 @@ unitTests =
   , tuplePatternLambdaTests
   , withDocstringTests
   , parseDocstringTests
+  , removedDirectiveTests
   , epilogueDocstringTests
   , streamIntrinsicTests
   , patternSelectorTests

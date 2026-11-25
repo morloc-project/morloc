@@ -44,8 +44,8 @@ concatLists ::
   [Int]
 concatLists xs = xs
 
--- Python-backed: scalar literal: true on Str. Argument is taken as a
--- literal string regardless of whether a file by that name exists.
+-- Python-backed: a Str option. The argument is taken as a literal
+-- string regardless of whether a file by that name exists.
 greet ::
   --' @arg -y/--yolo
   --' @default "yolo"

@@ -889,7 +889,6 @@ parseEntryTargets name cmdDoc argDocs
 data ArgDocVars = ArgDocVars
   { docLines :: [Text]
   , docName :: Maybe Text
-  , docLiteral :: Maybe Bool
   , docMany :: Maybe Bool
   , docStdin :: Maybe Bool
   , docUnroll :: Maybe Bool
@@ -921,7 +920,6 @@ inheritArgDocVars r1 r2 =
   ArgDocVars
     { docLines = if (length (docLines r1) > 0) then docLines r1 else docLines r2
     , docName = docName r1 <|> docName r2
-    , docLiteral = docLiteral r1 <|> docLiteral r2
     , docMany = docMany r1 <|> docMany r2
     , docStdin = docStdin r1 <|> docStdin r2
     , docUnroll = docUnroll r1 <|> docUnroll r2
@@ -990,7 +988,6 @@ instance Defaultable ArgDocVars where
     ArgDocVars
       { docLines = []
       , docName = Nothing
-      , docLiteral = Nothing
       , docMany = Nothing
       , docStdin = Nothing
       , docUnroll = Nothing

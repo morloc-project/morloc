@@ -1935,7 +1935,7 @@ mod tests {
         }
     }
 
-    /// One `@literal` Str positional.
+    /// One quoted Str positional.
     fn fixture_quoted_positional() -> Manifest {
         let json = wrap_manifest(
             r#"[
@@ -1973,7 +1973,7 @@ mod tests {
         }
     }
 
-    /// `bar` with one `@literal` Optional whose manifest default is the
+    /// `bar` with one quoted Optional whose manifest default is the
     /// JSON string `"yolo"`.
     fn fixture_literal_optional_with_default() -> Manifest {
         let json = wrap_manifest(
