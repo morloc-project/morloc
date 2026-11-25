@@ -379,18 +379,16 @@ pub(crate) unsafe fn morloc_cache_lookup(
 ///
 /// Cases returning false (miss + side-effect unlink):
 /// - The bytes are shorter than a packet header (corrupt).
-/// - Header claims `source=FILE, format=MSGPACK` — a legacy entry
-///   from before the msgpack->voidstar migration; unlink both the
-///   indirection and its `.dat` sidecar.
 /// - Header claims `source=FILE, format=DATA` but the referenced
 ///   content sidecar does not exist or is empty; unlink the dangling
-///   indirection.
+///   indirection and the sidecar.
+/// - Any other data packet: the store writes only `FILE` indirections to
+///   `DATA` sidecars. A value carried inline or by reference would be
+///   decoded as one the program built rather than checked as data read
+///   back from disk, and a file of another format is not an entry the
+///   store wrote; unlink the indirection.
 ///
-/// - Any other data packet: the store writes only file indirections, and
-///   a value carried inline or by reference would be decoded as one the
-///   program built rather than checked as data read back from disk.
-///
-/// All other headers pass through (the caller trusts the packet
+/// Non-data headers pass through (the caller trusts the packet
 /// framework to reject any leftover invalid combinations).
 unsafe fn cache_entry_is_valid(
     indirection_filename: *const c_char,
@@ -398,8 +396,7 @@ unsafe fn cache_entry_is_valid(
     data_len: usize,
 ) -> bool {
     use morloc_runtime_types::packet::{
-        PACKET_FORMAT_DATA, PACKET_FORMAT_MSGPACK, PACKET_SOURCE_FILE,
-        PacketHeader,
+        PACKET_FORMAT_DATA, PACKET_SOURCE_FILE, PacketHeader,
     };
     if data_len < 32 {
         libc::unlink(indirection_filename);
@@ -419,7 +416,7 @@ unsafe fn cache_entry_is_valid(
     let cmd = hdr.command.data;
     let src = cmd.source;
     let fmt = cmd.format;
-    if src != PACKET_SOURCE_FILE {
+    if src != PACKET_SOURCE_FILE || fmt != PACKET_FORMAT_DATA {
         libc::unlink(indirection_filename);
         return false;
     }
@@ -439,30 +436,18 @@ unsafe fn cache_entry_is_valid(
         Err(_) => { libc::unlink(indirection_filename); return false; }
     };
 
-    if fmt == PACKET_FORMAT_MSGPACK {
-        // Cold-flush: legacy pre-migration entry. Unlink both files.
+    // Atomicity: the content sidecar must exist and be non-empty.
+    // A missing or empty file means the two-file write got
+    // interrupted between rename(2) calls. `unlink` on a missing
+    // sidecar is a no-op.
+    let mut sb: libc::stat = std::mem::zeroed();
+    let sidecar_ok =
+        libc::stat(ref_cstring.as_ptr(), &mut sb) == 0 && sb.st_size > 0;
+    if !sidecar_ok {
         libc::unlink(ref_cstring.as_ptr());
         libc::unlink(indirection_filename);
         return false;
     }
-    if fmt == PACKET_FORMAT_DATA {
-        // Atomicity: the content sidecar must exist and be non-empty.
-        // A missing or empty file means the two-file write got
-        // interrupted between rename(2) calls. `unlink` on a missing
-        // sidecar is a no-op.
-        let mut sb: libc::stat = std::mem::zeroed();
-        let sidecar_ok =
-            libc::stat(ref_cstring.as_ptr(), &mut sb) == 0 && sb.st_size > 0;
-        if !sidecar_ok {
-            libc::unlink(ref_cstring.as_ptr());
-            libc::unlink(indirection_filename);
-            return false;
-        }
-        return true;
-    }
-    // Unknown FILE format under the new scheme (e.g. TEXT / JSON via
-    // an old test). Don't touch it -- let the reader surface its own
-    // error.
     true
 }
 
@@ -1096,6 +1081,34 @@ mod hash_pointer_tests {
         let schema = parse_schema(schema_str).unwrap();
         let ptr = json::read_json_with_schema(json_text, &schema).unwrap();
         hash_voidstar_value(ptr as *const u8, &schema, 0).unwrap()
+    }
+
+    // The store writes only file indirections to DATA sidecars. Any other
+    // file format is not an entry it wrote: a miss, and the indirection goes.
+    #[test]
+    fn only_a_data_file_indirection_is_a_cache_entry() {
+        let dir = std::env::temp_dir().join(format!("morloc-cache-entry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sidecar = dir.join("value.dat");
+        std::fs::write(&sidecar, b"payload").unwrap();
+        let side_c = CString::new(sidecar.to_str().unwrap()).unwrap();
+        let schema_c = CString::new("i4").unwrap();
+        let check = |fmt: u8, name: &str| unsafe {
+            let schema = crate::ffi::parse_schema(schema_c.as_ptr(), &mut ptr::null_mut());
+            let p = crate::packet_ffi::make_program_file_packet(side_c.as_ptr(), schema, fmt);
+            let h = &*(p as *const morloc_runtime_types::packet::PacketHeader);
+            let bytes = std::slice::from_raw_parts(p, 32 + h.offset as usize + h.length as usize).to_vec();
+            let indir = dir.join(name);
+            std::fs::write(&indir, &bytes).unwrap();
+            let indir_c = CString::new(indir.to_str().unwrap()).unwrap();
+            let valid = cache_entry_is_valid(indir_c.as_ptr(), bytes.as_ptr(), bytes.len());
+            (valid, indir.exists())
+        };
+        use morloc_runtime_types::packet::{PACKET_FORMAT_DATA, PACKET_FORMAT_MSGPACK, PACKET_FORMAT_TEXT};
+        assert_eq!(check(PACKET_FORMAT_DATA, "data.ind"), (true, true));
+        assert_eq!(check(PACKET_FORMAT_TEXT, "text.ind"), (false, false));
+        assert_eq!(check(PACKET_FORMAT_MSGPACK, "mpk.ind"), (false, false));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

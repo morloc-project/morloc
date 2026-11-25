@@ -12,6 +12,7 @@ import Test.Tasty
 
 import AbiTests (abiTests)
 import BuildParamsTests (buildParamsTests)
+import ConfigTests (configTests)
 import EffectBoundaryTests (effectBoundaryTests)
 import EnvSpecTests (envSpecTests)
 import FutharkTupleTests (futharkTupleTests)
@@ -60,6 +61,7 @@ unitTests =
   , abiTests
   , buildParamsTests
   , envSpecTests
+  , configTests
   , futharkTupleTests
   , unitValuecheckTests
   , typeOrderTests

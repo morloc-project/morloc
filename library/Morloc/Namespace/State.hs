@@ -1326,21 +1326,10 @@ instance FromJSON Config where
       source' <- o .:? "source" .!= "~/.local/share/morloc/src/morloc"
       tmpdir' <- o .:? "tmpdir" .!= "~/.local/share/morloc/tmp"
       buildConfig' <- o .:? "build-config" .!= "~/.local/share/morloc/build-config.yaml"
-      -- Parse legacy lang_python3/lang_R fields into langOverrides
-      pyCmd <- o .:? "lang_python3" .!= ("" :: Text)
-      rCmd <- o .:? "lang_R" .!= ("" :: Text)
       overrides <- o .:? "lang_overrides" .!= Map.empty
-      let legacyOverrides =
-            Map.fromList $
-              filter
-                (not . null . snd)
-                [ ("py", if pyCmd == "" then [] else [pyCmd])
-                , ("r", if rCmd == "" then [] else [rCmd])
-                ]
-          allOverrides = Map.union overrides legacyOverrides
       -- configState defaults to home' here; the post-load resolver in
       -- Morloc.Config applies $MORLOC_STATE and re-derives configLibrary from it.
-      return $ Config home' home' source' tmpdir' buildConfig' allOverrides
+      return $ Config home' home' source' tmpdir' buildConfig' overrides
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o -> do
@@ -1468,13 +1457,9 @@ instance FromJSON PackageMeta where
           "git-hash must be a quoted string, e.g. git-hash: \"00a1b2...\" \
           \(an unquoted all-numeric hash is read as a number and would lose \
           \any leading zeros)"
-      -- Accept the canonical `morloc-deps` key, falling back to the deprecated
-      -- `morloc-dependencies` alias. `morloc-deps` wins when both are present.
-      -- The deprecation warning is emitted at load time (see loadModuleMetadata).
       parseMorlocDeps obj = do
-        primary <- obj .:? "morloc-deps"
-        legacy  <- obj .:? "morloc-dependencies"
-        mapM parseMorlocDep (maybe [] id (primary <|> legacy))
+        deps <- obj .:? "morloc-deps" .!= []
+        mapM parseMorlocDep deps
 
 instance FromJSON ExposeSet where
   parseJSON = Aeson.withObject "expose" $ \o ->

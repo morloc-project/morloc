@@ -2,7 +2,7 @@
 
 -- |
 -- Module      : MorlocDepsTests
--- Description : Unit tests for the morloc-dependencies package.yaml field
+-- Description : Unit tests for the morloc-deps package.yaml field
 --               and the closer-to-install-root-wins resolver.
 module MorlocDepsTests
   ( morlocDepsTests
@@ -61,7 +61,7 @@ parsePackageYaml = Yaml.decodeEither'
 morlocDepsTests :: TestTree
 morlocDepsTests =
   testGroup
-    "morloc-dependencies"
+    "morloc-deps"
     [ packageYamlParserTests
     , resolverTests
     , packageSetupParserTests
@@ -245,21 +245,21 @@ moduleVersionGateTests =
 packageYamlParserTests :: TestTree
 packageYamlParserTests =
   testGroup
-    "package.yaml :: morloc-dependencies parser"
+    "package.yaml :: morloc-deps parser"
     [ testCase "missing field defaults to []" $ do
         let yamlText = "name: foo\nversion: 0.1.0\n"
         case parsePackageYaml yamlText of
           Left e -> assertFailure (show e)
           Right pm -> packageMorlocDependencies pm @?= []
     , testCase "explicit empty list" $ do
-        let yamlText = "name: foo\nmorloc-dependencies: []\n"
+        let yamlText = "name: foo\nmorloc-deps: []\n"
         case parsePackageYaml yamlText of
           Left e -> assertFailure (show e)
           Right pm -> packageMorlocDependencies pm @?= []
     , testCase "two valid entries parsed in order" $ do
         let yamlText =
               "name: foo\n\
-              \morloc-dependencies:\n\
+              \morloc-deps:\n\
               \  - name: root\n\
               \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n\
               \  - name: table\n\
@@ -282,7 +282,7 @@ packageYamlParserTests =
           Right pm ->
             packageMorlocDependencies pm
               @?= [MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"]
-    , testCase "morloc-deps wins when both keys are present" $ do
+    , testCase "morloc-deps is read when the removed key is also present" $ do
         let yamlText =
               "name: foo\n\
               \morloc-deps:\n\
@@ -296,7 +296,7 @@ packageYamlParserTests =
           Right pm ->
             packageMorlocDependencies pm
               @?= [MorlocDep "root" "std" Nothing "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"]
-    , testCase "deprecated morloc-dependencies alias still parses" $ do
+    , testCase "the removed morloc-dependencies key is not read" $ do
         let yamlText =
               "name: foo\n\
               \morloc-dependencies:\n\
@@ -304,13 +304,11 @@ packageYamlParserTests =
               \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
         case parsePackageYaml yamlText of
           Left e -> assertFailure (show e)
-          Right pm ->
-            packageMorlocDependencies pm
-              @?= [MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"]
+          Right pm -> packageMorlocDependencies pm @?= []
     , testCase "missing git-hash field is rejected" $ do
         let yamlText =
               "name: foo\n\
-              \morloc-dependencies:\n\
+              \morloc-deps:\n\
               \  - name: root\n"
         case parsePackageYaml yamlText of
           Left _ -> return ()  -- expected: parse failure
@@ -321,7 +319,7 @@ packageYamlParserTests =
     , testCase "non-string git-hash is rejected" $ do
         let yamlText =
               "name: foo\n\
-              \morloc-dependencies:\n\
+              \morloc-deps:\n\
               \  - name: root\n\
               \    git-hash: 12345\n"
         -- An unquoted numeric git-hash is parsed by YAML as a number. Coercing

@@ -981,12 +981,8 @@ instance JSON.FromJSON ModuleManifest where
     where
       parseExport = JSON.withObject "Export" $ \o ->
         (,) <$> o JSON..: "name" <*> o JSON..: "type"
-      -- Accept both the legacy bare-string form ("foo") and the new
-      -- object form ({"name": "foo", "git_hash": "..."}). Only the name
-      -- is needed for `morloc list`'s reverse-dep view; hash provenance
-      -- in this report is a future enhancement.
-      parseDepName (JSON.String s) = return s
-      parseDepName v = JSON.withObject "MorlocDep" (\o -> o JSON..: "name") v
+      -- Only the name is needed for `morloc list`'s reverse-dep view.
+      parseDepName = JSON.withObject "MorlocDep" (\o -> o JSON..: "name")
 
 instance JSON.FromJSON ProgramManifest where
   parseJSON = JSON.withObject "ProgramManifest" $ \o ->

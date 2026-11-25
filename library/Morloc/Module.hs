@@ -414,8 +414,8 @@ addPin pinMap depth declaredBy depName depHash depFrom =
           return $ Map.insert depName (PinEntry depHash depth declaredBy depFrom) pinMap
 
 -- | Read the @installed_hash@ field from a module's fdb manifest.
--- Returns @Nothing@ if the manifest is absent, malformed, or has no hash
--- (e.g. legacy installs predating this schema bump).
+-- Returns @Nothing@ if the manifest is absent, malformed, or records no
+-- hash (an install not made from a git checkout writes @null@).
 readInstalledHash :: FilePath -> Text -> IO (Maybe Text)
 readInstalledHash fdbDir modName = do
   let manifestPath = fdbDir </> keyStem modName ++ ".module"
@@ -912,21 +912,6 @@ loadModuleMetadata isRoot main = do
     case maybef of
       (Just f) -> readPackageYaml f
       Nothing -> return defaultValue
-  -- Nudge the top-level project off the deprecated `morloc-dependencies` key,
-  -- which has been renamed to `morloc-deps`. Both are still accepted (see the
-  -- FromJSON PackageMeta instance); the warning is scoped to the root so that
-  -- imported modules still using the old alias do not spam the build.
-  when isRoot $ case maybef of
-    Just f -> do
-      raw <- readPackageYaml f :: MorlocMonad Aeson.Value
-      case raw of
-        Aeson.Object o
-          | KM.member "morloc-dependencies" o && not (KM.member "morloc-deps" o) ->
-              MM.say $
-                "warning: package.yaml key 'morloc-dependencies' is deprecated;"
-                  <+> "rename it to 'morloc-deps'"
-        _ -> return ()
-    Nothing -> return ()
   -- Reject include entries that escape the package directory. Absolute
   -- paths and `..` traversals are not allowed because they would break
   -- reproducibility and tie installs to ambient filesystem layout.
