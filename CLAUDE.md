@@ -45,9 +45,13 @@ rebuilds from the installed copy of the runtime sources, not your working tree,
 so your edit is silently absent from the library under test and the change
 appears to have no effect.
 
-After changing anything under `data/rust/`, run:
+The Rust language binding (`data/lang/rust/rustmorloc`) is embedded in the
+compiler like the other bindings, so an edit to it needs `test-suite/run
+setup` (stack install, then init) before it reaches a Rust pool.
 
-$ test-suite/run rust            # cargo test over data/rust
+After changing anything under `data/rust/` or the Rust binding, run:
+
+$ test-suite/run rust            # cargo test over data/rust and the Rust binding
 
 - `test-suite/run haskell` runs unit tests and golden tests
 - Golden tests are full morloc programs

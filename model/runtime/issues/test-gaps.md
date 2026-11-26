@@ -87,10 +87,3 @@ timing (from the 2026-11-12 audit of the output-path work).
 - **ForkSide's AFailedStepFailsTheFold also covers gather.**
   ForkSide_failed_put_unmarked.bug (gather) is caught by it; the name
   says fold only. Read.
-- **No suite runs PANIC-9's release-mode classifier check.** [read
-  2026-11-26] PANIC-9 (panic.md, "The release-mode classifier tests") says
-  the classifier tests reproduce a pool build only under
-  `RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zmerge-functions=disabled cargo test
-  --release -p rustmorloc -- panic_classifier`. `test-suite/run rust` runs a
-  debug `cargo test --workspace`, where nothing merges, and CI runs only
-  that, so the case the item names is never checked.

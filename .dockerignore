@@ -7,3 +7,4 @@ morloc-manager/.stack-work/
 data/rust/target/
 *.hi
 *.o
+data/lang/rust/rustmorloc/target/

@@ -53,6 +53,10 @@ extra-source-files:
   - data/lang/r/rmorloc.c
   - data/lang/r/pool.R
   - data/lang/r/init.sh
+  - data/lang/rust/rustmorloc/Cargo.toml
+  - data/lang/rust/rustmorloc/Cargo.lock
+  - data/lang/rust/rustmorloc/build.rs
+  - data/lang/rust/rustmorloc/src/*.rs
 
 default-extensions:
   - TypeOperators

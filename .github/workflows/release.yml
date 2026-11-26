@@ -140,8 +140,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # rustc/cargo: morloc make compiles Rust pools, and morloc init builds
-      # libmorloc.so + morloc-nexus + the rustmorloc rlib from the bundled
-      # sources (prebuilt/rust) with this toolchain.
+      # libmorloc.so + morloc-nexus from the bundled sources (prebuilt/rust)
+      # with this toolchain.
       - uses: dtolnay/rust-toolchain@stable
         id: rust
       - uses: haskell-actions/setup@v2
@@ -166,7 +166,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-release-${{ hashFiles('data/rust/Cargo.lock') }}
+          key: cargo-release-${{ hashFiles('data/rust/Cargo.lock', 'data/lang/rust/rustmorloc/Cargo.lock') }}
           restore-keys: cargo-release-
       # The compiled dependencies of every Rust pool, built once per profile
       # into the shared cargo target dir under the morloc state root (which
@@ -182,7 +182,7 @@ jobs:
             !~/.local/share/morloc/cache/rust-build/release/deps/pool_*
             !~/.local/share/morloc/cache/rust-build/release/.fingerprint/pool_*
             !~/.local/share/morloc/cache/rust-build/release/build/pool_*
-          key: rust-build-release-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('data/rust/Cargo.lock') }}
+          key: rust-build-release-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('data/rust/Cargo.lock', 'data/lang/rust/rustmorloc/Cargo.lock') }}
           restore-keys: rust-build-release-${{ steps.rust.outputs.cachekey }}-
       - name: Increase shared memory
         run: sudo mount -o remount,size=4G /dev/shm
@@ -226,7 +226,7 @@ jobs:
       - name: Prepare Rust source
         run: |
           mkdir -p prebuilt
-          # morloc init builds libmorloc.so + morloc-nexus + rustmorloc from these
+          # morloc init builds libmorloc.so + morloc-nexus from these
           mv rust-bin/rust prebuilt/rust
 
       - name: Add morloc to PATH
@@ -371,8 +371,8 @@ jobs:
       - name: List artifacts
         run: ls -lh
 
-      # The entire ABI-bearing runtime (libmorloc.so, morloc-nexus, and the
-      # rustmorloc rlib) is built from this source by `morloc init` with the
+      # The entire ABI-bearing runtime (libmorloc.so and morloc-nexus) is
+      # built from this source by `morloc init` with the
       # target env's own toolchain, so it ships as platform-independent source
       # rather than prebuilt binaries. Consumers unpack it as MORLOC_RUST_DIR.
       - name: Package Rust sources

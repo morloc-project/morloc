@@ -49,7 +49,7 @@ golden|golden programs (morloc-test, goldens only); golden/GROUP narrows|setup|3
 spec|every spec-* unit and golden test, and model/check.sh|setup|15 min|
 haskell|unit + golden (stack test morloc:morloc-test)|setup|30-60 min|every shard
 integration|Haskell integration exe (morloc-integration-test)|setup|10-45 min|release
-rust|cargo test over data/rust|libmorloc (setup)|3-5 min|shard 1
+rust|cargo test over data/rust and the Rust binding|libmorloc (setup)|5-8 min|shard 1
 model|spec format and test citations (model/check.sh)|python3|seconds|in unit
 tla|TLA+ models (model/runtime/tla/check.sh)|java 11+|10 min|
 lint|portability lint of shell and make files|python3|seconds|shard 1
@@ -141,6 +141,19 @@ runtime_env() {
     fi
 }
 
+# Under --ci, run a command in a session of its own, so a test that signals
+# its process group by mistake fails visibly instead of killing the runner;
+# the fork tests need user namespaces on Linux.
+in_session() {
+    if [[ $CI -eq 1 ]]; then
+        local ns=""
+        linux && ns=1
+        MORLOC_REQUIRE_NAMESPACES="$ns" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' "$@"
+    else
+        "$@"
+    fi
+}
+
 suite() {
     local name="$1"
     case "$name" in
@@ -165,17 +178,23 @@ suite() {
         haskell) morloc_test all "" ;;
         integration) haskell_suite morloc-integration-test "" ;;
         rust)
-            # In a session of its own under --ci, so a test that signals its
-            # process group by mistake fails visibly instead of killing the
-            # runner. The fork tests need user namespaces on Linux.
-            if [[ $CI -eq 1 ]]; then
-                local ns=""
-                linux && ns=1
-                MORLOC_REQUIRE_NAMESPACES="$ns" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
-                    cargo test --workspace --manifest-path data/rust/Cargo.toml ${EXTRA[@]+"${EXTRA[@]}"}
-            else
-                cargo test --workspace --manifest-path data/rust/Cargo.toml ${EXTRA[@]+"${EXTRA[@]}"}
-            fi ;;
+            # PANIC-9: the classifier tests reproduce a pool build only with a
+            # pool's default release profile and flags (rustPoolRustflags).
+            local pool_flags="-Zmerge-functions=disabled" pool_config=()
+            if ! linux; then
+                pool_flags="$pool_flags -Clink-arg=-Wl,-no_deduplicate"
+                pool_config=(--config 'profile.release.split-debuginfo="packed"')
+            fi
+            # Extra arguments go to the runtime workspace run only.
+            in_session cargo test --workspace --manifest-path data/rust/Cargo.toml ${EXTRA[@]+"${EXTRA[@]}"} &&
+                in_session cargo test --locked --manifest-path data/lang/rust/rustmorloc/Cargo.toml \
+                    --target-dir data/rust/target &&
+                RUSTC_BOOTSTRAP=1 RUSTFLAGS="$pool_flags" \
+                    in_session cargo test --locked --release --manifest-path data/lang/rust/rustmorloc/Cargo.toml \
+                    --target-dir data/rust/target --config 'profile.release.opt-level=2' \
+                    --config 'profile.release.lto="thin"' --config 'profile.release.panic="unwind"' \
+                    --config 'profile.release.debug="line-tables-only"' ${pool_config[@]+"${pool_config[@]}"} \
+                    -- panic_classifier ;;
         model) bash model/check.sh ;;
         tla) bash model/runtime/tla/check.sh ${EXTRA[@]+"${EXTRA[@]}"} ;;
         lint) python3 "$TS/tools/portability-lint.py" ;;

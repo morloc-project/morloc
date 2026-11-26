@@ -47,10 +47,7 @@ use morloc_runtime_types::packet::{
 use morloc_runtime_types::shm_types::{align_up, encode_relptr, relptr_offset, Array, RelPtr, RELNULL};
 
 // Re-export the schema surface a generated pool needs (also brings Schema/
-// SerialType into scope here), so pool.rs has exactly one direct rlib
-// dependency: rustmorloc, pinned by path in the bare-rustc build.
-// morloc_runtime_types then resolves as rustmorloc's transitive dep by exact
-// metadata hash, sidestepping crate-name ambiguity across rust-deps.
+// SerialType into scope here), so a pool depends on rustmorloc alone.
 pub use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
 // The Arrow crates a table-typed pool needs, so a module can map `Table` to
 // `rustmorloc::arrow_array::RecordBatch` without declaring the crates itself.
@@ -323,14 +320,6 @@ fn trim_dot(path: &str) -> &str {
     path.strip_prefix("./").unwrap_or(path)
 }
 
-/// The workspace's other runtime crates, libmorloc and the nexus.
-fn sibling_runtime_dirs() -> [&'static str; 2] {
-    [
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../morloc-runtime/src/"),
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../morloc-nexus/src/"),
-    ]
-}
-
 /// `path` with its `.` and `..` components resolved, as written.
 fn normalize(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -379,7 +368,6 @@ fn side_of(file: &str, pool_files: &[&str], user_files: &[&str]) -> Side {
         Side::User
     } else if pool_files.iter().any(|p| normalize(trim_dot(p)) == f)
         || this_crate_dirs().iter().any(|d| under(d))
-        || sibling_runtime_dirs().iter().any(|d| under(d))
         || morloc_runtime_types::panic::source_dirs().iter().any(|d| under(d))
     {
         Side::Runtime
@@ -5279,7 +5267,7 @@ mod panic_classifier_tests {
         assert_eq!(side_of(pool[0], &pool, &user), Side::Runtime);
         assert_eq!(side_of("/home/u/.cargo/registry/src/x/arrow/lib.rs", &pool, &user), Side::Neither);
         assert_eq!(side_of("/home/u/projx/a.rs", &pool, &["/home/u/proj/"]), Side::Neither);
-        for d in this_crate_dirs().iter().chain(sibling_runtime_dirs().iter()) {
+        for d in this_crate_dirs().iter() {
             assert_eq!(side_of(&format!("{d}x.rs"), &pool, &["/"]), Side::Runtime);
         }
         assert_eq!(side_of("/home/u/proj/sub/./b.rs", &pool, &user), Side::User);

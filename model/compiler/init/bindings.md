@@ -80,3 +80,23 @@ command that repairs it. An R pool whose binding was compiled for another R
 major and minor version stops before any call, naming both versions and the
 command that repairs it.
 
+### SHIM-6 The Rust binding is the compiler's, installed by its contents
+Intent: ruled 2026-11-26
+Tests: spec-shim-6-1, spec-shim-6-2, spec-shim-6-3
+Code: conforms 2026-11-26
+
+Generated Rust code calls rustmorloc, so the crate is the compiler's: its
+source is `data/lang/rust/rustmorloc`, embedded file by file (all ASCII).
+Every init writes it, if absent, to
+`$MORLOC_HOME/lang/rust/rustmorloc-<hash of its files>` (staged, then renamed
+into place with a `.complete` stamp), leaving other compilers' copies;
+from there its relative dependency on the runtime types reaches the home's
+persisted runtime source. Rust pools depend on that directory and start
+from its `Cargo.lock`; init builds its dependencies into the shared cache
+with the default pool profile. `morloc make` refuses a Rust program when it
+is missing, and `morloc init --check` reports it as language `rust`. Its C
+declarations are checked against `morloc.h` in the source tree, and the
+installed header must be this compiler's (SHIM-3), so the binding and the
+installed libmorloc share one C ABI; a mismatch in the Rust interface of
+`morloc-runtime-types` fails the pool's compile.
+

@@ -58,6 +58,15 @@ fn repo_root() -> PathBuf {
     rust_root().parent().unwrap().parent().unwrap().to_path_buf()
 }
 
+/// Where each crate the rules scan lives: the runtime workspace's members in
+/// data/rust, and the Rust language binding with the other bindings.
+fn crate_dir(krate: &str) -> PathBuf {
+    match krate {
+        "rustmorloc" => repo_root().join("data/lang/rust/rustmorloc"),
+        k => rust_root().join(k),
+    }
+}
+
 fn model_dir() -> PathBuf {
     repo_root().join("model").join("runtime")
 }
@@ -106,7 +115,7 @@ fn golden_test_names(dir: &Path) -> HashSet<String> {
 }
 
 fn rust_sources() -> Vec<PathBuf> {
-    CRATES.iter().flat_map(|k| walk(&rust_root().join(k).join("src"), &["rs"], &[])).collect()
+    CRATES.iter().flat_map(|k| walk(&crate_dir(k).join("src"), &["rs"], &[])).collect()
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -278,7 +287,7 @@ fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
 fn the_test_hooks_feature_is_enabled_only_for_tests() {
     let mut problems = Vec::new();
     for c in CRATES {
-        let manifest = rust_root().join(c).join("Cargo.toml");
+        let manifest = crate_dir(c).join("Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         let mut section = String::new();
         for (n, line) in text.lines().enumerate() {
@@ -547,17 +556,16 @@ fn scan_rust() -> &'static RustScan {
 }
 
 fn scan_rust_sources() -> RustScan {
-    let root = rust_root();
     let mut out = RustScan::default();
     for krate in CRATES {
-        let src = root.join(krate).join("src");
+        let src = crate_dir(krate).join("src");
         let test_mods = test_only_modules(&src);
         for f in walk(&src, &["rs"], &[]) {
             let text = std::fs::read_to_string(&f).unwrap();
             let parsed = syn::parse_file(&text).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
             let stem = f.file_stem().unwrap().to_string_lossy().to_string();
             let mut scan = Scan {
-                file: f.strip_prefix(&root).unwrap().to_string_lossy().replace("/src/", "/"),
+                file: format!("{krate}/{}", f.strip_prefix(&src).unwrap().to_string_lossy()),
                 fns: Vec::new(),
                 test_depth: test_mods.contains(&stem) as usize,
                 out: &mut out,
@@ -837,7 +845,7 @@ fn the_registry_parser_rejects_malformed_rows() {
 fn site_body_calls(site: &str, needle: &str) -> bool {
     let Some((file, func)) = site.split_once("::") else { return false };
     let Some((krate, rel)) = file.split_once('/') else { return false };
-    let path = repo_root().join("data/rust").join(krate).join("src").join(rel);
+    let path = crate_dir(krate).join("src").join(rel);
     let Ok(text) = std::fs::read_to_string(path) else { return false };
     let Some(start) = text.find(&format!("fn {func}(")) else { return false };
     let body = &text[start..];
@@ -1277,7 +1285,7 @@ fn only_the_runtime_library_uses_generation_keyed_state() {
     let banned = ["process::token", "owner_word", "OwnerWord", "fork_generation::", "shm_lock", "ShmLock", "recoverable_lock", "RecoverableLock"];
     let mut uses = Vec::new();
     for krate in ["rustmorloc", "morloc-nexus"] {
-        for f in walk(&rust_root().join(krate).join("src"), &["rs"], &[]) {
+        for f in walk(&crate_dir(krate).join("src"), &["rs"], &[]) {
             let text = std::fs::read_to_string(&f).unwrap();
             for b in banned.iter().filter(|b| text.contains(*b)) {
                 uses.push(format!("{}: {b}", f.display()));
@@ -1363,7 +1371,7 @@ fn every_crate_refuses_to_build_without_unwinding() {
     let repo = repo_root();
     for path in [
         "data/rust/morloc-runtime/src/lib.rs",
-        "data/rust/rustmorloc/src/lib.rs",
+        "data/lang/rust/rustmorloc/src/lib.rs",
         "data/rust/morloc-nexus/src/main.rs",
         "data/lang/rust/pool.rs",
     ] {
@@ -1456,14 +1464,14 @@ const BINDING_REL2ABS: &[(&str, usize)] = &[
     ("data/lang/cpp/pool.cpp", 1),
     ("data/lang/py/pymorloc.c", 1),
     ("data/lang/r/rmorloc.c", 2),
-    ("data/rust/rustmorloc/src/lib.rs", 6),
+    ("data/lang/rust/rustmorloc/src/lib.rs", 6),
 ];
 
 #[test]
 fn bindings_resolve_received_references_only_through_the_check() {
     let repo = repo_root();
     let mut files = walk(&repo.join("data").join("lang"), &["c", "cpp", "hpp", "h"], &[]);
-    files.extend(walk(&repo.join("data").join("rust").join("rustmorloc").join("src"), &["rs"], &[]));
+    files.extend(walk(&crate_dir("rustmorloc").join("src"), &["rs"], &[]));
     let mut counts: HashMap<String, usize> = HashMap::new();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
@@ -1578,3 +1586,67 @@ fn python_waits_for_a_stream_lock_only_without_the_gil() {
     assert!(found.is_empty(), "SLOT-37: pymorloc.c calls these holding the GIL:\n{}", found.join("\n"));
     assert!(!text.contains("Py_mod_gil"), "SLOT-37: an in-place batch's sizes hold only while the GIL is held");
 }
+
+#[test]
+fn every_rust_crate_in_the_repository_is_scanned() {
+    fn manifests(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n != "target") {
+                    manifests(&p, out);
+                }
+            } else if p.file_name().is_some_and(|n| n == "Cargo.toml") {
+                out.push(p);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for top in ["data/rust", "data/lang"] {
+        manifests(&repo_root().join(top), &mut found);
+    }
+    let unscanned: Vec<String> = found
+        .iter()
+        .map(|f| f.parent().unwrap().to_path_buf())
+        .filter(|dir| *dir != rust_root() && !CRATES.iter().any(|k| crate_dir(k) == *dir))
+        .map(|dir| dir.display().to_string())
+        .collect();
+    assert!(unscanned.is_empty(), "crates the source rules do not scan (add them to CRATES): {unscanned:?}");
+}
+
+/// The versions, sources and checksums a lock pins for each package name.
+fn lock_pins(text: &str) -> HashMap<String, HashSet<String>> {
+    let mut pins: HashMap<String, HashSet<String>> = HashMap::new();
+    for block in text.split("[[package]]").skip(1) {
+        let field = |k: &str| {
+            block.lines().find_map(|l| l.strip_prefix(&format!("{k} = "))).map(|v| v.trim_matches('"').to_string())
+        };
+        if let Some(name) = field("name") {
+            let pin = format!("{} {} {}", field("version").unwrap_or_default(), field("source").unwrap_or_default(), field("checksum").unwrap_or_default());
+            pins.entry(name).or_default().insert(pin);
+        }
+    }
+    pins
+}
+
+#[test]
+fn the_rust_binding_lock_agrees_with_the_runtime_lock() {
+    let runtime = lock_pins(&std::fs::read_to_string(rust_root().join("Cargo.lock")).unwrap());
+    let binding = lock_pins(&std::fs::read_to_string(crate_dir("rustmorloc").join("Cargo.lock")).unwrap());
+    let mut differ: Vec<String> = binding
+        .iter()
+        .filter(|(name, pins)| !name.starts_with("morloc") && runtime.get(*name).is_some_and(|r| !pins.is_subset(r)))
+        .map(|(name, pins)| format!("{name}: binding {pins:?}, runtime {:?}", runtime[name]))
+        .collect();
+    differ.sort();
+    assert!(differ.is_empty(), "the Rust binding pins another version of a crate the runtime uses:\n{}", differ.join("\n"));
+    let entry = |text: &str| {
+        text.split("[[package]]").find(|b| b.lines().any(|l| l == "name = \"morloc-runtime-types\"")).map(str::trim).map(String::from)
+    };
+    assert_eq!(
+        entry(&std::fs::read_to_string(crate_dir("rustmorloc").join("Cargo.lock")).unwrap()),
+        entry(&std::fs::read_to_string(rust_root().join("Cargo.lock")).unwrap()),
+        "the Rust binding's lock describes another morloc-runtime-types than the runtime's (regenerate it from the runtime lock)"
+    );
+}
+

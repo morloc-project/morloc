@@ -1,7 +1,7 @@
 // Link libmorloc.so so rustmorloc's own test/bench binaries resolve the C ABI
-// symbols (shmalloc, abs2rel, make_data_packet_auto, ...). This does NOT affect
-// the generated pool build, which invokes bare `rustc` with its own `-l morloc`.
-// An rlib carries these as undefined references; only executables need the link.
+// symbols (shmalloc, abs2rel, make_data_packet_auto, ...). A generated pool
+// links libmorloc through its own build script. An rlib carries these as
+// undefined references; only executables need the link.
 fn main() {
     let morloc_lib = std::env::var("MORLOC_HOME")
         .map(|h| format!("{}/lib", h))

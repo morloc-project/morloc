@@ -36,6 +36,7 @@ import Morloc.CodeGenerator.SystemConfig
   , findRustDir
   , installedRuntimeMismatches
   , Mismatch (..)
+  , installRustBinding
   , interpreterIdentity
   , langMarkerText
   , nexusAgrees
@@ -46,6 +47,9 @@ import Morloc.CodeGenerator.SystemConfig
   )
 import Control.Exception (bracket)
 import Morloc.Abi (abiVersion)
+import Morloc.RustBinding (rustBindingDir, rustBindingFiles)
+import Control.Monad (forM, forM_)
+import Data.List (sort)
 import qualified Morloc.DataFiles as DF
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
@@ -54,7 +58,9 @@ import System.Directory
   ( canonicalizePath
   , createDirectoryIfMissing
   , createFileLink
+  , doesDirectoryExist
   , getPermissions
+  , listDirectory
   , getTemporaryDirectory
   , removePathForcibly
   , setOwnerExecutable
@@ -332,6 +338,26 @@ runtimeInstallTests =
           writeBuildId home "aaaa"
           writeMarkers home "aaaa" False (\(name, text) -> (name, if name == "R" then "other" else text))
           mismatches False (map T.pack ["py", "cpp"]) home >>= (@?= [])
+    , testCase "spec-shim-6-1" $ do
+        listed <- relativeFiles "data/lang/rust/rustmorloc"
+        sort (map fst rustBindingFiles) @?= sort listed
+    , testCase "spec-shim-6-2" $ do
+        let embedded =
+              [(n, b) | (n, b) <- rustBindingFiles]
+                ++ [("morloc.h", TE.encodeUtf8 DF.libmorlocHeader)]
+                ++ [(DF.embededFileName ef, TE.encodeUtf8 (DF.embededFileText ef)) | ls <- DF.langSetups, ef <- DF.lsInitScript ls : DF.lsFiles ls]
+        [n | (n, b) <- embedded, BS.any (> 127) b] @?= []
+    , testCase "spec-shim-6-3" $
+        withHome "rustbinding" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "aaaa"
+          before <- mismatches False [T.pack "rust"] home
+          assertBool (show before) (any ("rustmorloc" `isInfixOf`) before)
+          installRustBinding False False home >>= assertBool "first install writes"
+          installRustBinding False False home >>= assertBool "second install leaves it" . not
+          installRustBinding False True home >>= assertBool "a forced install rewrites it"
+          forM_ rustBindingFiles $ \(name, bytes) -> BS.readFile (rustBindingDir home </> name) >>= (@?= bytes)
+          mismatches False [T.pack "rust"] home >>= (@?= [])
     , testCase "the source search falls back to a candidate without install.sh" $
         withHome "searchold" ["old/Cargo.toml"] $ \root ->
           findRustDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
@@ -346,6 +372,14 @@ runtimeInstallTests =
     libName = if SI.os == "darwin" then "libmorloc.dylib" else "libmorloc.so"
     allLangs = map DF.lsLang DF.langSetups
     fakeBuildId = "0123456789abcdef"
+    relativeFiles root = go ""
+      where
+        go rel = do
+          names <- listDirectory (root </> rel)
+          fmap concat . forM [n | n <- names, n /= "target", n /= ".gitignore"] $ \n -> do
+            let r = if null rel then n else rel </> n
+            isDir <- doesDirectoryExist (root </> r)
+            if isDir then go r else return [r]
     writeBuildId home bid = do
       createDirectoryIfMissing True (home </> "lib")
       writeFile (home </> "lib" </> "morloc.build-id") (bid <> "\n")

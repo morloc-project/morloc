@@ -21,10 +21,6 @@
 // unnamed (for method calls), and its own items start with __morloc.
 use ::rustmorloc::{ToVoidstar as _, FromVoidstar as _};
 
-// Declared directly (rather than via the `libc` crate) so the generated pool
-// has exactly two direct rlib dependencies (rustmorloc, morloc_runtime_types),
-// each pinned by path in the bare-rustc build -- avoiding `libc` crate-name
-// ambiguity across the many hashed rlibs staged in rust-deps.
 #[cfg(not(panic = "unwind"))]
 compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 

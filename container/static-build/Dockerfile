@@ -69,8 +69,8 @@ FROM docker.io/library/ubuntu:20.04
 COPY --from=compiler-builder /artifacts/morloc /out-staging/morloc
 
 # The Rust workspace source (minus build artifacts). `morloc init` compiles
-# libmorloc.so, morloc-nexus, and the rustmorloc rlib locally from these
-# sources (resolved as $MORLOC_RUST_DIR).
+# libmorloc.so and morloc-nexus locally from these sources (resolved as
+# $MORLOC_RUST_DIR); the compiler carries the Rust binding (rustmorloc).
 COPY data/rust /out-staging/rust
 RUN rm -rf /out-staging/rust/target
 

@@ -59,13 +59,19 @@
   2026-11-26] The compiler embeds only morloc.h from data/rust. After an
   edit to the runtime source without `morloc init -f` (with MORLOC_RUST_DIR
   at the edited tree), `morloc make` passes and Rust and C++ pools build
-  against the previous runtime and its persisted copy. Releases are not
+  against the previous runtime and its persisted copy. The same holds the
+  other way since the compiler carries the Rust binding (SHIM-6): an init
+  that reuses a persisted runtime source older than the compiler's tree
+  pairs this compiler's rustmorloc with that source's morloc-runtime-types,
+  which fails at the pool's compile when they disagree. Releases are not
   affected: the compiler and the runtime source come from one tag, and
-  provisioning always re-runs init.
+  provisioning always re-runs init. A fix pins the compiler to the runtime
+  source it was built from (a build id embedded at compile time), which
+  would make every runtime edit need `stack install`; needs a ruling.
 - **Crate versions claim a lockstep they lack.** [read]
-  morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
-  locked with morloc-runtime" (0.113.0); scripts/bump-version.sh:36 bumps
-  only nexus, manifest and runtime.
+  morloc-runtime-types (0.87.0) says "Version locked with morloc-runtime"
+  (0.113.0); scripts/bump-version.sh:36 bumps only nexus, manifest and
+  runtime.
 - **Rust crates are resolved per pool, outside the environment's solve.**
   [read] Rust pools resolve rust-deps one pool at a time against an
   environment lock the compiler maintains (Build/CargoLock.hs), while
@@ -238,10 +244,6 @@
   2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
   `bracket`. A SIGKILL (the MCP eval wall-clock kill, memguard) skips a
   bracket; unconfirmed.
-- **pool.rs claims a dependency the pool does not have.** [read 2026-11-26]
-  data/lang/rust/pool.rs:24-27 says the generated pool has two direct rlib
-  dependencies, rustmorloc and morloc_runtime_types. The pool Cargo.toml
-  written by Members/Rust.hs makeCargoDocs (~:3732) names only rustmorloc.
 - **The release workflow never runs the Rust suite.** [read 2026-11-26]
   release.yml's `test` job runs `lint typecheck-bench concurrency daemon
   packet-io expose`, `haskell` and `integration` (:258-274), never
@@ -276,15 +278,6 @@
   unpacked with its archive mtimes, or one switched back to an older tree)
   can leave a Rust pool linking a stale runtime-types build, since the crate
   version does not change within a development cycle.
-- **rustmorloc/build.rs:1-4 describes a bare-rustc pool build.** [read
-  2026-11-26] It says the generated pool build invokes bare `rustc`; pools
-  are cargo projects (Members/Rust.hs makeCargoDocs). The libc comment at
-  data/lang/rust/pool.rs:24-27 describes the same old scheme.
-- **Nothing checks that rustmorloc matches the compiler.** [read
-  2026-11-26] Generated Rust code calls `::rustmorloc::*` throughout, but
-  rustmorloc comes from the persisted runtime source, is not in the build id
-  (build_id.rs SOURCE_CRATES), has no language marker, and `morloc make`'s
-  binding check covers only the C++, Python and R shims.
 - **A language init skips is a warning even in strict mode.** [read
   2026-11-26] SystemConfig.hs's language loop warns and continues when a
   language's tools are not in the conda prefix, so an init asked to build
@@ -296,3 +289,9 @@
   arguments (`R_HOME=/x R RHOME` prints the warning, then the home).
   data/lang/r/init.sh's `R_HOME=$(R RHOME)` then captures two lines and
   links against `-L"<warning>\n<home>/lib"`.
+- **Old copies of the Rust binding are never removed.** [read 2026-11-26]
+  Init writes `$MORLOC_HOME/lang/rust/rustmorloc-<hash>` for its compiler
+  (SHIM-6) and leaves other compilers' copies, since nothing tells whether a
+  build of another compiler still reads one. Each rustmorloc edit in
+  development leaves another copy (about 300 KB) behind.
+

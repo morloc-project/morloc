@@ -42,6 +42,7 @@ module Morloc.CodeGenerator.SystemConfig
   , effectiveInitFlags
   , interpreterIdentity
   , bindingLanguages
+  , installRustBinding
   ) where
 
 import qualified System.Info as SI
@@ -60,6 +61,8 @@ import qualified Data.Text.IO as TIO
 import qualified Data.ByteString as BS
 import Data.Text.Encoding (decodeUtf8', decodeUtf8Lenient, encodeUtf8)
 import Morloc.Abi (abiVersion, headerAbiVersion)
+import Morloc.RustBinding (rustBindingDir, rustBindingFiles)
+import System.Posix.Process (getProcessID)
 
 import Control.Exception (IOException, SomeAsyncException, SomeException, bracket, catch, displayException, fromException, onException, throwIO, try)
 import System.IO.Error (ioeGetErrorString)
@@ -193,7 +196,7 @@ configureAllSteps verbose force slurmFlag sanitizeFlag config = do
   -- does not provide.
   exportArchiveTools
 
-  -- Build libmorloc.so + morloc-nexus (and rustmorloc + the language shims)
+  -- Build libmorloc.so + morloc-nexus (and the language shims)
   -- FROM SOURCE with the active toolchain. This is the single provisioning path:
   -- the runtime that pools link and load MUST be ABI-coherent with the toolchain
   -- that compiles those pools, so a prebuilt binary from a foreign libc/toolchain
@@ -207,8 +210,7 @@ configureAllSteps verbose force slurmFlag sanitizeFlag config = do
   -- (see the MORLOC_BIN_LINK_DIR handling below).
   userHome <- getHomeDirectory
 
-  -- Build the Rust runtime (libmorloc.so + morloc-nexus + the rustmorloc pool
-  -- cache) when it is missing, when the installed one does not hold together
+  -- Build the Rust runtime (libmorloc.so + morloc-nexus) when it is missing, when the installed one does not hold together
   -- or does not match this compiler (see nexusAgrees), or when a full
   -- rebuild is forced. An in-environment on-demand language add re-runs
   -- `morloc init` WITHOUT force to build a newly provisioned language's shim;
@@ -219,7 +221,8 @@ configureAllSteps verbose force slurmFlag sanitizeFlag config = do
   case agrees of
     Left why | not (null why) -> sayWarning ("Rebuilding the runtime: " <> why)
     _ -> return ()
-  if force == ForceOverwrite || either (const True) (const False) agrees || not incremental
+  let rebuildRuntime = force == ForceOverwrite || either (const True) (const False) agrees || not incremental
+  if rebuildRuntime
     then do
       provisionRustRuntime verbose config homeDir
       nexusAgrees homeDir >>= either (ioError . userError) return
@@ -364,6 +367,19 @@ configureAllSteps verbose force slurmFlag sanitizeFlag config = do
           case mStrictPrefix of
             Just _ -> buildShim
             Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") buildShim
+
+  -- SHIM-6: install this compiler's Rust binding (`-f` rewrites it), then
+  -- warm the pool build cache when the runtime under it is new or the cache
+  -- was never warmed for it. Rust is a capability, not a core install step:
+  -- a failed install leaves Rust unavailable with a warning, and `morloc
+  -- make` refuses Rust programs until it is repaired.
+  optionalStep "Rust binding install failed (Rust pools will not be available): " $
+    void (installRustBinding verbose (force == ForceOverwrite) homeDir)
+  warmed <- doesFileExist (rustBindingDir homeDir </> ".warmed")
+  when (rebuildRuntime || not warmed) $
+    optionalStep "Rust build cache not warmed (the first Rust pool build will compile its dependencies): " $ do
+      warmRustBinding verbose config homeDir
+      BS.writeFile (rustBindingDir homeDir </> ".warmed") BS.empty
 
   -- Generate shell completions
   sayInfo verbose "Generating shell completions"
@@ -530,7 +546,13 @@ data BindingState
 
 -- | The canonical names of the languages that have a binding.
 bindingLanguages :: [T.Text]
-bindingLanguages = map DF.lsLang DF.langSetups
+bindingLanguages = map DF.lsLang DF.langSetups ++ ["rust"]
+
+-- | SHIM-6: whether this compiler's Rust binding is installed in the home.
+rustBindingState :: FilePath -> IO BindingState
+rustBindingState homeDir = do
+  done <- doesFileExist (rustBindingDir homeDir </> ".complete")
+  return (if done then BindingOk else BindingAbsent)
 
 -- | The interpreter a language's binding is built against and loaded by, if
 -- it has one.
@@ -681,10 +703,12 @@ installedRuntimeMismatches sanitize langNames homeDir = do
     Just _ -> fmap concat . forM [ls | ls <- DF.langSetups, DF.lsLang ls `elem` langNames] $ \ls -> do
       st <- bindingState homeDir sanitize mBuildId ls Nothing
       return [Mismatch True (describeBinding ls st <> " (in " <> homeDir <> ")") | st /= BindingOk]
+  rust <- if "rust" `elem` langNames then rustBindingState homeDir else return BindingOk
   return $
     [Mismatch True (homeDir </> "include" </> "morloc.h" <> " is not the header this compiler was built with") | not headerOk]
       ++ [Mismatch True ("no runtime build is recorded at " <> buildIdFile homeDir) | isNothing mBuildId]
       ++ langs
+      ++ [Mismatch True ("the Rust binding (rustmorloc) is not installed at " <> rustBindingDir homeDir) | rust /= BindingOk]
 
 -- | One way an installed home does not suit this compiler, and whether an
 -- init repairs it (or the interpreters or environment must be fixed first).
@@ -721,6 +745,7 @@ checkBindingsUnguarded config langNames = do
   buildConfig <- Config.loadBuildConfig config
   let sanitize = buildConfigSanitize buildConfig == Just True
       chosen = [ls | ls <- DF.langSetups, null langNames || DF.lsLang ls `elem` langNames]
+      wantRust = null langNames || "rust" `elem` langNames
   mBuildId <- installedBuildId homeDir
   headerOk <- installedHeaderOk homeDir
   runtime <-
@@ -741,7 +766,8 @@ checkBindingsUnguarded config langNames = do
     probe <- resolveManagedIdentity ls
     st <- bindingState homeDir sanitize mBuildId ls (Just probe)
     return (DF.lsLang ls, st)
-  return (bindingsReportJson runtime states)
+  rust <- if wantRust then (\st -> [("rust", st)]) <$> rustBindingState homeDir else return []
+  return (bindingsReportJson runtime (states ++ rust))
 
 bindingsReportJson :: Either String () -> [(T.Text, BindingState)] -> T.Text
 bindingsReportJson runtime states =
@@ -763,7 +789,7 @@ bindingsReportJson runtime states =
 
 -- | Build and install libmorloc, morloc-nexus and morloc.h from the runtime
 -- source with the active toolchain (through the runtime's own install.sh),
--- then persist the source and warm the rustmorloc pool cache.
+-- then persist the source.
 -- 'configureAllSteps' calls this when the runtime is missing or does not hold
 -- together ('nexusAgrees'), or a rebuild is forced; an on-demand language add
 -- over an intact runtime skips it.
@@ -839,28 +865,6 @@ provisionRustRuntime verbose config homeDir = do
       removePathIfExists previous
     else removePathIfExists snapshot
 
-  -- Warm the shared pool build cache. A Rust pool is a Cargo project
-  -- (Members/Rust.hs) that path-depends on rustmorloc in the persisted source,
-  -- compiled per pool by cargo with the local rustc; pre-building rustmorloc
-  -- into the shared pool target-dir spares the first `morloc make` that
-  -- compile. Warming is a Rust capability, not a core install step: a failure
-  -- leaves Rust unavailable with a warning rather than aborting init, and the
-  -- per-pool build at `morloc make` still enforces cargo via makeTheMaker.
-  optionalStep "Rust configuration failed (Rust pools will not be available): " $ do
-    let poolTargetDir = Config.rustBuildDir config
-    sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-    -- The warm-up builds with the pool profile so that pool builds reuse
-    -- these artifacts: its rustc flags (PANIC-9) and, on macOS, its packed
-    -- debug information (PANIC-12).
-    run verbose "env" $
-      [ "MORLOC_HOME=" <> homeDir, "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
-      , "build", "--release"
-      , "--manifest-path", persistedRustDir </> "Cargo.toml"
-      , "-p", "rustmorloc"
-      , "--target-dir", poolTargetDir
-      , "--config", "profile.release.rustflags=" <> show rustPoolRustflags
-      ]
-      ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
   where
     installFromSnapshot snapshot = do
       script <- runtimeInstallScript snapshot >>= either (ioError . userError) return
@@ -872,6 +876,57 @@ provisionRustRuntime verbose config homeDir = do
       run verbose "env" (["MORLOC_INIT_VERBOSE=1" | verbose] ++ ["bash", script, homeDir, Config.rustBuildDir config])
         `catch` \(e :: IOError) -> ioError . userError $
           "building the runtime from " <> snapshot <> " failed (see the output above): " <> ioeGetErrorString e
+
+-- | SHIM-6: write this compiler's rustmorloc into the home, beside the
+-- other bindings, in a directory named for its contents; a complete one is
+-- left as it is, and other compilers' copies are not touched. True when it
+-- was written now.
+installRustBinding :: Bool -> Bool -> FilePath -> IO Bool
+installRustBinding verbose rewrite homeDir = do
+  let dir = rustBindingDir homeDir
+      parent = takeDirectory dir
+      stamp = dir </> ".complete"
+  done <- (&& not rewrite) <$> doesFileExist stamp
+  unless done $ do
+    sayInfo verbose ("Installing the Rust binding (rustmorloc) at " <> dir)
+    pid <- getProcessID
+    let staging = parent </> ("." <> takeFileName dir <> ".staging." <> show pid)
+    createDirectoryIfMissing True parent
+    removePathIfExists staging
+    forM_ rustBindingFiles $ \(name, bytes) -> do
+      createDirectoryIfMissing True (takeDirectory (staging </> name))
+      BS.writeFile (staging </> name) bytes
+    BS.writeFile (staging </> ".complete") BS.empty
+    removePathIfExists dir
+    renameDirectory staging dir
+  return (not done)
+
+-- | Build the installed rustmorloc into the shared pool target dir with the
+-- default pool release profile, so that a first Rust pool build finds its
+-- dependencies (Arrow and the rest) built and compiles only rustmorloc and
+-- itself.
+warmRustBinding :: Bool -> Config -> FilePath -> IO ()
+warmRustBinding verbose config homeDir = do
+  sayInfo verbose "Warming the Rust pool build cache (rustmorloc's dependencies)"
+  run verbose "env" $
+    [ "MORLOC_HOME=" <> homeDir, "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
+    , "build", "--release", "--locked"
+    , "--manifest-path", rustBindingDir homeDir </> "Cargo.toml"
+    , "--target-dir", Config.rustBuildDir config
+    ]
+      ++ concatMap (\c -> ["--config", c]) (rustPoolProfileConfig "2" "\"thin\"")
+
+-- | The pool release profile (Members/Rust.hs makeCargoDocs) as cargo
+-- @--config@ settings, for an opt-level and lto given as TOML literals.
+rustPoolProfileConfig :: String -> String -> [String]
+rustPoolProfileConfig optLevel lto =
+  [ "profile.release.opt-level=" <> optLevel
+  , "profile.release.lto=" <> lto
+  , "profile.release.panic=\"unwind\""
+  , "profile.release.debug=\"line-tables-only\""
+  , "profile.release.rustflags=" <> show rustPoolRustflags
+  ]
+    ++ ["profile.release.split-debuginfo=\"packed\"" | SI.os == "darwin"]
 
 -- | PANIC-9: the rustc flags a Rust pool crate and its dependencies build
 -- with. The panic hook tells a user panic from a runtime one by the debug

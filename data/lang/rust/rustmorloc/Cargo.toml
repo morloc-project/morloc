@@ -3,14 +3,16 @@ name = "rustmorloc"
 version = "0.95.0"
 edition = "2021"
 description = "Direct voidstar <-> native-Rust marshaller for the morloc Rust pool member"
-# Version locked with morloc-runtime / morloc-runtime-types for ABI compatibility.
 
 [lib]
 crate-type = ["rlib"]
 
 [dependencies]
-libc = { workspace = true }
-morloc-runtime-types = { path = "../morloc-runtime-types" }
+libc = "0.2"
+# The same relative path in the source tree (data/lang/rust/rustmorloc) and
+# where init installs it ($MORLOC_HOME/lang/rust/rustmorloc-<hash>) reaches the
+# runtime source (data/rust, $MORLOC_HOME/rust).
+morloc-runtime-types = { path = "../../../rust/morloc-runtime-types" }
 # Tables cross as Arrow record batches through the C Data Interface.
 arrow-array = { version = "58", features = ["ffi"] }
 arrow-schema = "58"

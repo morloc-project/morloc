@@ -206,6 +206,9 @@ fn schema_kind_matches_name_every_kind() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
     let mut files = Vec::new();
     rust_sources(&workspace, &mut files);
+    let binding = workspace.join("../lang/rust/rustmorloc/src");
+    assert!(binding.is_dir(), "the Rust binding's sources are not at {}", binding.display());
+    rust_sources(&binding, &mut files);
     files.sort();
     let mut all = Vec::new();
     for f in &files {
