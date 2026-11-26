@@ -35,4 +35,4 @@ envspecVersion = 3
 -- | @morloc lang-support@ @schema_version@ (semver "MAJOR.MINOR"). A new language
 -- or field is a MINOR bump; a breaking change is a MAJOR bump.
 langSupportSchemaVersion :: MT.Text
-langSupportSchemaVersion = MT.pack "1.0"
+langSupportSchemaVersion = MT.pack "1.1"

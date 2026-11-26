@@ -22,6 +22,8 @@ module Morloc.DataFiles
   , poolHostTemplate
   , poolTemplateGeneric
   , langSetups
+  , pythonSetup
+  , rSetup
   , langRegistryFiles
   , languagesYaml
   , requirementsCore

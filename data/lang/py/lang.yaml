@@ -41,7 +41,12 @@ preamble:
   - 'sys.path = [os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}"), os.path.expanduser("{{state}}/modules/python")] + sys.path'
   - "import importlib"
   - "import builtins as __morloc_builtins"
-  - "import pymorloc as morloc"
+  # SHIM-5: the binding is named for the interpreter it was built for, so
+  # another interpreter cannot import it; say what repairs that.
+  - "try:"
+  - "    import pymorloc as morloc"
+  - "except ImportError as _mlc_e:"
+  - '    raise ImportError("the morloc python binding (pymorloc) does not load in this python (" + sys.version.split()[0] + ", " + sys.executable + "): " + str(_mlc_e) + "; run `morloc init -f` (in a managed environment, `mim update --reinit`)") from _mlc_e'
   - '_mlc_source_roots = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")), os.path.expanduser("."), os.path.expanduser("{{lib}}")]'
   - 'sys.path = sys.path + _mlc_source_roots[:2]'
 

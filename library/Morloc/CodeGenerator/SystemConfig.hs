@@ -34,6 +34,14 @@ module Morloc.CodeGenerator.SystemConfig
   , nexusAgrees
   , langMarkerText
   , installedRuntimeMismatches
+  , Mismatch (..)
+  , BindingState (..)
+  , bindingState
+  , bindingsReportJson
+  , checkBindings
+  , effectiveInitFlags
+  , interpreterIdentity
+  , bindingLanguages
   ) where
 
 import qualified System.Info as SI
@@ -50,20 +58,24 @@ import qualified Data.Text as T
 import Data.Char (isSpace, toUpper)
 import qualified Data.Text.IO as TIO
 import qualified Data.ByteString as BS
-import Data.Text.Encoding (decodeUtf8', encodeUtf8)
+import Data.Text.Encoding (decodeUtf8', decodeUtf8Lenient, encodeUtf8)
 import Morloc.Abi (abiVersion, headerAbiVersion)
 
-import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
+import Control.Exception (IOException, SomeAsyncException, SomeException, bracket, catch, displayException, fromException, onException, throwIO, try)
 import System.IO.Error (ioeGetErrorString)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameDirectory, renameFile)
 import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
-import System.IO (hClose, hIsTerminalDevice, hPutStrLn, stderr)
+import System.IO (IOMode (ReadMode), hClose, hIsTerminalDevice, hPutStrLn, stderr, withFile)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
-import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readCreateProcessWithExitCode, readProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readCreateProcessWithExitCode, readProcessWithExitCode, waitForProcess, withCreateProcess)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Text.Read (readMaybe)
+import System.Timeout (timeout)
 import Morloc.Data.PoolHash (hashText)
+import Morloc.Data.Json (jsonArr, jsonBool, jsonInt, jsonObj, jsonStr)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -101,8 +113,16 @@ withInitLock verbose homeDir act = do
       hLock h ExclusiveLock
     act
 
+-- | The SLURM and sanitize settings an init builds with: an incremental init
+-- (the on-demand language add) keeps what the home records and can only turn
+-- a setting on; a full init takes its flags as given.
+effectiveInitFlags :: Bool -> (Bool, Bool) -> (Maybe Bool, Maybe Bool) -> (Bool, Bool)
+effectiveInitFlags incremental (slurmFlag, sanitizeFlag) (slurmStored, sanitizeStored)
+  | incremental = (slurmFlag || slurmStored == Just True, sanitizeFlag || sanitizeStored == Just True)
+  | otherwise = (slurmFlag, sanitizeFlag)
+
 configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Bool -> Config -> IO ()
-configureAllSteps verbose force slurmSupport sanitize config = do
+configureAllSteps verbose force slurmFlag sanitizeFlag config = do
   let homeDir = configHome config
       srcLibrary = configLibrary config
       includeDir = homeDir </> "include"
@@ -120,6 +140,10 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- unset) rebuilds everything, so it can never silently keep an ABI-stale runtime
   -- after a compiler upgrade.
   incremental <- envFlag "MORLOC_INIT_INCREMENTAL"
+  existingBuildConfig <- Config.loadBuildConfig config
+  let (slurmSupport, sanitize) =
+        effectiveInitFlags incremental (slurmFlag, sanitizeFlag)
+          (buildConfigSlurmSupport existingBuildConfig, buildConfigSanitize existingBuildConfig)
 
   -- Admission control FIRST, before any destructive step: a failed coherence
   -- check must abort before the runtime build and the force-clean below,
@@ -148,7 +172,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   sayInfo verbose "Writing build config file"
   -- Read-modify-write: preserve any existing fields (e.g. `lang-params` set via
   -- `morloc config`) and only override the two flags `morloc init` owns.
-  existingBuildConfig <- Config.loadBuildConfig config
   Config.writeBuildConfig
     config
     existingBuildConfig
@@ -285,14 +308,12 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- the error, rather than the best-effort warn that silently leaves a half-
   -- configured env whose failure only surfaces later as a runtime import error.
   --
-  -- A per-language marker records that a shim was built successfully. In
-  -- incremental mode (the on-demand agent path), an already-built language is
-  -- skipped: this makes an on-demand init (run to add one newly provisioned
-  -- language) build ONLY that language's shim and leave every other language's
-  -- working shim untouched -- crucial because rebuilding a shim against a moved
-  -- interpreter would break its ABI. A bare init (non-incremental) rebuilds every
-  -- available language. The markers live under opt/, which the force-clean above
-  -- wipes, so `-f` also rebuilds every available language.
+  -- SHIM-1: a per-language marker records what a shim was built from and
+  -- against. In incremental mode (the on-demand agent path) a language whose
+  -- binding is current is skipped and every other one is rebuilt. A bare init
+  -- (non-incremental) rebuilds every available language. The markers live
+  -- under opt/, which the force-clean above wipes, so `-f` also rebuilds every
+  -- available language.
   let langMarkerDir = optDir </> "lang-configured"
   mBuildId <- installedBuildId homeDir
   createDirectoryIfMissing True langMarkerDir
@@ -300,13 +321,23 @@ configureAllSteps verbose force slurmSupport sanitize config = do
     let tools = DF.lsRequiredTools ls
         marker = langMarkerDir </> DF.lsName ls
     unavailable <- filterM (fmap not . toolAvailableInEnv mStrictPrefix) tools
-    alreadyBuilt <- maybe (return False) (\bid -> markerMatches marker (langMarkerText bid sanitize ls)) mBuildId
+    identity <- if null unavailable then resolveManagedIdentity ls else return (Left BindingAbsent)
+    alreadyBuilt <- (== BindingOk) <$> bindingState homeDir sanitize mBuildId ls (Just identity)
     if not (null unavailable)
       then
         let reason = case mStrictPrefix of
               Just _ -> "not provided by the conda environment"
               Nothing -> "missing"
         in sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> reason <> ": " <> unwords unavailable <> ")"
+      else if either (const True) (const False) identity
+        then
+          let why = case identity of
+                Left (BindingUnavailable w) -> w
+                Left (BindingOutsidePrefix w) -> w
+                _ -> "its interpreter cannot be used"
+          in case mStrictPrefix of
+               Just _ -> ioError (userError ("cannot set up " <> DF.lsName ls <> ": " <> why))
+               Nothing -> sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> why <> ")"
       else if alreadyBuilt && force /= ForceOverwrite && incremental
         then sayInfo verbose $ DF.lsName ls <> " extension already built; skipping"
         else do
@@ -327,7 +358,9 @@ configureAllSteps verbose force slurmSupport sanitize config = do
                 removeFileSafe initPath
                 forM_ (DF.lsFiles ls) $ \ef ->
                   removeFileSafe (buildDir </> DF.embededFileName ef)
-                forM_ mBuildId $ \bid -> writeMarker marker (langMarkerText bid sanitize ls)
+                case (mBuildId, identity) of
+                  (Just bid, Right ident) -> writeMarker marker (langMarkerText bid ident sanitize ls)
+                  _ -> return ()
           case mStrictPrefix of
             Just _ -> buildShim
             Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") buildShim
@@ -429,16 +462,50 @@ installedBuildId homeDir = do
 sanitizeFlags :: Bool -> String
 sanitizeFlags sanitize = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
 
--- | What a language's configured marker holds: a hash of what its binding
--- was built from and against (the header, its init script and files, the
--- runtime build id it records, and the sanitize setting), so a binding built
--- by another compiler, against another runtime or with other flags is told
--- apart from the one this compiler would build.
-langMarkerText :: T.Text -> Bool -> DF.LangSetup -> String
-langMarkerText buildId sanitize ls =
-  T.unpack . hashText . T.concat $
-    [buildId, "\0", T.pack (sanitizeFlags sanitize), "\0", DF.libmorlocHeader]
-      ++ concat [[T.pack (DF.embededFileName ef), "\0", DF.embededFileText ef, "\0"] | ef <- DF.lsInitScript ls : DF.lsFiles ls]
+-- | SHIM-1: what a binding was built from and against, as its marker
+-- records it: the runtime build id, the interpreter's identity, the sanitize
+-- setting, and a hash of the binding's sources (the header, its init script
+-- and files).
+data BindingRecord = BindingRecord
+  { brBuildId :: T.Text
+  , brIdentity :: T.Text
+  , brSanitize :: Bool
+  , brSources :: T.Text
+  }
+  deriving (Eq, Show)
+
+bindingSources :: DF.LangSetup -> T.Text
+bindingSources ls =
+  hashText . T.concat $
+    DF.libmorlocHeader
+      : concat [[T.pack (DF.embededFileName ef), "\0", DF.embededFileText ef, "\0"] | ef <- DF.lsInitScript ls : DF.lsFiles ls]
+
+renderRecord :: BindingRecord -> String
+renderRecord r =
+  T.unpack . T.unlines $
+    [ "morloc-binding 1"
+    , "build-id " <> brBuildId r
+    , "identity " <> brIdentity r
+    , "sanitize " <> (if brSanitize r then "1" else "0")
+    , "sources " <> brSources r
+    ]
+
+parseRecord :: BS.ByteString -> Maybe BindingRecord
+parseRecord bytes = do
+  text <- either (const Nothing) Just (decodeUtf8' bytes)
+  let fields = [(k, T.drop 1 v) | l <- T.lines text, let (k, v) = T.breakOn " " l]
+  version <- lookup "morloc-binding" fields
+  if version /= "1" then Nothing else do
+    sanitize <- lookup "sanitize" fields
+    BindingRecord
+      <$> lookup "build-id" fields
+      <*> lookup "identity" fields
+      <*> pure (sanitize == "1")
+      <*> lookup "sources" fields
+
+-- | The marker text for a binding built now with the given inputs.
+langMarkerText :: T.Text -> T.Text -> Bool -> DF.LangSetup -> String
+langMarkerText buildId identity sanitize ls = renderRecord (BindingRecord buildId identity sanitize (bindingSources ls))
 
 -- | Write a marker beside its destination and rename it into place.
 writeMarker :: FilePath -> String -> IO ()
@@ -447,38 +514,252 @@ writeMarker marker text = do
   writeFile tmp text
   renameFile tmp marker
 
-markerMatches :: FilePath -> String -> IO Bool
-markerMatches marker expected = do
-  exists <- doesFileExist marker
-  if exists
-    then (== encodeUtf8 (T.pack expected)) <$> BS.readFile marker
-    else return False
+-- | Whether a language's installed binding is the one this compiler would
+-- build now. Ok, absent (never built), stale (built by another compiler,
+-- against another runtime or interpreter, with other settings, or its
+-- artifact is gone), unavailable (its interpreter cannot be found or run, so
+-- building it is pointless), or outside-prefix (in a managed environment, the
+-- interpreter on PATH is not the environment's).
+data BindingState
+  = BindingOk
+  | BindingAbsent
+  | BindingStale String
+  | BindingUnavailable String
+  | BindingOutsidePrefix String
+  deriving (Eq, Show)
+
+-- | The canonical names of the languages that have a binding.
+bindingLanguages :: [T.Text]
+bindingLanguages = map DF.lsLang DF.langSetups
+
+-- | The interpreter a language's binding is built against and loaded by, if
+-- it has one.
+langInterpreter :: DF.LangSetup -> Maybe String
+langInterpreter ls = case T.unpack (DF.lsLang ls) of
+  "py" -> Just "python3"
+  "r" -> Just "R"
+  _ -> Nothing
+
+-- | The file a configured binding must have, relative to the home, given the
+-- identity it was built for (Python's module is named by its extension
+-- suffix, the identity's first word).
+langArtifact :: DF.LangSetup -> T.Text -> Maybe FilePath
+langArtifact ls identity = case T.unpack (DF.lsLang ls) of
+  "py" -> Just ("opt" </> ("pymorloc" <> T.unpack (T.takeWhile (not . isSpace) identity)))
+  "r" -> Just ("lib" </> "librmorloc.so")
+  "cpp" -> Just ("lib" </> "libcppmorloc.a")
+  _ -> Nothing
+
+-- | The identity of an interpreter as a binding depends on it: for Python its
+-- extension suffix (version and ABI flags, which also name the built module)
+-- and numpy's major version (the binding is built against numpy's C API);
+-- for R its major and minor version.
+interpreterIdentity :: DF.LangSetup -> FilePath -> IO (Either String T.Text)
+interpreterIdentity ls exe = case T.unpack (DF.lsLang ls) of
+  "py" ->
+    fmap firstLine <$> probe ["-I", "-c", "import sysconfig, numpy; print(sysconfig.get_config_var('EXT_SUFFIX'), 'numpy', numpy.__version__.split('.')[0])"]
+  "r" -> (>>= rMinor) <$> probe ["--version"]
+  other -> return (Left ("no interpreter identity is defined for " <> other))
+  where
+    firstLine out = T.strip (T.takeWhile (/= '\n') out)
+    -- R's front end can print a warning about R_HOME before the version.
+    rMinor out = case [ws | l <- T.lines out, ws@("R" : "version" : _) <- [T.words l]] of
+      ((_ : _ : v : _) : _) | (major : minor : _) <- T.splitOn "." v -> Right ("R " <> major <> "." <> minor)
+      _ -> Left (exe <> " --version printed no R version line")
+    probe args = do
+      result <- try (timeout 30000000 (runBytes exe args))
+                  :: IO (Either IOException (Maybe (ExitCode, BS.ByteString, BS.ByteString)))
+      return $ case result of
+        Left e -> Left (exe <> " cannot run: " <> displayException e)
+        Right Nothing -> Left (exe <> " " <> unwords args <> " did not finish within 30 seconds")
+        Right (Just (ExitSuccess, out, _))
+          | T.all isSpace (decodeUtf8Lenient out) -> Left (exe <> " " <> unwords args <> " printed nothing")
+          | otherwise -> Right (decodeUtf8Lenient out)
+        Right (Just (ExitFailure code, _, err)) ->
+          Left (exe <> " " <> unwords args <> " failed (exit " <> show code <> "): " <> trimEnd (T.unpack (decodeUtf8Lenient err)))
+
+-- | Run a program with no input and R_HOME unset, and read its output as
+-- bytes, whatever the locale.
+runBytes :: FilePath -> [String] -> IO (ExitCode, BS.ByteString, BS.ByteString)
+runBytes exe args = do
+  env0 <- getEnvironment
+  withFile "/dev/null" ReadMode $ \devNull ->
+    withCreateProcess
+      (proc exe args)
+        { std_in = UseHandle devNull
+        , std_out = CreatePipe
+        , std_err = CreatePipe
+        , env = Just [kv | kv@(k, _) <- env0, k /= "R_HOME"]
+        }
+      $ \_ mOut mErr ph ->
+        case (mOut, mErr) of
+          (Just hOut, Just hErr) -> do
+            errVar <- newEmptyMVar
+            _ <- forkIO ((try (BS.hGetContents hErr) :: IO (Either IOException BS.ByteString)) >>= putMVar errVar)
+            out <- BS.hGetContents hOut
+            err <- either (const BS.empty) id <$> takeMVar errVar
+            code <- waitForProcess ph
+            return (code, out, err)
+          _ -> ioError (userError ("could not read the output of " <> exe))
+
+-- | Find a language's interpreter on PATH and take its identity, under the
+-- managed environment's prefix rule ('managedPrefix'): an interpreter outside
+-- the prefix is reported rather than used, and a managed environment that
+-- cannot be resolved makes every binding with an interpreter unavailable.
+resolveManagedIdentity :: DF.LangSetup -> IO (Either BindingState T.Text)
+resolveManagedIdentity ls = case langInterpreter ls of
+  Nothing -> return (Right T.empty)
+  Just _ -> do
+    prefix <- managedPrefix
+    case prefix of
+      Left err -> return (Left (BindingUnavailable err))
+      Right mPrefix -> resolveIdentity mPrefix ls
+
+-- | Find a language's interpreter on PATH and take its identity. With a
+-- prefix, an interpreter outside it is reported rather than used.
+resolveIdentity :: Maybe FilePath -> DF.LangSetup -> IO (Either BindingState T.Text)
+resolveIdentity mPrefix ls = case langInterpreter ls of
+  Nothing -> return (Right T.empty)
+  Just tool -> do
+    loc <- resolveToolLocation tool
+    case loc of
+      Nothing -> return (Left (BindingUnavailable (tool <> " is not on PATH")))
+      Just (exe, dirAbs)
+        | Just prefix <- mPrefix, not (pathIsWithin prefix dirAbs) ->
+            return . Left . BindingOutsidePrefix $
+              "the " <> tool <> " on PATH (" <> exe <> ") is not the environment's (" <> prefix </> "bin" <> ")"
+        | otherwise -> either (Left . BindingUnavailable) Right <$> interpreterIdentity ls exe
+
+-- | The state of a language's installed binding. With a probe (init and
+-- @init --check@, SHIM-2) the interpreter found now is compared with the one
+-- the binding was built for; without one (@morloc make@, SHIM-3) only the
+-- recorded facts are checked, and the binding checks its interpreter when it
+-- loads (SHIM-5).
+bindingState :: FilePath -> Bool -> Maybe T.Text -> DF.LangSetup -> Maybe (Either BindingState T.Text) -> IO BindingState
+bindingState homeDir sanitize mBuildId ls probe = do
+  let marker = homeDir </> "opt" </> "lang-configured" </> DF.lsName ls
+  configured <- doesFileExist marker
+  if not configured
+    then return BindingAbsent
+    else do
+      record <- parseRecord <$> BS.readFile marker
+      case (record, mBuildId, probe) of
+        (Nothing, _, _) -> return (BindingStale "its marker was written by another compiler")
+        (_, Nothing, _) -> return (BindingStale ("no runtime build is recorded at " <> buildIdFile homeDir))
+        (_, _, Just (Left st)) -> return st
+        (Just r, Just buildId, _)
+          | brBuildId r /= buildId ->
+              return . BindingStale $
+                "it was built against runtime build " <> T.unpack (brBuildId r)
+                  <> ", and the installed runtime is build " <> T.unpack buildId
+          | brSources r /= bindingSources ls ->
+              return (BindingStale "it was built from another compiler's binding sources")
+          | brSanitize r /= sanitize ->
+              return . BindingStale $
+                "it was built with sanitizing " <> onOff (brSanitize r) <> ", and this home builds with it " <> onOff sanitize
+          | Just (Right identity) <- probe, identity /= brIdentity r ->
+              return . BindingStale $
+                "it was built for " <> T.unpack (brIdentity r) <> ", and the interpreter found now is " <> T.unpack identity
+          | otherwise -> do
+              let artifact = maybe (homeDir </> "unknown binding artifact") (homeDir </>) (langArtifact ls (brIdentity r))
+              present <- doesFileExist artifact
+              return (if present then BindingOk else BindingStale (artifact <> " is missing"))
+  where
+    onOff b = if b then "on" else "off"
 
 -- | How the runtime and bindings installed in a home differ from what this
--- compiler, under the given sanitize setting, emits code for: the header,
--- the runtime's recorded build id, and each of the given languages
--- (canonical names) whose binding is not configured as this compiler would
--- configure it. Empty when they agree.
-installedRuntimeMismatches :: Bool -> [T.Text] -> FilePath -> IO [String]
+-- compiler, under the given sanitize setting, emits code for (SHIM-3): the
+-- header, the runtime's recorded build id, and each of the given languages
+-- (canonical names) whose recorded binding is not current. Reads files
+-- only; runs no interpreter. Empty when they agree.
+installedRuntimeMismatches :: Bool -> [T.Text] -> FilePath -> IO [Mismatch]
 installedRuntimeMismatches sanitize langNames homeDir = do
   mBuildId <- installedBuildId homeDir
-  let header = homeDir </> "include" </> "morloc.h"
-      markerDir = homeDir </> "opt" </> "lang-configured"
-  headerOk <- do
-    exists <- doesFileExist header
-    if exists then (== encodeUtf8 DF.libmorlocHeader) <$> BS.readFile header else return False
+  headerOk <- installedHeaderOk homeDir
   langs <- case mBuildId of
     Nothing -> return []
-    Just buildId -> fmap concat . forM [ls | ls <- DF.langSetups, DF.lsLang ls `elem` langNames] $ \ls -> do
-      ok <- markerMatches (markerDir </> DF.lsName ls) (langMarkerText buildId sanitize ls)
-      return [DF.lsName ls | not ok]
+    Just _ -> fmap concat . forM [ls | ls <- DF.langSetups, DF.lsLang ls `elem` langNames] $ \ls -> do
+      st <- bindingState homeDir sanitize mBuildId ls Nothing
+      return [Mismatch True (describeBinding ls st <> " (in " <> homeDir <> ")") | st /= BindingOk]
   return $
-    [header <> " is not the header this compiler was built with" | not headerOk]
-      ++ ["no runtime build is recorded at " <> buildIdFile homeDir | mBuildId == Nothing]
-      ++ [ "the " <> l <> " binding in " <> homeDir
-             <> " is missing or was not built by this compiler against the installed runtime"
-         | l <- langs
-         ]
+    [Mismatch True (homeDir </> "include" </> "morloc.h" <> " is not the header this compiler was built with") | not headerOk]
+      ++ [Mismatch True ("no runtime build is recorded at " <> buildIdFile homeDir) | isNothing mBuildId]
+      ++ langs
+
+-- | One way an installed home does not suit this compiler, and whether an
+-- init repairs it (or the interpreters or environment must be fixed first).
+data Mismatch = Mismatch {mismatchInitRepairs :: Bool, mismatchText :: String}
+  deriving (Eq, Show)
+
+installedHeaderOk :: FilePath -> IO Bool
+installedHeaderOk homeDir = do
+  let header = homeDir </> "include" </> "morloc.h"
+  exists <- doesFileExist header
+  if exists then (== encodeUtf8 DF.libmorlocHeader) <$> BS.readFile header else return False
+
+describeBinding :: DF.LangSetup -> BindingState -> String
+describeBinding ls st = "the " <> DF.lsName ls <> " binding " <> case st of
+  BindingOk -> "is current"
+  BindingAbsent -> "is not built"
+  BindingStale why -> "is out of date: " <> why
+  BindingUnavailable why -> "cannot be built: " <> why <> maybe "" (const " (put the interpreter on PATH, or fix the environment)") (langInterpreter ls)
+  BindingOutsidePrefix why -> "cannot be checked: " <> why <> " (run in the environment, with its bin first on PATH)"
+
+-- | What @morloc init --check@ prints: whether the runtime holds together
+-- and matches this compiler, and each language's binding state. Exits 0;
+-- reads only, so it runs in a read-only home.
+checkBindings :: Config -> [T.Text] -> IO T.Text
+checkBindings config langNames =
+  checkBindingsUnguarded config langNames `catch` \(e :: SomeException) ->
+    case fromException e :: Maybe SomeAsyncException of
+      Just a -> throwIO a
+      Nothing -> return (bindingsReportJson (Left ("the check could not run: " <> displayException e)) [])
+
+checkBindingsUnguarded :: Config -> [T.Text] -> IO T.Text
+checkBindingsUnguarded config langNames = do
+  let homeDir = configHome config
+  buildConfig <- Config.loadBuildConfig config
+  let sanitize = buildConfigSanitize buildConfig == Just True
+      chosen = [ls | ls <- DF.langSetups, null langNames || DF.lsLang ls `elem` langNames]
+  mBuildId <- installedBuildId homeDir
+  headerOk <- installedHeaderOk homeDir
+  runtime <-
+    if not headerOk
+      then return (Left (homeDir </> "include" </> "morloc.h" <> " is not the header this compiler was built with"))
+      else do
+        present <- runtimeInstalled homeDir
+        if present
+          then nexusAgrees homeDir
+          else do
+            missing <- filterM (fmap not . doesFileExist)
+              [ homeDir </> "lib" </> P.sharedLibName P.hostPlatform "morloc"
+              , homeDir </> "bin" </> "morloc-nexus"
+              , buildIdFile homeDir
+              ]
+            return (Left ("the runtime is not installed: missing " <> DL.intercalate ", " missing))
+  states <- forM chosen $ \ls -> do
+    probe <- resolveManagedIdentity ls
+    st <- bindingState homeDir sanitize mBuildId ls (Just probe)
+    return (DF.lsLang ls, st)
+  return (bindingsReportJson runtime states)
+
+bindingsReportJson :: Either String () -> [(T.Text, BindingState)] -> T.Text
+bindingsReportJson runtime states =
+  jsonObj
+    [ ("bindings_check", jsonInt 1)
+    , ("runtime", jsonObj (("ok", jsonBool (either (const False) (const True) runtime)) : [("reason", jsonStr (T.pack r)) | Left r <- [runtime]]))
+    , ("languages", jsonArr [jsonObj [("lang", jsonStr l), ("state", jsonStr (bindingStateName st)), ("reason", jsonStr (T.pack (bindingStateReason st)))] | (l, st) <- states])
+    ]
+  where
+    bindingStateName BindingOk = "ok"
+    bindingStateName BindingAbsent = "absent"
+    bindingStateName (BindingStale _) = "stale"
+    bindingStateName (BindingUnavailable _) = "unavailable"
+    bindingStateName (BindingOutsidePrefix _) = "outside-prefix"
+    bindingStateReason (BindingStale r) = r
+    bindingStateReason (BindingUnavailable r) = r
+    bindingStateReason (BindingOutsidePrefix r) = r
+    bindingStateReason _ = ""
 
 -- | Build and install libmorloc, morloc-nexus and morloc.h from the runtime
 -- source with the active toolchain (through the runtime's own install.sh),

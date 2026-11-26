@@ -34,7 +34,7 @@ import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Build.CargoLock as CL
-import Morloc.CodeGenerator.SystemConfig (installedRuntimeMismatches, strictToolchainError)
+import Morloc.CodeGenerator.SystemConfig (Mismatch (..), installedRuntimeMismatches, strictToolchainError)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Expr (BuildConfig (..))
@@ -443,14 +443,18 @@ requireInstalledRuntime langs = do
   let sanitize = fromMaybe False (buildConfigSanitize buildConfig)
   problems <- liftIO $ installedRuntimeMismatches sanitize (map ML.langName langs) (MC.configHome config)
   mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
+  mImmutable <- liftIO $ lookupEnv "MORLOC_IMMUTABLE"
   let remedy :: String
-      remedy = case mEnv of
-          Just e | not (null e) -> "run `morloc init -f`, or update the environment with `mim update --reinit`"
+      remedy = case (mImmutable, mEnv) of
+          (Just i, _) | not (null i) && i /= "0" -> "rebuild this read-only environment with `mim update --reinit`"
+          (_, Just e) | not (null e) -> "run `morloc init -f`, or update the environment with `mim update --reinit`"
           _ -> "run `morloc init -f`"
+      (byInit, byEnv) = partition mismatchInitRepairs problems
   unless (null problems) $
     MM.throwFailed . vsep $
-      ("this morloc compiler does not match the runtime installed for it; " <> pretty remedy <> ":")
-        : map (("  " <>) . pretty) problems
+      ["the morloc runtime or language bindings installed for this compiler cannot build this program:"]
+        ++ map (("  " <>) . pretty . mismatchText) (byEnv ++ byInit)
+        ++ ["To repair the installed runtime and bindings, " <> pretty remedy <> "." | not (null byInit)]
 
 -- | In strict conda mode, fail if a build of this kind would run a program
 -- from outside the environment.

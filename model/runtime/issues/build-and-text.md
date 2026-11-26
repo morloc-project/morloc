@@ -268,3 +268,31 @@
   header and load B's library, and nothing catches it. Fix options: a runtime target dir per home (one runtime
   compile per home, no cross-home reuse; needs a ruling), or a lock on the
   shared target held across build and copy (model first).
+- **The persisted runtime source keeps its original mtimes.** [read
+  2026-11-26] Init copies the source with a tar pipe (SystemConfig.hs
+  copyTree), which preserves mtimes, and cargo decides a path dependency's
+  freshness by mtime. A persisted morloc-runtime-types whose files are older
+  than the artifacts in the shared rust-build cache (for example a source
+  unpacked with its archive mtimes, or one switched back to an older tree)
+  can leave a Rust pool linking a stale runtime-types build, since the crate
+  version does not change within a development cycle.
+- **rustmorloc/build.rs:1-4 describes a bare-rustc pool build.** [read
+  2026-11-26] It says the generated pool build invokes bare `rustc`; pools
+  are cargo projects (Members/Rust.hs makeCargoDocs). The libc comment at
+  data/lang/rust/pool.rs:24-27 describes the same old scheme.
+- **Nothing checks that rustmorloc matches the compiler.** [read
+  2026-11-26] Generated Rust code calls `::rustmorloc::*` throughout, but
+  rustmorloc comes from the persisted runtime source, is not in the build id
+  (build_id.rs SOURCE_CRATES), has no language marker, and `morloc make`'s
+  binding check covers only the C++, Python and R shims.
+- **A language init skips is a warning even in strict mode.** [read
+  2026-11-26] SystemConfig.hs's language loop warns and continues when a
+  language's tools are not in the conda prefix, so an init asked to build
+  that language exits 0 without it; a caller that re-runs init until the
+  binding exists loops.
+- **R's init breaks when R_HOME is set.** [reproduced 2026-11-26] R's
+  front-end script prints `WARNING: ignoring environment value of R_HOME`
+  to stdout when `$R_HOME` is set to another home, before handling its
+  arguments (`R_HOME=/x R RHOME` prints the warning, then the home).
+  data/lang/r/init.sh's `R_HOME=$(R RHOME)` then captures two lines and
+  links against `-L"<warning>\n<home>/lib"`.

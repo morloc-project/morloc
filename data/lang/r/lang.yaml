@@ -34,6 +34,8 @@ preamble:
   # printing, coercion) needs the bit64 S3 methods on PATH.
   - 'suppressPackageStartupMessages(library(bit64))'
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
+  # SHIM-5: R does not keep a binary interface across minor versions.
+  - 'local({ built <- sub("[.][^.]*$", "", .Call("morloc_built_r_version")); running <- paste(R.version$major, sub("[.].*$", "", R.version$minor), sep = "."); if (!identical(built, running)) stop("the morloc R binding was built for R ", built, " and this is R ", running, "; run `morloc init -f` (in a managed environment, `mim update --reinit`)", call. = FALSE) })'
   - '.morloc.pooldir <- dirname(get(".morloc.poolfile", envir = globalenv()))'
   - '.morloc.libdir <- "{{state}}/modules/R"'
   # Put each library's R directory (modules/R/<library>, PKG-3) on .libPaths()

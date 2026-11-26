@@ -29,8 +29,14 @@ import Morloc.CodeGenerator.SystemConfig
   , PoolToolchain (..)
   , ToolchainHost (..)
   , compilerIncoherence
+  , BindingState (..)
+  , bindingState
+  , bindingsReportJson
+  , effectiveInitFlags
   , findRustDir
   , installedRuntimeMismatches
+  , Mismatch (..)
+  , interpreterIdentity
   , langMarkerText
   , nexusAgrees
   , pathIsWithin
@@ -58,7 +64,9 @@ import Data.List (isInfixOf)
 import System.FilePath (takeDirectory, (</>))
 import qualified System.Info as SI
 import System.Posix.Process (getProcessID)
-import System.Process (callProcess)
+import System.Process (callProcess, readProcessWithExitCode)
+import System.Exit (ExitCode (..))
+import qualified Data.Text.IO as TIO
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -70,7 +78,119 @@ systemConfigTests =
     , compilerIncoherenceTests
     , toolsOutsidePrefixTests
     , runtimeInstallTests
+    , bindingTests
     ]
+
+bindingTests :: TestTree
+bindingTests =
+  testGroup
+    "language bindings"
+    [ testCase "spec-shim-4-1" $
+        effectiveInitFlags True (False, False) (Just True, Just True) @?= (True, True)
+    , testCase "a full init takes slurm and sanitize from its flags" $
+        effectiveInitFlags False (False, False) (Just True, Just True) @?= (False, False)
+    , testCase "an incremental init can still turn a setting on" $
+        effectiveInitFlags True (True, False) (Nothing, Nothing) @?= (True, False)
+    , testCase "python's identity is its extension suffix and numpy's major version" $
+        withScript "py" "echo '.cpython-313-x86_64-linux-gnu.so numpy 2'" $ \exe ->
+          interpreterIdentity pySetup exe >>= (@?= Right (T.pack ".cpython-313-x86_64-linux-gnu.so numpy 2"))
+    , testCase "R's identity is its major and minor version, past any R_HOME warning" $
+        withScript "r" "echo 'WARNING: ignoring environment value of R_HOME'; echo 'R version 4.4.1 (2024-06-14) -- \"x\"'" $ \exe ->
+          interpreterIdentity rSetup' exe >>= (@?= Right (T.pack "R 4.4"))
+    , testCase "a binding with no marker is absent even before any runtime is recorded" $
+        withHome "bindfresh" [] $ \home ->
+          bindingState home False Nothing pySetup (Just (Right ident)) >>= (@?= BindingAbsent)
+    , testCase "an interpreter that fails is reported" $
+        withScript "bad" "exit 3" $ \exe -> do
+          r <- interpreterIdentity pySetup exe
+          assertBool (show r) (either (const True) (const False) r)
+    , testCase "spec-shim-1-1" $
+        withHome "bindabsent" [] $ \home ->
+          bindingState home False (Just bid) pySetup (Just (Right ident)) >>= (@?= BindingAbsent)
+    , testCase "spec-shim-1-2" $
+        withHome "bindok" ["opt/pymorloc" <> T.unpack ident] $ \home -> do
+          writeOneMarker home pySetup (langMarkerText bid ident False pySetup)
+          bindingState home False (Just bid) pySetup (Just (Right ident)) >>= (@?= BindingOk)
+    , testCase "spec-shim-1-3" $
+        withHome "bindinterp" ["opt/pymorloc" <> T.unpack ident] $ \home -> do
+          writeOneMarker home pySetup (langMarkerText bid (T.pack ".cpython-312-x86_64-linux-gnu.so") False pySetup)
+          r <- bindingState home False (Just bid) pySetup (Just (Right ident))
+          assertBool (show r) (isStale r)
+    , testCase "make judges a binding by its record alone, without the interpreter" $
+        withHome "bindmake" ["opt/pymorloc.cpython-312-x86_64-linux-gnu.so"] $ \home -> do
+          writeOneMarker home pySetup (langMarkerText bid (T.pack ".cpython-312-x86_64-linux-gnu.so numpy 2") False pySetup)
+          bindingState home False (Just bid) pySetup Nothing >>= (@?= BindingOk)
+    , testCase "a binding built against another runtime build is stale, naming both" $
+        withHome "bindbuild" ["opt/pymorloc" <> T.unpack ident] $ \home -> do
+          writeOneMarker home pySetup (langMarkerText (T.pack "aaaa") ident False pySetup)
+          r <- bindingState home False (Just bid) pySetup Nothing
+          assertBool (show r) (case r of BindingStale w -> "aaaa" `isInfixOf` w && T.unpack bid `isInfixOf` w; _ -> False)
+    , testCase "spec-shim-5-1" $
+        loadCheck "data/lang/r/lang.yaml" "morloc_built_r_version" $ \line -> do
+          let expr built = T.unpack (T.replace (T.pack ".Call(\"morloc_built_r_version\")") (T.pack built) line)
+          (bad, _, err) <- readProcessWithExitCode "Rscript" ["-e", expr "\"1.0.0\""] ""
+          assertBool err (bad /= ExitSuccess && "built for R 1.0" `isInfixOf` err)
+          (good, _, err') <- readProcessWithExitCode "Rscript" ["-e", expr "paste(R.version$major, R.version$minor, sep = \".\")"] ""
+          assertEqual err' ExitSuccess good
+    , testCase "spec-shim-5-2" $ do
+        text <- TIO.readFile "data/lang/py/lang.yaml"
+        let ls' = [unquote l | l <- T.lines text, any (`T.isInfixOf` l) [T.pack "\"try:\"", T.pack "import pymorloc as morloc", T.pack "except ImportError as _mlc_e", T.pack "_mlc_e)"]]
+            script = T.unlines (T.pack "import sys" : map (T.replace (T.pack "import pymorloc as morloc") (T.pack "import pymorloc_absent_for_this_test as morloc")) ls')
+        (code, _, err) <- readProcessWithExitCode "python3" ["-I", "-c", T.unpack script] ""
+        assertBool err (code /= ExitSuccess && "run `morloc init -f`" `isInfixOf` err)
+    , testCase "spec-shim-1-4" $
+        withHome "bindartifact" [] $ \home -> do
+          writeOneMarker home pySetup (langMarkerText bid ident False pySetup)
+          r <- bindingState home False (Just bid) pySetup (Just (Right ident))
+          assertBool (show r) (isStale r)
+    , testCase "an interpreter outside the environment is reported as such, not as stale" $
+        withHome "bindoutside" [] $ \home -> writeOneMarker home pySetup (langMarkerText bid ident False pySetup) >>
+          bindingState home False (Just bid) pySetup (Just (Left (BindingOutsidePrefix "py"))) >>= (@?= BindingOutsidePrefix "py")
+    , testCase "spec-shim-2-1" $ do
+        let j = T.unpack (bindingsReportJson (Left "torn") [(T.pack "py", BindingOk), (T.pack "r", BindingStale "old")])
+        mapM_ (\needle -> assertBool (needle <> " in " <> j) (needle `isInfixOf` j))
+          ["\"bindings_check\":1", "\"ok\":false", "torn", "\"lang\":\"py\"", "\"state\":\"ok\"", "\"state\":\"stale\"", "old"]
+    ]
+  where
+    bid = T.pack "0123456789abcdef"
+    ident = T.pack ".cpython-313-x86_64-linux-gnu.so"
+    pySetup = DF.pythonSetup
+    rSetup' = DF.rSetup
+    unquote l = let t = T.strip l in T.dropEnd 1 (T.drop 3 t)
+    loadCheck file needle act = do
+      text <- TIO.readFile file
+      case [unquote l | l <- T.lines text, T.pack needle `T.isInfixOf` l] of
+        [line] -> act line
+        found -> assertFailure ("expected one " <> needle <> " line in " <> file <> ", found " <> show (length found))
+    isStale (BindingStale _) = True
+    isStale _ = False
+    writeOneMarker home ls text = do
+      let dir = home </> "opt" </> "lang-configured"
+      createDirectoryIfMissing True dir
+      writeFile (dir </> DF.lsName ls) text
+    withHome tag files act = do
+      tmp <- getTemporaryDirectory
+      pid <- getProcessID
+      let root = tmp </> ("morloc-binding-" <> show pid <> "-" <> tag)
+      bracket
+        (do removePathForcibly root
+            mapM_ (\f -> createDirectoryIfMissing True (takeDirectory (root </> f)) >> writeFile (root </> f) "") files
+            createDirectoryIfMissing True root
+            return root)
+        removePathForcibly
+        act
+    withScript tag body act = do
+      tmp <- getTemporaryDirectory
+      pid <- getProcessID
+      let dir = tmp </> ("morloc-interp-" <> show pid <> "-" <> tag)
+          exe = dir </> "interp"
+      bracket
+        (do removePathForcibly dir
+            createDirectoryIfMissing True dir
+            callProcess "sh" ["-c", "printf '%s' \"$2\" > \"$1\" && chmod +x \"$1\"", "sh", exe, "#!/bin/sh\n" <> body <> "\n"]
+            return exe)
+        (const (removePathForcibly dir))
+        act
 
 runtimeInstallTests :: TestTree
 runtimeInstallTests =
@@ -166,52 +286,52 @@ runtimeInstallTests =
           writeEmbeddedHeader home
           writeBuildId home "aaaa"
           writeMarkers home "aaaa" False id
-          installedRuntimeMismatches False allLangs home >>= (@?= [])
+          mismatches False allLangs home >>= (@?= [])
     , testCase "bindings built against another runtime build are reported" $
         withHome "stampbuild" [] $ \home -> do
           writeEmbeddedHeader home
           writeBuildId home "bbbb"
           writeMarkers home "aaaa" False id
-          r <- installedRuntimeMismatches False (map T.pack ["py"]) home
+          r <- mismatches False (map T.pack ["py"]) home
           assertBool (show r) (any ("python" `isInfixOf`) r)
     , testCase "bindings built with other sanitize settings are reported" $
         withHome "stampsan" [] $ \home -> do
           writeEmbeddedHeader home
           writeBuildId home "aaaa"
           writeMarkers home "aaaa" False id
-          r <- installedRuntimeMismatches True (map T.pack ["py"]) home
+          r <- mismatches True (map T.pack ["py"]) home
           assertBool (show r) (any ("python" `isInfixOf`) r)
     , testCase "a language the program uses with no configured binding is reported" $
         withHome "stampabsent" [] $ \home -> do
           writeEmbeddedHeader home
           writeBuildId home "aaaa"
-          r <- installedRuntimeMismatches False (map T.pack ["r"]) home
+          r <- mismatches False (map T.pack ["r"]) home
           assertBool (show r) (any ("R" `isInfixOf`) r)
     , testCase "a home with no recorded runtime build id is reported" $
         withHome "stampnoid" [] $ \home -> do
           writeEmbeddedHeader home
-          r <- installedRuntimeMismatches False [] home
+          r <- mismatches False [] home
           assertBool (show r) (not (null r))
     , testCase "a home whose header differs from this compiler's is reported" $
         withHome "stampheader" [] $ \home -> do
           writeHeader home abiVersion
           writeBuildId home "aaaa"
           writeMarkers home "aaaa" False id
-          r <- installedRuntimeMismatches False allLangs home
+          r <- mismatches False allLangs home
           assertBool (show r) (any ("morloc.h" `isInfixOf`) r)
-    , testCase "a language the program uses, configured by another compiler, is reported by name" $
+    , testCase "spec-shim-3-1" $
         withHome "stamplang" [] $ \home -> do
           writeEmbeddedHeader home
           writeBuildId home "aaaa"
           writeMarkers home "aaaa" False (\(name, text) -> (name, if name == "python" then "other" else text))
-          r <- installedRuntimeMismatches False (map T.pack ["py"]) home
+          r <- mismatches False (map T.pack ["py"]) home
           assertBool (show r) (any ("python" `isInfixOf`) r)
     , testCase "a language the program does not use is not checked" $
         withHome "stampunused" [] $ \home -> do
           writeEmbeddedHeader home
           writeBuildId home "aaaa"
           writeMarkers home "aaaa" False (\(name, text) -> (name, if name == "R" then "other" else text))
-          installedRuntimeMismatches False (map T.pack ["py", "cpp"]) home >>= (@?= [])
+          mismatches False (map T.pack ["py", "cpp"]) home >>= (@?= [])
     , testCase "the source search falls back to a candidate without install.sh" $
         withHome "searchold" ["old/Cargo.toml"] $ \root ->
           findRustDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
@@ -229,10 +349,13 @@ runtimeInstallTests =
     writeBuildId home bid = do
       createDirectoryIfMissing True (home </> "lib")
       writeFile (home </> "lib" </> "morloc.build-id") (bid <> "\n")
+    mismatches sanitize langs home = map mismatchText <$> installedRuntimeMismatches sanitize langs home
     writeMarkers home bid sanitize edit = do
       let dir = home </> "opt" </> "lang-configured"
       createDirectoryIfMissing True dir
-      mapM_ (\ls -> let (name, text) = edit (DF.lsName ls, langMarkerText (T.pack bid) sanitize ls) in writeFile (dir </> name) text) DF.langSetups
+      createDirectoryIfMissing True (home </> "lib")
+      mapM_ (\f -> writeFile (home </> f) "") ["opt/pymorloc", "lib/librmorloc.so", "lib/libcppmorloc.a"]
+      mapM_ (\ls -> let (name, text) = edit (DF.lsName ls, langMarkerText (T.pack bid) T.empty sanitize ls) in writeFile (dir </> name) text) DF.langSetups
     fakeNexus home code abi = do
       createDirectoryIfMissing True (home </> "bin")
       let f = home </> "bin" </> "morloc-nexus"

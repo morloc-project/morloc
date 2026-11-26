@@ -19,7 +19,9 @@ import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Types as JSONT
 import qualified Morloc.Data.PoolHash as PoolHash
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map as Map
@@ -744,7 +746,23 @@ cmdDump args _ config buildConfig = do
       return True
 
 cmdInit :: InitCommand -> Config.Config -> IO Bool
-cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
+cmdInit ic config
+  | initCheck ic && (initForce ic == ForceOverwrite || initSlurmSupport ic || initSanitize ic) = do
+      hPutStrLn stderr "morloc init --check builds nothing, so it takes no -f, --slurm or --sanitize"
+      return False
+  | initCheck ic, bad@(_ : _) <- filter (`notElem` MSC.bindingLanguages) (map MT.pack (initCheckLangs ic)) = do
+      hPutStrLn stderr $
+        "morloc init --check: no language binding is named " <> MT.unpack (MT.intercalate ", " bad)
+          <> "; the bindings are " <> MT.unpack (MT.intercalate ", " MSC.bindingLanguages)
+      return False
+  | initCheck ic = do
+      report <- MSC.checkBindings config (map MT.pack (initCheckLangs ic))
+      BS.putStr (TE.encodeUtf8 (report <> "\n"))
+      return True
+  | not (null (initCheckLangs ic)) = do
+      hPutStrLn stderr "morloc init: --lang is used only with --check"
+      return False
+  | otherwise = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
 
 -- | Print the language-support table as JSON, parsed from the embedded
 -- requirements.yaml files. Consumed by the native backend (pixi solve-clamp +

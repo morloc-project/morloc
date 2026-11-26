@@ -4858,6 +4858,11 @@ SEXP morloc_cache_record_store_r(void) {
 // "R_init_librmorloc" -- not "R_init_rmorloc". We expose both names as
 // aliases for the same body so the registration runs regardless of which
 // stripping convention a given R build follows.
+// SHIM-5: the R version this binding was compiled against.
+static SEXP morloc_built_r_version(void) {
+    return Rf_mkString(R_MAJOR "." R_MINOR);
+}
+
 static void __attribute__((unused)) _r_init_impl(DllInfo *info);
 void R_init_librmorloc(DllInfo *info) { _r_init_impl(info); }
 void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
@@ -4869,6 +4874,7 @@ static void _r_init_impl(DllInfo *info) {
     morloc_require_build(MORLOC_BINDING_BUILD_ID);
     morloc_install_panic_hook(NULL);
     R_CallMethodDef callMethods[] = {
+        {"morloc_built_r_version", (DL_FUNC) &morloc_built_r_version, 0},
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
