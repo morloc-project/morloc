@@ -5,7 +5,8 @@
 #
 # Builds libmorloc and morloc-nexus with cargo into TARGET_DIR, then installs
 # PREFIX/lib/libmorloc.{so,dylib}, PREFIX/bin/morloc-nexus and
-# PREFIX/include/morloc.h, all from this source. They are built and checked in
+# PREFIX/include/morloc.h, all from this source, and records the build id of
+# the pair in PREFIX/lib/morloc.build-id. They are built and checked in
 # PREFIX/.runtime-staging, then renamed into place; the runtime-install suite
 # (test-suite/integration/suites/runtime-install) checks what that guarantees.
 #
@@ -91,10 +92,15 @@ fi
 # LIFE-6: the nexus refuses a libmorloc of another build. The library search
 # variables are cleared so that the staged nexus loads the staged libmorloc
 # through its rpath.
-if ! id_err="$(env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH "$stage/bin/morloc-nexus" --build-id 2>&1 > /dev/null)"; then
+if ! build_id="$(env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH "$stage/bin/morloc-nexus" --build-id 2> "$stage/build-id.err")"; then
+    id_err="$(cat "$stage/build-id.err")"
     die "the morloc-nexus and libmorloc just built come from different builds (the source or the shared cargo target changed during the build); run the install again (\`morloc init -f\`): $id_err"
 fi
 
+# An install that stops part way leaves no recorded build id.
+step "clearing the recorded build id" rm -f "$prefix/lib/morloc.build-id"
 step "installing libmorloc" mv -f "$stage/lib/$lib" "$prefix/lib/$lib"
 step "installing the nexus" mv -f "$stage/bin/morloc-nexus" "$prefix/bin/morloc-nexus"
 step "installing morloc.h" mv -f "$stage/include/morloc.h" "$prefix/include/morloc.h"
+echo "$build_id" > "$stage/lib/morloc.build-id" || die "recording the build id"
+step "recording the build id" mv -f "$stage/lib/morloc.build-id" "$prefix/lib/morloc.build-id"

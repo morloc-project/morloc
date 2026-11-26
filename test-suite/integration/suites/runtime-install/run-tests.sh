@@ -74,6 +74,9 @@ else
         fail $t "the installed nexus refuses the installed libmorloc"
     elif [[ -e "$HOME1/.runtime-staging" ]]; then
         fail $t "staging directory left behind"
+    elif [[ "$(cat "$HOME1/lib/morloc.build-id" 2> /dev/null)" != \
+            "$(env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH "$HOME1/bin/morloc-nexus" --build-id)" ]]; then
+        fail $t "lib/morloc.build-id is not the installed nexus's build id"
     else
         pass $t
     fi

@@ -28,7 +28,12 @@ A relative path resolves against the launcher's directory. Every nexus mode
 that names a program accepts a launcher or a manifest path.
 
 ### ART-5 The nexus accepts only a manifest from its own Morloc version
-Status: draft
+Status: implemented
+Checked by: test_version_mismatch_rejected
 
 `build.morloc_version` must equal the nexus version exactly; otherwise the
-nexus refuses with a message to rebuild. Unknown keys are ignored.
+nexus refuses with a message to rebuild. This, not MORLOC_ABI_VERSION,
+decides whether a program runs on an installed runtime: a program carries
+its pool code and calls into the language bindings, the manifest shape and
+the schema and layout rules, none of which the ABI version covers. Unknown
+keys are ignored.

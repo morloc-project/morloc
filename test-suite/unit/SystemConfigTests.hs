@@ -30,6 +30,9 @@ import Morloc.CodeGenerator.SystemConfig
   , ToolchainHost (..)
   , compilerIncoherence
   , findRustDir
+  , installedRuntimeMismatches
+  , langMarkerText
+  , nexusAgrees
   , pathIsWithin
   , runtimeInstallScript
   , runtimeInstalled
@@ -39,6 +42,7 @@ import Control.Exception (bracket)
 import Morloc.Abi (abiVersion)
 import qualified Morloc.DataFiles as DF
 import qualified Data.ByteString as BS
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory
   ( canonicalizePath
@@ -54,6 +58,7 @@ import Data.List (isInfixOf)
 import System.FilePath (takeDirectory, (</>))
 import qualified System.Info as SI
 import System.Posix.Process (getProcessID)
+import System.Process (callProcess)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -71,12 +76,16 @@ runtimeInstallTests :: TestTree
 runtimeInstallTests =
   testGroup
     "runtime install"
-    [ testCase "a home with libmorloc, the nexus and this compiler's morloc.h holds a runtime" $
-        withHome "all" ["lib/" <> libName, "bin/morloc-nexus"] $ \home -> do
+    [ testCase "a home with libmorloc, the nexus, its build id and this compiler's morloc.h holds a runtime" $
+        withHome "all" ["lib/" <> libName, "bin/morloc-nexus", "lib/morloc.build-id"] $ \home -> do
           writeEmbeddedHeader home
           runtimeInstalled home >>= assertBool "installed"
+    , testCase "a home without the runtime's recorded build id does not hold a usable runtime" $
+        withHome "nobuildid" ["lib/" <> libName, "bin/morloc-nexus"] $ \home -> do
+          writeEmbeddedHeader home
+          runtimeInstalled home >>= assertBool "not installed" . not
     , testCase "a home whose morloc.h differs from this compiler's does not hold a usable runtime" $
-        withHome "editedheader" ["lib/" <> libName, "bin/morloc-nexus"] $ \home -> do
+        withHome "editedheader" ["lib/" <> libName, "bin/morloc-nexus", "lib/morloc.build-id"] $ \home -> do
           writeHeader home abiVersion
           runtimeInstalled home >>= assertBool "not installed" . not
     , testCase "a home without morloc.h does not hold a runtime" $
@@ -124,6 +133,85 @@ runtimeInstallTests =
           writeHeader (root </> "old") abiVersion
           writeEmbeddedHeader (root </> "new")
           findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
+    , testCase "an installed nexus that accepts its libmorloc at this ABI agrees" $
+        withHome "nexusok" [] $ \home -> do
+          fakeNexus home 0 (show abiVersion)
+          writeBuildId home fakeBuildId
+          nexusAgrees home >>= (@?= Right ())
+    , testCase "an installed nexus whose build id is not the recorded one does not agree" $
+        withHome "nexusunfinished" [] $ \home -> do
+          fakeNexus home 0 (show abiVersion)
+          writeBuildId home "fedcba9876543210"
+          r <- nexusAgrees home
+          case r of
+            Left msg -> assertBool msg ("did not finish" `isInfixOf` msg)
+            Right () -> assertFailure "an unfinished install agreed"
+    , testCase "an installed nexus that refuses its libmorloc does not agree" $
+        withHome "nexustorn" [] $ \home -> do
+          fakeNexus home 1 (show abiVersion)
+          r <- nexusAgrees home
+          case r of
+            Left msg -> assertBool msg ("build" `isInfixOf` msg)
+            Right () -> assertFailure "a torn install agreed"
+    , testCase "an installed nexus of another ABI does not agree, naming both" $
+        withHome "nexusabi" [] $ \home -> do
+          fakeNexus home 0 "999"
+          writeBuildId home fakeBuildId
+          r <- nexusAgrees home
+          case r of
+            Left msg -> assertBool msg ("999" `isInfixOf` msg && show abiVersion `isInfixOf` msg)
+            Right () -> assertFailure "another ABI agreed"
+    , testCase "a home init configured with this compiler has no mismatches" $
+        withHome "stampok" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "aaaa"
+          writeMarkers home "aaaa" False id
+          installedRuntimeMismatches False allLangs home >>= (@?= [])
+    , testCase "bindings built against another runtime build are reported" $
+        withHome "stampbuild" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "bbbb"
+          writeMarkers home "aaaa" False id
+          r <- installedRuntimeMismatches False (map T.pack ["py"]) home
+          assertBool (show r) (any ("python" `isInfixOf`) r)
+    , testCase "bindings built with other sanitize settings are reported" $
+        withHome "stampsan" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "aaaa"
+          writeMarkers home "aaaa" False id
+          r <- installedRuntimeMismatches True (map T.pack ["py"]) home
+          assertBool (show r) (any ("python" `isInfixOf`) r)
+    , testCase "a language the program uses with no configured binding is reported" $
+        withHome "stampabsent" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "aaaa"
+          r <- installedRuntimeMismatches False (map T.pack ["r"]) home
+          assertBool (show r) (any ("R" `isInfixOf`) r)
+    , testCase "a home with no recorded runtime build id is reported" $
+        withHome "stampnoid" [] $ \home -> do
+          writeEmbeddedHeader home
+          r <- installedRuntimeMismatches False [] home
+          assertBool (show r) (not (null r))
+    , testCase "a home whose header differs from this compiler's is reported" $
+        withHome "stampheader" [] $ \home -> do
+          writeHeader home abiVersion
+          writeBuildId home "aaaa"
+          writeMarkers home "aaaa" False id
+          r <- installedRuntimeMismatches False allLangs home
+          assertBool (show r) (any ("morloc.h" `isInfixOf`) r)
+    , testCase "a language the program uses, configured by another compiler, is reported by name" $
+        withHome "stamplang" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "aaaa"
+          writeMarkers home "aaaa" False (\(name, text) -> (name, if name == "python" then "other" else text))
+          r <- installedRuntimeMismatches False (map T.pack ["py"]) home
+          assertBool (show r) (any ("python" `isInfixOf`) r)
+    , testCase "a language the program does not use is not checked" $
+        withHome "stampunused" [] $ \home -> do
+          writeEmbeddedHeader home
+          writeBuildId home "aaaa"
+          writeMarkers home "aaaa" False (\(name, text) -> (name, if name == "R" then "other" else text))
+          installedRuntimeMismatches False (map T.pack ["py", "cpp"]) home >>= (@?= [])
     , testCase "the source search falls back to a candidate without install.sh" $
         withHome "searchold" ["old/Cargo.toml"] $ \root ->
           findRustDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
@@ -136,6 +224,26 @@ runtimeInstallTests =
     ]
   where
     libName = if SI.os == "darwin" then "libmorloc.dylib" else "libmorloc.so"
+    allLangs = map DF.lsLang DF.langSetups
+    fakeBuildId = "0123456789abcdef"
+    writeBuildId home bid = do
+      createDirectoryIfMissing True (home </> "lib")
+      writeFile (home </> "lib" </> "morloc.build-id") (bid <> "\n")
+    writeMarkers home bid sanitize edit = do
+      let dir = home </> "opt" </> "lang-configured"
+      createDirectoryIfMissing True dir
+      mapM_ (\ls -> let (name, text) = edit (DF.lsName ls, langMarkerText (T.pack bid) sanitize ls) in writeFile (dir </> name) text) DF.langSetups
+    fakeNexus home code abi = do
+      createDirectoryIfMissing True (home </> "bin")
+      let f = home </> "bin" </> "morloc-nexus"
+          body = unlines
+            [ "#!/bin/sh"
+            , "case \"$1\" in"
+            , "  --build-id) echo 0123456789abcdef; exit " <> show (code :: Int) <> " ;;"
+            , "  --abi-version) echo " <> abi <> " ;;"
+            , "esac"
+            ]
+      callProcess "sh" ["-c", "printf '%s' \"$2\" > \"$1\" && chmod +x \"$1\"", "sh", f, body]
     writeEmbeddedHeader src = do
       createDirectoryIfMissing True (src </> "include")
       BS.writeFile (src </> "include" </> "morloc.h") (TE.encodeUtf8 DF.libmorlocHeader)

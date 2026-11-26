@@ -7,13 +7,13 @@
 #define __MORLOC_H__
 
 // MORLOC_ABI_VERSION: the ABI / wire-format contract version, distinct from the
-// marketing/release version. Bump whenever the C ABI declared in this header or
-// the wire packet format changes. This is the single source of truth: the Rust
-// runtime mirrors it (morloc_runtime_types::MORLOC_ABI_VERSION, checked against
-// this header by a test) and the Haskell compiler parses it from this header
-// (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
-// version differs from the compiler's expected value (fail-closed), preventing
-// silent cross-pool struct/offset corruption.
+// release version. Bump whenever the C ABI declared in this header or the wire
+// packet format changes. The Rust runtime reads it from this header at build
+// time (morloc_runtime_types::MORLOC_ABI_VERSION) and the Haskell compiler
+// parses it from its embedded copy (Morloc.Abi); `morloc init` rebuilds a
+// runtime whose nexus reports another value, and fails if the rebuilt one
+// still does. Whether a built program runs on
+// an installed runtime is decided by the morloc version (ART-5).
 #define MORLOC_ABI_VERSION 16
 
 // Atomic includes must sit outside any `extern "C"` block because the
@@ -368,9 +368,7 @@ typedef struct __attribute__((packed)) morloc_packet_header_s {
 int64_t morloc_shm_live_bytes(void);
 
 // The ABI/wire-format contract version compiled into this libmorloc.so (the
-// value of MORLOC_ABI_VERSION at build time). Compared fail-closed against the
-// compiler's expected version at provisioning time so a mismatched prebuilt
-// binary is refused rather than run.
+// value of MORLOC_ABI_VERSION at build time).
 uint32_t morloc_abi_version(void);
 
 // LIFE-6: the build id of this libmorloc, a hash of the runtime source.

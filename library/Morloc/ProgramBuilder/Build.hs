@@ -29,13 +29,15 @@ import Control.Monad.Except (catchError, throwError)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Config as MC
+import qualified Morloc.Language as ML
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Build.CargoLock as CL
-import Morloc.CodeGenerator.SystemConfig (strictToolchainError)
+import Morloc.CodeGenerator.SystemConfig (installedRuntimeMismatches, strictToolchainError)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Expr (BuildConfig (..))
 import Morloc.ProgramBuilder.Install (matchGlob)
 import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
 import qualified Morloc.System as MS
@@ -219,6 +221,7 @@ buildProgram (manifest, wrappers, pools) = do
     buildAll projectRoot ss = do
       mapM_ writeScript ss
       syncEnvDeps projectRoot
+      requireInstalledRuntime (Set.toList (Set.fromList (map scriptLang ss)))
       checkToolBins
       mapM_ requireStrictToolchain (Set.toList (Set.fromList [k | s <- ss, SysRequireToolchain k <- scriptMake s]))
       mapM_ runMakes ss
@@ -428,6 +431,26 @@ describeWriteFailure (Failed _ e) = do
              <> "Choose a different output name with -o, or remove the directory."
       else "Failed to write generated file:" <+> pretty (show e)
 describeWriteFailure _ = return "Failed to write generated files."
+
+-- | The installed header and the bindings of the program's languages are the
+-- ones this compiler emits code for: a compiler installed over a home without
+-- a fresh init would otherwise compile pools against another compiler's
+-- bindings.
+requireInstalledRuntime :: [Lang] -> MorlocMonad ()
+requireInstalledRuntime langs = do
+  config <- MM.ask
+  buildConfig <- liftIO $ MC.loadBuildConfig config
+  let sanitize = fromMaybe False (buildConfigSanitize buildConfig)
+  problems <- liftIO $ installedRuntimeMismatches sanitize (map ML.langName langs) (MC.configHome config)
+  mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
+  let remedy :: String
+      remedy = case mEnv of
+          Just e | not (null e) -> "run `morloc init -f`, or update the environment with `mim update --reinit`"
+          _ -> "run `morloc init -f`"
+  unless (null problems) $
+    MM.throwFailed . vsep $
+      ("this morloc compiler does not match the runtime installed for it; " <> pretty remedy <> ":")
+        : map (("  " <>) . pretty) problems
 
 -- | In strict conda mode, fail if a build of this kind would run a program
 -- from outside the environment.

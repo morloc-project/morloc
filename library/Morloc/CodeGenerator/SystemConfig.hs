@@ -31,6 +31,9 @@ module Morloc.CodeGenerator.SystemConfig
   , runtimeInstalled
   , runtimeInstallScript
   , findRustDir
+  , nexusAgrees
+  , langMarkerText
+  , installedRuntimeMismatches
   ) where
 
 import qualified System.Info as SI
@@ -52,13 +55,15 @@ import Morloc.Abi (abiVersion, headerAbiVersion)
 
 import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameDirectory, renameFile)
 import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
 import System.IO (hClose, hIsTerminalDevice, hPutStrLn, stderr)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
-import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readCreateProcessWithExitCode, readProcessWithExitCode, waitForProcess)
+import Text.Read (readMaybe)
+import Morloc.Data.PoolHash (hashText)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -180,15 +185,21 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   userHome <- getHomeDirectory
 
   -- Build the Rust runtime (libmorloc.so + morloc-nexus + the rustmorloc pool
-  -- cache) only when it is missing, or when a full rebuild is forced. An
-  -- in-environment on-demand language add (see the language loop below) re-runs
-  -- `morloc init` WITHOUT force purely to build a newly provisioned language's
-  -- shim; the already-built runtime must not be relinked (and cargo must not be
-  -- required) on that path. The manager's provision always uses force, so a
-  -- compiler/version change still rebuilds the runtime.
+  -- cache) when it is missing, when the installed one does not hold together
+  -- or does not match this compiler (see nexusAgrees), or when a full
+  -- rebuild is forced. An in-environment on-demand language add re-runs
+  -- `morloc init` WITHOUT force to build a newly provisioned language's shim;
+  -- an intact runtime is not relinked (and cargo is not required) on that
+  -- path. The manager's provision always uses force.
   runtimeBuilt <- runtimeInstalled homeDir
-  if force == ForceOverwrite || not runtimeBuilt || not incremental
-    then provisionRustRuntime verbose config homeDir
+  agrees <- if runtimeBuilt && force /= ForceOverwrite then nexusAgrees homeDir else return (Left "")
+  case agrees of
+    Left why | not (null why) -> sayWarning ("Rebuilding the runtime: " <> why)
+    _ -> return ()
+  if force == ForceOverwrite || either (const True) (const False) agrees || not incremental
+    then do
+      provisionRustRuntime verbose config homeDir
+      nexusAgrees homeDir >>= either (ioError . userError) return
     else sayInfo verbose "Runtime (libmorloc + morloc-nexus + morloc.h) already built; skipping"
 
   when (force == ForceOverwrite) $ do
@@ -283,12 +294,13 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- available language. The markers live under opt/, which the force-clean above
   -- wipes, so `-f` also rebuilds every available language.
   let langMarkerDir = optDir </> "lang-configured"
+  mBuildId <- installedBuildId homeDir
   createDirectoryIfMissing True langMarkerDir
   forM_ DF.langSetups $ \ls -> do
     let tools = DF.lsRequiredTools ls
         marker = langMarkerDir </> DF.lsName ls
     unavailable <- filterM (fmap not . toolAvailableInEnv mStrictPrefix) tools
-    alreadyBuilt <- doesFileExist marker
+    alreadyBuilt <- maybe (return False) (\bid -> markerMatches marker (langMarkerText bid sanitize ls)) mBuildId
     if not (null unavailable)
       then
         let reason = case mStrictPrefix of
@@ -306,7 +318,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
           -- Write and run init script
           let initPath = buildDir </> "init.sh"
           TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
-          let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
+          let sanitizeFlagsStr = sanitizeFlags sanitize
           -- Run the setup, and only on success record the marker + clean up.
           -- Grouping the marker write with the build inside `optionalStep` keeps
           -- a non-strict failure from marking the language as built.
@@ -315,7 +327,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
                 removeFileSafe initPath
                 forM_ (DF.lsFiles ls) $ \ef ->
                   removeFileSafe (buildDir </> DF.embededFileName ef)
-                TIO.writeFile marker ""
+                forM_ mBuildId $ \bid -> writeMarker marker (langMarkerText bid sanitize ls)
           case mStrictPrefix of
             Just _ -> buildShim
             Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") buildShim
@@ -325,14 +337,15 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
 
 -- | Whether a home holds a runtime this compiler can use as it is:
--- libmorloc, the nexus, and the header they were installed with, which must
--- be the header this compiler was built with.
+-- libmorloc, the nexus, their recorded build id, and the header they were
+-- installed with, which must be the header this compiler was built with.
 runtimeInstalled :: FilePath -> IO Bool
 runtimeInstalled homeDir = do
   let header = homeDir </> "include" </> "morloc.h"
   present <- and <$> mapM doesFileExist
     [ homeDir </> "lib" </> P.sharedLibName P.hostPlatform "morloc"
     , homeDir </> "bin" </> "morloc-nexus"
+    , buildIdFile homeDir
     , header
     ]
   if present
@@ -369,11 +382,110 @@ runtimeInstallScript rustDir = do
                     <> show abiVersion
                 _ -> "has an include/morloc.h that differs from the header this compiler was built with"
 
+-- | Whether the installed nexus accepts the installed libmorloc (LIFE-6),
+-- reports the build id install.sh recorded for them, and speaks the ABI this
+-- compiler emits code for, or why not.
+nexusAgrees :: FilePath -> IO (Either String ())
+nexusAgrees homeDir = do
+  let nexus = homeDir </> "bin" </> "morloc-nexus"
+  -- The nexus must load the libmorloc beside it, found through its rpath.
+  env0 <- getEnvironment
+  let cleared = [kv | kv@(k, _) <- env0, k `notElem` ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]]
+      ask arg = try (readCreateProcessWithExitCode ((proc nexus [arg]) {env = Just cleared}) "")
+        :: IO (Either SomeException (ExitCode, String, String))
+  built <- ask "--build-id"
+  case built of
+    Left e -> return (Left ("the installed " <> nexus <> " cannot run: " <> displayException e))
+    Right (ExitFailure code, _, err) -> return . Left $
+      "the installed " <> nexus <> " fails its build check (exit " <> show code
+        <> "; it refuses a libmorloc from another build, or cannot load one): " <> trimEnd err
+    Right (ExitSuccess, out, _) -> do
+      recorded <- installedBuildId homeDir
+      reported <- ask "--abi-version"
+      return $ case reported of
+        _ | recorded /= Just (T.strip (T.pack out)) -> Left $
+          "the build id recorded at " <> buildIdFile homeDir <> " is not the installed nexus's ("
+            <> trimEnd out <> "); the last runtime install did not finish"
+        Right (ExitSuccess, abi, _) | Just n <- readMaybe (trimEnd abi), n == abiVersion -> Right ()
+        Right (ExitSuccess, abi, _) -> Left $
+          "the installed " <> nexus <> " speaks ABI " <> trimEnd abi
+            <> ", but this compiler emits code for ABI " <> show abiVersion
+        Right (ExitFailure _, _, err) -> Left ("the installed " <> nexus <> " cannot report its ABI: " <> trimEnd err)
+        Left e -> Left ("the installed " <> nexus <> " cannot run: " <> displayException e)
+
+-- | The build id install.sh recorded for the installed runtime.
+buildIdFile :: FilePath -> FilePath
+buildIdFile homeDir = homeDir </> "lib" </> "morloc.build-id"
+
+installedBuildId :: FilePath -> IO (Maybe T.Text)
+installedBuildId homeDir = do
+  let f = buildIdFile homeDir
+  exists <- doesFileExist f
+  if exists
+    then either (const Nothing) (Just . T.strip) . decodeUtf8' <$> BS.readFile f
+    else return Nothing
+
+-- | The compiler flags a binding is built with under the sanitize setting.
+sanitizeFlags :: Bool -> String
+sanitizeFlags sanitize = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
+
+-- | What a language's configured marker holds: a hash of what its binding
+-- was built from and against (the header, its init script and files, the
+-- runtime build id it records, and the sanitize setting), so a binding built
+-- by another compiler, against another runtime or with other flags is told
+-- apart from the one this compiler would build.
+langMarkerText :: T.Text -> Bool -> DF.LangSetup -> String
+langMarkerText buildId sanitize ls =
+  T.unpack . hashText . T.concat $
+    [buildId, "\0", T.pack (sanitizeFlags sanitize), "\0", DF.libmorlocHeader]
+      ++ concat [[T.pack (DF.embededFileName ef), "\0", DF.embededFileText ef, "\0"] | ef <- DF.lsInitScript ls : DF.lsFiles ls]
+
+-- | Write a marker beside its destination and rename it into place.
+writeMarker :: FilePath -> String -> IO ()
+writeMarker marker text = do
+  let tmp = marker <> ".tmp"
+  writeFile tmp text
+  renameFile tmp marker
+
+markerMatches :: FilePath -> String -> IO Bool
+markerMatches marker expected = do
+  exists <- doesFileExist marker
+  if exists
+    then (== encodeUtf8 (T.pack expected)) <$> BS.readFile marker
+    else return False
+
+-- | How the runtime and bindings installed in a home differ from what this
+-- compiler, under the given sanitize setting, emits code for: the header,
+-- the runtime's recorded build id, and each of the given languages
+-- (canonical names) whose binding is not configured as this compiler would
+-- configure it. Empty when they agree.
+installedRuntimeMismatches :: Bool -> [T.Text] -> FilePath -> IO [String]
+installedRuntimeMismatches sanitize langNames homeDir = do
+  mBuildId <- installedBuildId homeDir
+  let header = homeDir </> "include" </> "morloc.h"
+      markerDir = homeDir </> "opt" </> "lang-configured"
+  headerOk <- do
+    exists <- doesFileExist header
+    if exists then (== encodeUtf8 DF.libmorlocHeader) <$> BS.readFile header else return False
+  langs <- case mBuildId of
+    Nothing -> return []
+    Just buildId -> fmap concat . forM [ls | ls <- DF.langSetups, DF.lsLang ls `elem` langNames] $ \ls -> do
+      ok <- markerMatches (markerDir </> DF.lsName ls) (langMarkerText buildId sanitize ls)
+      return [DF.lsName ls | not ok]
+  return $
+    [header <> " is not the header this compiler was built with" | not headerOk]
+      ++ ["no runtime build is recorded at " <> buildIdFile homeDir | mBuildId == Nothing]
+      ++ [ "the " <> l <> " binding in " <> homeDir
+             <> " is missing or was not built by this compiler against the installed runtime"
+         | l <- langs
+         ]
+
 -- | Build and install libmorloc, morloc-nexus and morloc.h from the runtime
 -- source with the active toolchain (through the runtime's own install.sh),
 -- then persist the source and warm the rustmorloc pool cache.
--- 'configureAllSteps' calls this only when the runtime is missing or a rebuild is
--- forced, so an in-env, no-force, on-demand language add skips it.
+-- 'configureAllSteps' calls this when the runtime is missing or does not hold
+-- together ('nexusAgrees'), or a rebuild is forced; an on-demand language add
+-- over an intact runtime skips it.
 provisionRustRuntime :: Bool -> Config -> FilePath -> IO ()
 provisionRustRuntime verbose config homeDir = do
   -- Resolve the Rust workspace source + cargo up front. Search order:

@@ -9,21 +9,20 @@ Maintainer  : z@morloc.io
 
 The ABI/wire-format version is distinct from the release version
 ('Morloc.Version.versionStr'): it identifies the C ABI declared in
-@data/rust/include/morloc.h@ and the wire packet format, and is bumped only when
-those change. The single source of truth is the @#define MORLOC_ABI_VERSION@
-line in @morloc.h@; the Rust runtime mirrors it
-(@morloc_runtime_types::MORLOC_ABI_VERSION@, kept in lockstep by a test) and
-this module parses it from the embedded header.
+@data/rust/include/morloc.h@ and the wire packet format. The single source of
+truth is the @#define MORLOC_ABI_VERSION@ line in @morloc.h@; the Rust runtime
+reads it from the same header at build time
+(@morloc_runtime_types::MORLOC_ABI_VERSION@) and this module parses it from
+the embedded header.
 
-A prebuilt @libmorloc.so@ reports its version via the @morloc_abi_version()@ C
-function and @morloc-nexus@ via @morloc-nexus --abi-version@. Provisioning
-compares those against 'abiVersion' and refuses a mismatched binary rather than
-running it, preventing silent cross-pool struct/offset corruption from mixing
-components built against different ABIs.
+@morloc init@ rebuilds a runtime whose @morloc-nexus --abi-version@ is not
+'abiVersion', and fails if the rebuilt one still reports another. Whether a built program may run on an installed runtime is
+decided by the morloc version it was built with (ART-5), not by this number.
 -}
 module Morloc.Abi
   ( abiVersion
   , headerAbiVersion
+  , headerDefine
   ) where
 
 import Data.Maybe (listToMaybe, mapMaybe)
@@ -33,8 +32,7 @@ import Text.Read (readMaybe)
 
 -- | The ABI/wire-format contract version this compiler expects, parsed from the
 -- @#define MORLOC_ABI_VERSION@ line of the embedded @morloc.h@. Errors only if
--- the header is malformed (an invariant the Rust @abi_version_matches_header@
--- test also guards).
+-- the header is malformed, which also fails the Rust build.
 abiVersion :: Int
 abiVersion =
   case headerAbiVersion DF.libmorlocHeader of
@@ -43,9 +41,13 @@ abiVersion =
 
 -- | The @MORLOC_ABI_VERSION@ a @morloc.h@ declares, if it declares one.
 headerAbiVersion :: T.Text -> Maybe Int
-headerAbiVersion = listToMaybe . mapMaybe parseDefine . T.lines
+headerAbiVersion = headerDefine "MORLOC_ABI_VERSION"
+
+-- | The integer a @morloc.h@ @#define@s under a name, if it defines one.
+headerDefine :: T.Text -> T.Text -> Maybe Int
+headerDefine name = listToMaybe . mapMaybe parseDefine . T.lines
   where
     parseDefine line =
       case T.words (T.strip line) of
-        ("#define" : "MORLOC_ABI_VERSION" : val : _) -> readMaybe (T.unpack val)
+        ("#define" : n : val : _) | n == name -> readMaybe (T.unpack val)
         _ -> Nothing

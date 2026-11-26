@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
-const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
+const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus", "morloc-manifest"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
 const MAX_DEVIATING_ROWS: usize = 2;
 const MAX_ENV_READS: usize = 67;
@@ -277,7 +277,7 @@ fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
 #[test]
 fn the_test_hooks_feature_is_enabled_only_for_tests() {
     let mut problems = Vec::new();
-    for c in CRATES.iter().chain(&["morloc-manifest"]) {
+    for c in CRATES {
         let manifest = rust_root().join(c).join("Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         let mut section = String::new();

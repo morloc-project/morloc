@@ -42,6 +42,7 @@ data EmbededFile = EmbededFile
 -- | Per-language init setup: an init script and associated data files.
 data LangSetup = LangSetup
   { lsName :: String
+  , lsLang :: T.Text
   , lsRequiredTools :: [String]
   , lsInitScript :: EmbededFile
   , lsFiles :: [EmbededFile]
@@ -80,6 +81,7 @@ cppSetup :: LangSetup
 cppSetup =
   LangSetup
     "C++"
+    "cpp"
     ["g++", "git"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/init.sh")))
     [ EmbededFile "cppmorloc.hpp" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/cppmorloc.hpp"))
@@ -96,6 +98,7 @@ pythonSetup :: LangSetup
 pythonSetup =
   LangSetup
     "python"
+    "py"
     ["python3"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/py/init.sh")))
     [ EmbededFile "pymorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/py/pymorloc.c"))
@@ -107,6 +110,7 @@ rSetup :: LangSetup
 rSetup =
   LangSetup
     "R"
+    "r"
     ["R"]
     (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/r/init.sh")))
     [ EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))

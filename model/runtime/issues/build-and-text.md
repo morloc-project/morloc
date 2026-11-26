@@ -34,23 +34,8 @@
   packet.rs:191, :207); kind 0x02 XXHASH is defined and unused. c_abi_layout.rs
   `expression_structs_match_the_header` (:525) checks neither struct, and
   `expression_union_is_wide_enough` (:672) compares only size and
-  alignment, so missing union members pass. Neither side tests that
-  BaseTypes.hs `mlcKind*` (:195-196) equals morloc.h `MLC_KIND_*`. Fix:
-  mirror the structs and kinds, and check members and kinds in tests.
-- **ABI version never gated.** [read] Spec gap: no item covers the ABI
-  version. library/Morloc/Abi.hs:18-22 says provisioning compares
-  `morloc_abi_version()` and `morloc-nexus --abi-version` against
-  `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
-  printed (executable/Subcommands.hs:795) and unit-tested
-  (test-suite/unit/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
-  calls the gate deferred and relies on one release tag. A runtime built
-  from another release's source loads silently. [reproduced] A program
-  built before `morloc init` installs a newer runtime keeps its generated
-  pool code against the new libraries: after 7205b50c an older R pool fails
-  every call with `could not find function ".mlc_entry"`, which the new
-  librmorloc dispatch calls. LIFE-6 covers only skew within a run (nexus,
-  libmorloc, pymorloc, rmorloc); a built program against a newer runtime is
-  left to the ABI version, which nothing gates.
+  alignment, so missing union members pass. Fix: mirror the structs and
+  kinds, and check members and kinds in tests.
 - **Init still has windows a concurrent build can see.** [read
   2026-11-22] Gap beside LIFE-6. `morloc init -f` removes the init-owned
   lib and include files (SystemConfig.hs, the force clean) before the
@@ -58,7 +43,25 @@
   or R pool started meanwhile finds them missing (a clean failure, not a
   crash). Each header is renamed into place, but a C++ build during init
   can still take some headers old and some new; LIFE-6 checks neither the
-  archive nor the headers.
+  archive nor the headers. `morloc make` checks the header and binding
+  markers (installedRuntimeMismatches) without the init lock, so during
+  `init -f`, which clears the markers before the shims rebuild, a build
+  can find a language unconfigured and compile against bindings being
+  replaced.
+- **Within one morloc version, a built program runs on a newer runtime
+  unchecked.** [reproduced] ART-5 compares version strings, which do not
+  change between development commits, and the build id is per run. A
+  program built before `morloc init` installs a newer runtime keeps its
+  generated pool code against the new libraries: after 7205b50c an older R
+  pool fails every call with `could not find function ".mlc_entry"`, which
+  the new librmorloc dispatch calls.
+- **The compiler cannot tell an uninitialized runtime source edit.** [read
+  2026-11-26] The compiler embeds only morloc.h from data/rust. After an
+  edit to the runtime source without `morloc init -f` (with MORLOC_RUST_DIR
+  at the edited tree), `morloc make` passes and Rust and C++ pools build
+  against the previous runtime and its persisted copy. Releases are not
+  affected: the compiler and the runtime source come from one tag, and
+  provisioning always re-runs init.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
   locked with morloc-runtime" (0.113.0); scripts/bump-version.sh:36 bumps
