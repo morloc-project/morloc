@@ -65,8 +65,9 @@ The build id is per run: it catches an install changing under a run, not
 a program built against an older runtime, whose compatibility
 MORLOC_ABI_VERSION alone governs, so a runtime update never forces a
 rebuild. The id is a hash of the runtime source (the Rust workspace's
-runtime, types and manifest crates and the lock file), so a build and its
-persisted copy agree; only Rust sources and the Cargo files count.
+runtime, types and manifest crates, the lock file and the workspace's
+`include/morloc.h`), so a build and its persisted copy agree; only Rust
+sources, the Cargo files and that header count.
 libmorloc reports it as `morloc_build_id()`; init fails when the nexus it
 installed refuses the libmorloc it installed. The
 nexus, installed with libmorloc, refuses a libmorloc whose id differs from

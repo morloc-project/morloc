@@ -1,4 +1,4 @@
-//! Guard that `data/morloc/morloc.h` describes the same memory layout as the
+//! Guard that `data/rust/include/morloc.h` describes the same memory layout as the
 //! `#[repr(C)]` mirrors in this crate.
 //!
 //! `libmorloc.so` hands out pointers to the structs defined in
@@ -34,7 +34,7 @@ mod tests {
     use crate::manifest_ffi::*;
     use std::mem::{align_of, offset_of, size_of};
 
-    const HEADER: &str = include_str!("../../../morloc/morloc.h");
+    const HEADER: &str = include_str!("../../include/morloc.h");
 
     /// Strip `//` line comments; the header uses no block comments inside a
     /// struct body.

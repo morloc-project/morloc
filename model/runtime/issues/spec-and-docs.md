@@ -43,3 +43,10 @@ code. Found by the 2026-10-21 audit [read unless marked].
   models; items also cite RunSweep, DaemonShutdown, CrossingConn,
   ForkPool, PanicExit, SlotSeqlock, LocalSweep, QueueHandoff,
   SlotRelease, ChannelWait, QueueWake, AheadJob.
+- **LIFE-6 and ART-5 disagree on stale programs.** [read 2026-11-26]
+  LIFE-6 says MORLOC_ABI_VERSION alone governs whether a program built
+  against an older runtime runs, so a runtime update never forces a
+  rebuild. ART-5 (draft) and morloc-manifest lib.rs:1194-1205 refuse any
+  manifest whose build.morloc_version differs from the nexus version, so
+  every release forces one. Ruled 2026-11-26: the ABI decides; ART-5 and
+  the code change (plan /work/plans/runtime-interface-cleanup.md step 3).

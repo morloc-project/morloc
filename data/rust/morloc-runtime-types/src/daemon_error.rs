@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn the_header_names_every_kind_as_the_runtime_does() {
-        let header = include_str!("../../../morloc/morloc.h");
+        let header = include_str!("../../include/morloc.h");
         let named = |name: &str| {
             header
                 .lines()

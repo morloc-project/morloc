@@ -8,6 +8,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", root.join("Cargo.toml").display());
     println!("cargo:rerun-if-changed={}", root.join("Cargo.lock").display());
+    println!("cargo:rerun-if-changed={}", root.join(HEADER).display());
     let id = source_id(&root);
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("build_id.rs");
     std::fs::write(out, format!("0x{id:016x}u64\n")).unwrap();

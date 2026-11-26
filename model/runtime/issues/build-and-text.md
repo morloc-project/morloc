@@ -236,3 +236,25 @@
   2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
   `bracket`. A SIGKILL (the MCP eval wall-clock kill, memguard) skips a
   bracket; unconfirmed.
+- **pool.rs claims a dependency the pool does not have.** [read 2026-11-26]
+  data/lang/rust/pool.rs:24-27 says the generated pool has two direct rlib
+  dependencies, rustmorloc and morloc_runtime_types. The pool Cargo.toml
+  written by Members/Rust.hs makeCargoDocs (~:3732) names only rustmorloc.
+- **The release workflow never runs the Rust suite.** [read 2026-11-26]
+  release.yml's `test` job runs `lint typecheck-bench concurrency daemon
+  packet-io expose`, `haskell` and `integration` (:258-274), never
+  `test-suite/run rust`, so a tag can publish a runtime whose cargo tests
+  were last run only by ci.yml on another commit.
+- **Stale data/rust paths.** [read 2026-11-26]
+  test-suite/integration/suites/manager/run-tests.sh:69 and its README.md:47
+  look for mim under data/rust/target, where mim has not been built since it
+  moved to morloc-manager. test-suite/unit/VersionConstraintTests.hs:8 cites
+  data/rust/morloc-deps/src/constraint.rs, which no longer exists.
+- **The installed header is not the one the build id covers.** [read
+  2026-11-26] Gap in LIFE-6. Init writes $MORLOC_HOME/include/morloc.h from
+  the copy embedded in the compiler (SystemConfig.hs:161-163), and the
+  shims compile against it. libmorloc and the build id come from the Rust
+  workspace (MORLOC_RUST_DIR or the persisted $MORLOC_HOME/rust) and its
+  include/morloc.h. An init that falls back to a stale persisted copy
+  (warned, not refused) builds bindings against one header and libmorloc
+  against another, and both carry the same build id.

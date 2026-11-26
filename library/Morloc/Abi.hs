@@ -9,7 +9,7 @@ Maintainer  : z@morloc.io
 
 The ABI/wire-format version is distinct from the release version
 ('Morloc.Version.versionStr'): it identifies the C ABI declared in
-@data/morloc/morloc.h@ and the wire packet format, and is bumped only when
+@data/rust/include/morloc.h@ and the wire packet format, and is bumped only when
 those change. The single source of truth is the @#define MORLOC_ABI_VERSION@
 line in @morloc.h@; the Rust runtime mirrors it
 (@morloc_runtime_types::MORLOC_ABI_VERSION@, kept in lockstep by a test) and

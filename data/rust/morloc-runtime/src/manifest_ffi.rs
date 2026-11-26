@@ -142,7 +142,7 @@ pub struct MorlocPattern {
 
 // Length-aware string literal payload. The `data` buffer is NOT
 // NUL-terminated and may contain interior NULs. Mirrors C
-// `morloc_string_t` in data/morloc/morloc.h.
+// `morloc_string_t` in data/rust/include/morloc.h.
 #[repr(C)]
 pub struct MorlocString {
     pub data: *mut c_char,

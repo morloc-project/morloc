@@ -50,7 +50,7 @@ data LangSetup = LangSetup
 -- | The single self-contained morloc.h header (the ABI contract for libmorloc.so).
 -- Language extensions and pool templates #include this to call into the Rust library.
 libmorlocHeader :: Text
-libmorlocHeader = decodeUtf8 $(embedFileRelative "data/morloc/morloc.h")
+libmorlocHeader = decodeUtf8 $(embedFileRelative "data/rust/include/morloc.h")
 
 -- | Pool template lookup by canonical language name
 poolTemplate :: Text -> EmbededFile

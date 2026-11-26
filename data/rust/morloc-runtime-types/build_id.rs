@@ -1,8 +1,11 @@
 // LIFE-6: the build id is a hash of the runtime source, so the same source
 // gives the same id wherever it is built (the workspace or its persisted copy).
-// Only Rust sources and the Cargo files count, so editor files do not.
+// Only Rust sources, the Cargo files and the C header count, so editor files
+// do not.
 
 pub const SOURCE_CRATES: &[&str] = &["morloc-runtime-types", "morloc-runtime", "morloc-manifest"];
+
+pub const HEADER: &str = "include/morloc.h";
 
 fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -24,7 +27,7 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
 }
 
 pub fn source_id(root: &std::path::Path) -> u64 {
-    let mut all = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
+    let mut all = vec![root.join("Cargo.toml"), root.join("Cargo.lock"), root.join(HEADER)];
     for c in SOURCE_CRATES {
         let dir = root.join(c);
         all.push(dir.join("Cargo.toml"));

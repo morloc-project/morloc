@@ -25,7 +25,7 @@ extra-source-files:
   # libraries
   - data/lang/cpp/pool.cpp
   # universal c header
-  - data/morloc/morloc.h
+  - data/rust/include/morloc.h
   # shared language config
   - data/lang/languages.yaml
   # dependency/requirements config (core toolchain + per-language)

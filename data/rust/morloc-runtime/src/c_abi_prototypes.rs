@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn morloc_h_agrees_with_the_rust_exports() {
         let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let header_dir = crate_dir.join("../../morloc");
+        let header_dir = crate_dir.join("../include");
         let header = std::fs::read_to_string(header_dir.join("morloc.h")).unwrap();
         let (prototypes, opaque) = generated_prototypes(crate_dir, &header);
 

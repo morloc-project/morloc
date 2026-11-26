@@ -306,7 +306,7 @@ mod encoding_tests {
 
     #[test]
     fn primary_volume_matches_header() {
-        let header = include_str!("../../../morloc/morloc.h");
+        let header = include_str!("../../include/morloc.h");
         let from_header = header
             .lines()
             .find_map(|l| l.trim().strip_prefix("#define MORLOC_PRIMARY_VOLUME"))

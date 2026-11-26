@@ -54,7 +54,7 @@ pub use cschema::is_top_null;
 
 /// The ABI / wire-format contract version, distinct from the release version.
 /// The single source of truth is `#define MORLOC_ABI_VERSION` in
-/// `data/morloc/morloc.h`; this constant mirrors it (kept in lockstep by the
+/// `data/rust/include/morloc.h`; this constant mirrors it (kept in lockstep by the
 /// `abi_version_matches_header` test). `libmorloc.so` exposes it as the
 /// `morloc_abi_version()` C function and `morloc-nexus` as `--abi-version`, so
 /// provisioning can refuse a prebuilt binary whose version differs from the
@@ -69,7 +69,7 @@ mod abi_version_tests {
     // Keep the Rust mirror in lockstep with the canonical value in morloc.h.
     #[test]
     fn abi_version_matches_header() {
-        let header = include_str!("../../../morloc/morloc.h");
+        let header = include_str!("../../include/morloc.h");
         let from_header = header
             .lines()
             .find_map(|l| l.trim().strip_prefix("#define MORLOC_ABI_VERSION"))
@@ -196,7 +196,15 @@ mod build_skew_tests {
         for f in ["Cargo.toml", "Cargo.lock"] {
             std::fs::copy(root.join(f), copy.join(f)).unwrap();
         }
+        copy_tree(&root.join("include"), &copy.join("include"));
         assert_eq!(source::source_id(&copy), BUILD_ID, "a copy of the source has the same id");
+        let header = copy.join("include").join("morloc.h");
+        let original = std::fs::read(&header).unwrap();
+        let mut edited = original.clone();
+        edited.push(b'\n');
+        std::fs::write(&header, &edited).unwrap();
+        assert_ne!(source::source_id(&copy), BUILD_ID, "another header has another id");
+        std::fs::write(&header, &original).unwrap();
         let lib = copy.join("morloc-runtime").join("src").join("lib.rs");
         let mut text = std::fs::read(&lib).unwrap();
         text.push(b'\n');
