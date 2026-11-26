@@ -29,10 +29,17 @@ import Morloc.CodeGenerator.SystemConfig
   , PoolToolchain (..)
   , ToolchainHost (..)
   , compilerIncoherence
+  , findRustDir
   , pathIsWithin
+  , runtimeInstallScript
+  , runtimeInstalled
   , toolsOutsidePrefix
   )
 import Control.Exception (bracket)
+import Morloc.Abi (abiVersion)
+import qualified Morloc.DataFiles as DF
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
 import System.Directory
   ( canonicalizePath
   , createDirectoryIfMissing
@@ -43,7 +50,9 @@ import System.Directory
   , setOwnerExecutable
   , setPermissions
   )
-import System.FilePath ((</>))
+import Data.List (isInfixOf)
+import System.FilePath (takeDirectory, (</>))
+import qualified System.Info as SI
 import System.Posix.Process (getProcessID)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
@@ -55,7 +64,94 @@ systemConfigTests =
     [ pathIsWithinTests
     , compilerIncoherenceTests
     , toolsOutsidePrefixTests
+    , runtimeInstallTests
     ]
+
+runtimeInstallTests :: TestTree
+runtimeInstallTests =
+  testGroup
+    "runtime install"
+    [ testCase "a home with libmorloc, the nexus and this compiler's morloc.h holds a runtime" $
+        withHome "all" ["lib/" <> libName, "bin/morloc-nexus"] $ \home -> do
+          writeEmbeddedHeader home
+          runtimeInstalled home >>= assertBool "installed"
+    , testCase "a home whose morloc.h differs from this compiler's does not hold a usable runtime" $
+        withHome "editedheader" ["lib/" <> libName, "bin/morloc-nexus"] $ \home -> do
+          writeHeader home abiVersion
+          runtimeInstalled home >>= assertBool "not installed" . not
+    , testCase "a home without morloc.h does not hold a runtime" $
+        withHome "noheader" ["lib/" <> libName, "bin/morloc-nexus"] $ \home ->
+          runtimeInstalled home >>= assertBool "not installed" . not
+    , testCase "a home without the nexus does not hold a runtime" $
+        withHome "nonexus" ["lib/" <> libName, "include/morloc.h"] $ \home ->
+          runtimeInstalled home >>= assertBool "not installed" . not
+    , testCase "a runtime source with install.sh and this compiler's header is used through it" $
+        withHome "script" ["Cargo.toml", "install.sh"] $ \src -> do
+          writeEmbeddedHeader src
+          runtimeInstallScript src >>= (@?= Right (src </> "install.sh"))
+    , testCase "a runtime source whose header differs at the same ABI is refused" $
+        withHome "samabi" ["Cargo.toml", "install.sh"] $ \src -> do
+          writeHeader src abiVersion
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg ("differs" `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "a directory without Cargo.toml is not a runtime source" $
+        withHome "notsource" ["install.sh"] $ \src -> do
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg ("Cargo.toml" `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "a runtime source whose header declares another ABI is refused, naming both" $
+        withHome "otherabi" ["Cargo.toml", "install.sh"] $ \src -> do
+          writeHeader src (abiVersion + 1)
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg (show abiVersion `isInfixOf` msg && show (abiVersion + 1) `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "a runtime source without morloc.h is refused" $
+        withHome "noheaderdir" ["Cargo.toml", "install.sh"] $ \src -> do
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg ("morloc.h" `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "the source search skips a candidate without install.sh" $
+        withHome "search" ["old/Cargo.toml", "new/Cargo.toml", "new/install.sh"] $ \root -> do
+          writeEmbeddedHeader (root </> "new")
+          findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
+    , testCase "the source search skips a candidate whose header differs" $
+        withHome "searchheader" ["old/Cargo.toml", "old/install.sh", "new/Cargo.toml", "new/install.sh"] $ \root -> do
+          writeHeader (root </> "old") abiVersion
+          writeEmbeddedHeader (root </> "new")
+          findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
+    , testCase "the source search falls back to a candidate without install.sh" $
+        withHome "searchold" ["old/Cargo.toml"] $ \root ->
+          findRustDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
+    , testCase "a runtime source without install.sh is refused, naming the source" $
+        withHome "noscript" ["Cargo.toml"] $ \src -> do
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg (src `isInfixOf` msg && "predates" `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    ]
+  where
+    libName = if SI.os == "darwin" then "libmorloc.dylib" else "libmorloc.so"
+    writeEmbeddedHeader src = do
+      createDirectoryIfMissing True (src </> "include")
+      BS.writeFile (src </> "include" </> "morloc.h") (TE.encodeUtf8 DF.libmorlocHeader)
+    writeHeader src n = do
+      createDirectoryIfMissing True (src </> "include")
+      writeFile (src </> "include" </> "morloc.h") ("#ifndef X\n#define MORLOC_ABI_VERSION " <> show n <> "\n#endif\n")
+    withHome tag files act = do
+      tmp <- getTemporaryDirectory
+      pid <- getProcessID
+      let root = tmp </> ("morloc-runtime-install-" <> show pid <> "-" <> tag)
+      bracket
+        (do removePathForcibly root
+            mapM_ (\f -> createDirectoryIfMissing True (takeDirectory (root </> f)) >> writeFile (root </> f) "") files
+            return root)
+        removePathForcibly
+        act
 
 pathIsWithinTests :: TestTree
 pathIsWithinTests =

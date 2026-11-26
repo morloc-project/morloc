@@ -28,6 +28,9 @@ module Morloc.CodeGenerator.SystemConfig
   , prefixFlags
   , prefixRustLinkArgs
   , rustPoolRustflags
+  , runtimeInstalled
+  , runtimeInstallScript
+  , findRustDir
   ) where
 
 import qualified System.Info as SI
@@ -43,13 +46,16 @@ import qualified Data.List as DL
 import qualified Data.Text as T
 import Data.Char (isSpace, toUpper)
 import qualified Data.Text.IO as TIO
+import qualified Data.ByteString as BS
+import Data.Text.Encoding (decodeUtf8', encodeUtf8)
+import Morloc.Abi (abiVersion, headerAbiVersion)
 
 import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameDirectory)
 import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
-import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
+import System.IO (hClose, hIsTerminalDevice, hPutStrLn, stderr)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
@@ -158,9 +164,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- compiler so the builds do not fall back to a bare `ar`/`strip` that conda
   -- does not provide.
   exportArchiveTools
-  -- Install morloc.h (the C ABI contract for language extensions and pool templates)
-  sayInfo verbose "Installing morloc.h"
-  TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
   -- Build libmorloc.so + morloc-nexus (and rustmorloc + the language shims)
   -- FROM SOURCE with the active toolchain. This is the single provisioning path:
@@ -169,8 +172,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- world is not an option. Only the morloc compiler and mim are
   -- shipped prebuilt (they never link into a pool).
   let soPath = libDir </> P.sharedLibName P.hostPlatform "morloc"
-  -- Primary install goes to $MORLOC_HOME/bin/
-  let nexusBinDir = homeDir </> "bin"
+      nexusBinDir = homeDir </> "bin"
       nexusBinPath = nexusBinDir </> "morloc-nexus"
   createDirectoryIfMissing True nexusBinDir
   -- Resolve the user's home for the legacy ~/.local/bin/ symlink fallback
@@ -184,10 +186,10 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- shim; the already-built runtime must not be relinked (and cargo must not be
   -- required) on that path. The manager's provision always uses force, so a
   -- compiler/version change still rebuilds the runtime.
-  runtimeBuilt <- (&&) <$> doesFileExist soPath <*> doesFileExist nexusBinPath
+  runtimeBuilt <- runtimeInstalled homeDir
   if force == ForceOverwrite || not runtimeBuilt || not incremental
-    then provisionRustRuntime verbose config homeDir soPath nexusBinPath
-    else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
+    then provisionRustRuntime verbose config homeDir
+    else sayInfo verbose "Runtime (libmorloc + morloc-nexus + morloc.h) already built; skipping"
 
   when (force == ForceOverwrite) $ do
     sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
@@ -322,13 +324,58 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   sayInfo verbose "Generating shell completions"
   Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
 
--- | Build libmorloc.so + morloc-nexus from source with the active toolchain,
--- then persist the Rust workspace source and warm the rustmorloc pool cache.
+-- | Whether a home holds a runtime this compiler can use as it is:
+-- libmorloc, the nexus, and the header they were installed with, which must
+-- be the header this compiler was built with.
+runtimeInstalled :: FilePath -> IO Bool
+runtimeInstalled homeDir = do
+  let header = homeDir </> "include" </> "morloc.h"
+  present <- and <$> mapM doesFileExist
+    [ homeDir </> "lib" </> P.sharedLibName P.hostPlatform "morloc"
+    , homeDir </> "bin" </> "morloc-nexus"
+    , header
+    ]
+  if present
+    then (== encodeUtf8 DF.libmorlocHeader) <$> BS.readFile header
+    else return False
+
+-- | The install script of a runtime source directory, or why it cannot be
+-- used. Init installs the source's morloc.h for the bindings and pools to
+-- compile against, so it must be the header this compiler was built with.
+runtimeInstallScript :: FilePath -> IO (Either String FilePath)
+runtimeInstallScript rustDir = do
+  let script = rustDir </> "install.sh"
+      header = rustDir </> "include" </> "morloc.h"
+      refuse why = Left $
+        "the runtime source at " <> rustDir <> " " <> why
+          <> "; set MORLOC_RUST_DIR to the data/rust this compiler was built from and re-run `morloc init -f`"
+  hasCargo <- doesFileExist (rustDir </> "Cargo.toml")
+  hasScript <- doesFileExist script
+  hasHeader <- doesFileExist header
+  if not hasCargo
+    then return (refuse "is not a runtime source (it has no Cargo.toml)")
+    else if not hasScript
+      then return (refuse "predates this compiler (it has no install.sh)")
+      else if not hasHeader
+        then return (refuse ("has no " <> header))
+        else do
+          bytes <- BS.readFile header
+          return $
+            if bytes == encodeUtf8 DF.libmorlocHeader
+              then Right script
+              else refuse $ case decodeUtf8' bytes of
+                Right text | Just n <- headerAbiVersion text, n /= abiVersion ->
+                  "declares ABI " <> show n <> " in include/morloc.h, but this compiler emits code for ABI "
+                    <> show abiVersion
+                _ -> "has an include/morloc.h that differs from the header this compiler was built with"
+
+-- | Build and install libmorloc, morloc-nexus and morloc.h from the runtime
+-- source with the active toolchain (through the runtime's own install.sh),
+-- then persist the source and warm the rustmorloc pool cache.
 -- 'configureAllSteps' calls this only when the runtime is missing or a rebuild is
--- forced, so an in-env, no-force, on-demand language add skips it. @soPath@ is the
--- installed libmorloc path; @nexusBinPath@ is the installed nexus path.
-provisionRustRuntime :: Bool -> Config -> FilePath -> FilePath -> FilePath -> IO ()
-provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
+-- forced, so an in-env, no-force, on-demand language add skips it.
+provisionRustRuntime :: Bool -> Config -> FilePath -> IO ()
+provisionRustRuntime verbose config homeDir = do
   -- Resolve the Rust workspace source + cargo up front. Search order:
   -- MORLOC_RUST_DIR (set by mim / dev); the persisted copy at
   -- $MORLOC_HOME/rust; then next to the morloc binary.
@@ -365,111 +412,55 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
       , "  morloc init -f"
       ]
 
-  -- Build into a WRITABLE target dir (the shared rust-build cache under
-  -- MORLOC_STATE), NOT the default `<source>/target`: in a container the Rust
-  -- source is a read-only image layer, so cargo cannot write a target beside it.
-  let rustBuildDir = Config.rustBuildDir config
-  sayInfo verbose "Building libmorloc (Rust runtime)"
-  run verbose "cargo"
-    [ "build", "--release"
-    , "--manifest-path", rustDir </> "Cargo.toml"
-    , "-p", "morloc-runtime"
-    , "--target-dir", rustBuildDir
-    ]
-  -- Produce libmorloc from the Rust build. The recipe differs by platform:
-  --
-  --   * ELF/Linux: link the *staticlib* with `--whole-archive` so ALL symbols
-  --     (including the runtime's internal SHM/allocator state) are exported to
-  --     the language extensions (pymorloc, rmorloc, cppmorloc). The cdylib
-  --     can't be used directly here because forcing full-symbol export needs a
-  --     version script, which conflicts with Rust's own version script on
-  --     ARM/aarch64 -- an ELF/GNU-ld concern.
-  --
-  --   * Mach-O/macOS: version scripts don't exist, and the plain cdylib
-  --     already exports the full C ABI, so use it directly (its install_name
-  --     is set to @rpath/libmorloc.dylib by morloc-runtime/build.rs). Do NOT
-  --     `strip` it: a bare strip on a Mach-O dylib can drop exported symbols
-  --     the shims resolve at load time.
-  -- Resolved once and reused for the nexus binary below.
-  hasStrip <- resolveTool "strip"
-  case P.hostPlatform of
-    P.Linux -> do
-      let rustStaticLib = rustBuildDir </> "release" </> "libmorloc_runtime.a"
-      -- Link with $CC when set (conda toolchain) so the runtime and the shims
-      -- that link it share one compiler/libc world; fall back to gcc.
-      cc <- resolveToolName "gcc"
-      stageInstall verbose hasStrip soPath $ \tmp ->
-        run verbose cc
-          [ "-shared", "-o", tmp
-          , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
-          , "-lpthread", "-lrt", "-ldl", "-lm"
-          ]
-    P.Darwin -> do
-      let rustCdylib = rustBuildDir </> "release" </> "libmorloc_runtime.dylib"
-      stageInstall verbose Nothing soPath $ \tmp -> copyFile rustCdylib tmp
+  -- Everything init builds, installs and persists comes from one snapshot of
+  -- the source, taken here: libmorloc, the nexus, the installed morloc.h, and
+  -- the copy at $MORLOC_HOME/rust that Rust pools later build against. The
+  -- resolved source may change while init runs; the snapshot does not.
+  let persistedRustDir = homeDir </> "rust"
+      snapshot = homeDir </> "rust.staging"
+  srcAbs <- canonicalizePath rustDir
+  persistedExists <- doesDirectoryExist persistedRustDir
+  persistedIsLink <- if persistedExists then pathIsSymbolicLink persistedRustDir else return False
+  persistedAbs <- if persistedExists then canonicalizePath persistedRustDir else return persistedRustDir
+  -- The source itself (no fresher workspace found, or a read-only image
+  -- layer provisioned there) and a link to a development tree are left as
+  -- they are.
+  let replacePersisted = srcAbs /= persistedAbs && not persistedIsLink
+  when (srcAbs == persistedAbs) $
+    sayWarning $
+      "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
+        <> "workspace found). If you changed the compiler's data/rust, set "
+        <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
+  removePathIfExists snapshot
+  flip onException (removePathIfExists snapshot) $ do
+    sayInfo verbose $ "Snapshotting the runtime source " <> srcAbs <> " to " <> snapshot
+    copyTree verbose srcAbs snapshot
+    installFromSnapshot snapshot
+  if replacePersisted
+    then do
+      sayInfo verbose "Persisting the runtime source to $MORLOC_HOME/rust"
+      let previous = homeDir </> "rust.old"
+      removePathIfExists previous
+      when persistedExists $ renameDirectory persistedRustDir previous
+      renameDirectory snapshot persistedRustDir
+      removePathIfExists previous
+    else removePathIfExists snapshot
 
-  sayInfo verbose "Compiling morloc-nexus (Rust)"
-  run verbose "cargo"
-    [ "build", "--release"
-    , "--manifest-path", rustDir </> "Cargo.toml"
-    , "-p", "morloc-nexus"
-    , "--target-dir", rustBuildDir
-    ]
-  let rustNexus = rustBuildDir </> "release" </> "morloc-nexus"
-      -- On Apple Silicon every executable must carry a valid signature, and a
-      -- strip that does not re-sign (GNU strip, some conda cctools builds)
-      -- leaves one the kernel kills at every launch. Unstripped is only larger.
-      nexusStrip = case P.hostPlatform of
-        P.Darwin -> Nothing
-        _ -> hasStrip
-  stageInstall verbose nexusStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
-  -- LIFE-6: the nexus and libmorloc come from two cargo builds, so a change
-  -- to the runtime source between them leaves a nexus that refuses every run.
-  -- The nexus's own check, run here, fails init instead.
-  (idCode, _, idErr) <- readProcessWithExitCode nexusBinPath ["--build-id"] ""
-  case idCode of
-    ExitSuccess -> return ()
-    ExitFailure _ -> ioError . userError $
-      "the installed morloc-nexus and libmorloc were built from different runtime sources"
-        <> " (the Rust source changed during init); run `morloc init -f` again: " <> idErr
-
-  -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
-  -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)
-  -- that path-depends on rustmorloc, so its source (and its sibling
-  -- morloc-runtime-types + the workspace Cargo.toml/Cargo.lock) must be present
-  -- at `morloc make` time -- unlike the C-ABI libmorloc.so, rustmorloc is
-  -- locked to the LOCAL rustc and is compiled per-pool by cargo. We pre-build
-  -- rustmorloc into the shared pool target-dir so the first `morloc make`
-  -- doesn't pay that compile.
-  -- Persisting the Rust workspace and warming the rustmorloc cache are Rust
-  -- capabilities, not core install steps: a failure (e.g. a cargo build error)
-  -- must leave Rust unavailable with a warning, not abort the whole init. The
-  -- per-pool build at `morloc make` still enforces cargo via makeTheMaker, so a
-  -- broken warm-up cannot silently ship a bad pool.
+  -- Warm the shared pool build cache. A Rust pool is a Cargo project
+  -- (Members/Rust.hs) that path-depends on rustmorloc in the persisted source,
+  -- compiled per pool by cargo with the local rustc; pre-building rustmorloc
+  -- into the shared pool target-dir spares the first `morloc make` that
+  -- compile. Warming is a Rust capability, not a core install step: a failure
+  -- leaves Rust unavailable with a warning rather than aborting init, and the
+  -- per-pool build at `morloc make` still enforces cargo via makeTheMaker.
   optionalStep "Rust configuration failed (Rust pools will not be available): " $ do
-    let persistedRustDir = homeDir </> "rust"
-        poolTargetDir = Config.rustBuildDir config
-    -- If the resolved source IS the persisted copy (no fresher workspace
-    -- found), warn instead of silently reusing possibly-stale source; a dev
-    -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise
-    -- refresh the persisted copy from the resolved source.
-    srcAbs <- canonicalizePath rustDir
-    destExists <- doesDirectoryExist persistedRustDir
-    destAbs <- if destExists then canonicalizePath persistedRustDir else return persistedRustDir
-    if srcAbs == destAbs
-      then sayWarning $
-        "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
-          <> "workspace found). If you changed the compiler's data/rust, set "
-          <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
-      else do
-        sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
-        persistRustSource verbose srcAbs persistedRustDir destExists
+    let poolTargetDir = Config.rustBuildDir config
     sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
     -- The warm-up builds with the pool profile so that pool builds reuse
     -- these artifacts: its rustc flags (PANIC-9) and, on macOS, its packed
     -- debug information (PANIC-12).
     run verbose "env" $
-      [ "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
+      [ "MORLOC_HOME=" <> homeDir, "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
       , "build", "--release"
       , "--manifest-path", persistedRustDir </> "Cargo.toml"
       , "-p", "rustmorloc"
@@ -477,6 +468,17 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
       , "--config", "profile.release.rustflags=" <> show rustPoolRustflags
       ]
       ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
+  where
+    installFromSnapshot snapshot = do
+      script <- runtimeInstallScript snapshot >>= either (ioError . userError) return
+      -- Build into a WRITABLE target dir (the shared rust-build cache under
+      -- MORLOC_STATE), NOT the default `<source>/target`: in a container the
+      -- Rust source is a read-only image layer, so cargo cannot write a
+      -- target beside it.
+      sayInfo verbose "Building and installing the runtime (libmorloc, morloc-nexus, morloc.h)"
+      run verbose "env" (["MORLOC_INIT_VERBOSE=1" | verbose] ++ ["bash", script, homeDir, Config.rustBuildDir config])
+        `catch` \(e :: IOError) -> ioError . userError $
+          "building the runtime from " <> snapshot <> " failed (see the output above): " <> ioeGetErrorString e
 
 -- | PANIC-9: the rustc flags a Rust pool crate and its dependencies build
 -- with. The panic hook tells a user panic from a runtime one by the debug
@@ -487,12 +489,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
 rustPoolRustflags :: [String]
 rustPoolRustflags = "-Zmerge-functions=disabled" : ["-Clink-arg=-Wl,-no_deduplicate" | SI.os == "darwin"]
 
--- | Search for a Rust workspace directory containing Cargo.toml
+-- | The first candidate runtime source that 'runtimeInstallScript' accepts;
+-- else the first with a Cargo.toml, which it then refuses by name; else "".
 findRustDir :: [FilePath] -> IO FilePath
-findRustDir [] = return ""
-findRustDir (d:ds) = do
-  exists <- doesFileExist (d </> "Cargo.toml")
-  if exists then return d else findRustDir ds
+findRustDir ds = do
+  workspaces <- filterM (\d -> doesFileExist (d </> "Cargo.toml")) ds
+  usable <- filterM (fmap (either (const False) (const True)) . runtimeInstallScript) workspaces
+  return $ case usable ++ workspaces of
+    d : _ -> d
+    [] -> ""
 
 -- ANSI color wrapping, disabled when stderr is not a terminal
 withColor :: String -> String -> IO String
@@ -526,29 +531,6 @@ optionalStep :: String -> IO () -> IO ()
 optionalStep prefix act =
   act `catch` \(e :: IOError) -> sayWarning (prefix <> displayException e)
 
--- | Build an artifact at a unique temporary path beside @dst@, optionally
--- strip it there, then rename it onto @dst@. @rename(2)@ is atomic within a
--- directory, so a concurrent @morloc init@ -- or any process loading the
--- artifact -- sees either the previous file or the complete new one, never a
--- half-written or half-stripped binary. Stripping in place is what makes the
--- naive sequence unsafe: the window between copy and strip is long enough for
--- a second builder to strip a file the first is still writing.
-stageInstall :: Bool -> Maybe FilePath -> FilePath -> (FilePath -> IO ()) -> IO ()
-stageInstall verbose mstrip dst produce = do
-  (tmp, h) <- openTempFile (takeDirectory dst) (takeFileName dst <> ".tmp")
-  hClose h
-  -- Reserve the name but let the producer create the file itself, so the
-  -- artifact lands with the mode the linker or copy would normally give it
-  -- rather than openTempFile's 0600.
-  removeFile tmp
-  let cleanup = removeFile tmp `catch` \(_ :: IOError) -> return ()
-  flip onException cleanup $ do
-    produce tmp
-    case mstrip of
-      Just stripPath -> run verbose stripPath [tmp]
-      Nothing -> return ()
-    renameFile tmp dst
-
 run :: Bool -> String -> [String] -> IO ()
 run verbose cmd args = do
   when verbose $ do
@@ -561,19 +543,15 @@ run verbose cmd args = do
     ExitSuccess -> return ()
     ExitFailure code -> ioError . userError $ cmd <> " exited with code " <> show code
 
--- | Copy a Rust workspace source tree (already resolved to an absolute path) to
--- a stable location under $MORLOC_HOME so generated pool Cargo projects can
--- path-depend on rustmorloc at make time. Build artifacts (any @target@ dir)
--- are excluded. The caller decides whether to persist (it owns the
--- source-vs-destination comparison), so there is no guard here.
-persistRustSource :: Bool -> FilePath -> FilePath -> Bool -> IO ()
-persistRustSource verbose srcAbs destDir destExists = do
-  when destExists $ removeDirectoryRecursive destDir
-  createDirectoryIfMissing True destDir
-  -- tar-pipe excluding build/VCS dirs; portable across dev machines with cargo.
+-- | Copy a source tree to a new directory, leaving out build output and
+-- version control (any @target@ or @.git@).
+copyTree :: Bool -> FilePath -> FilePath -> IO ()
+copyTree verbose src dest = do
+  createDirectoryIfMissing True dest
   run verbose "sh"
     [ "-c"
-    , "tar cf - -C '" <> srcAbs <> "' --exclude=target --exclude=.git . | tar xf - -C '" <> destDir <> "'"
+    , "tar cf - -C \"$1\" --exclude=target --exclude=.git . | tar xf - -C \"$2\""
+    , "sh", src, dest
     ]
 
 ensureDirectory :: Bool -> String -> FilePath -> IO ()
@@ -613,7 +591,7 @@ removePathIfExists path = do
 
 -- | Names (relative to $MORLOC_HOME/lib/) written by morloc init itself.
 -- Must stay in sync with the per-language init.sh scripts under
--- data/lang/*/init.sh and with the libmorloc.so install above. Anything
+-- data/lang/*/init.sh and with data/rust/install.sh (libmorloc). Anything
 -- not in this list (notably lib/python/<modName>/ and lib/R/<modName>/
 -- populated by `morloc install` via Module.runExpose) is preserved across
 -- `morloc init -f`.
@@ -625,7 +603,8 @@ initOwnedLibPaths =
   ]
 
 -- | Names (relative to $MORLOC_HOME/include/) written by morloc init itself.
--- Must stay in sync with data/lang/cpp/init.sh. `mlccpptypes/` is omitted
+-- Must stay in sync with data/lang/cpp/init.sh and data/rust/install.sh
+-- (morloc.h). `mlccpptypes/` is omitted
 -- because cpp/init.sh git-clones it on demand and reuses it if present.
 -- Anything not in this list (notably include/<modName>/ populated by
 -- `morloc install`) is preserved across `morloc init -f`.
@@ -658,15 +637,6 @@ resolveToolName :: String -> IO String
 resolveToolName tool = do
   mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
   return (fromMaybe tool mEnv)
-
--- | Resolve a build tool to an available executable: the environment override
--- if set, else the tool found on PATH; Nothing when neither exists.
-resolveTool :: String -> IO (Maybe FilePath)
-resolveTool tool = do
-  mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
-  case mEnv of
-    Just v | not (null v) -> return (Just v)
-    _                     -> findExecutable tool
 
 -- | Ask the C compiler for the absolute path of a companion tool
 -- (e.g. @cc -print-prog-name=ar@). Returns Nothing when the compiler cannot

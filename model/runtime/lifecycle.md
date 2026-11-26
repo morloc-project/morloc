@@ -68,8 +68,9 @@ rebuild. The id is a hash of the runtime source (the Rust workspace's
 runtime, types and manifest crates, the lock file and the workspace's
 `include/morloc.h`), so a build and its persisted copy agree; only Rust
 sources, the Cargo files and that header count.
-libmorloc reports it as `morloc_build_id()`; init fails when the nexus it
-installed refuses the libmorloc it installed. The
+libmorloc reports it as `morloc_build_id()`; the runtime's install.sh
+checks the nexus it built against the libmorloc it built before installing
+either, and fails when the nexus refuses it. The
 nexus, installed with libmorloc, refuses a libmorloc whose id differs from
 its own, and passes the id to its pools as `MORLOC_BUILD_ID`, replacing any
 it inherited. A pool calls `morloc_require_build` before anything else

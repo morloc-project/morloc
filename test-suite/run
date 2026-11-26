@@ -58,6 +58,7 @@ concurrency|bidirectional callbacks between pools|setup|1 min|shard 1
 daemon|nexus daemon, router, HTTP/TCP/socket, SHM leaks|setup|1-2 min|shard 1
 packet-io|packet round trips across volumes and pools|setup|1 min|shard 1
 expose|package.yaml expose: install and consume|setup|1 min|shard 1
+runtime-install|data/rust/install.sh into scratch prefixes|cargo|1-3 min|shard 1
 recursion-depth|recursion depth in every pool language|setup|1 min|shard 1 (Linux)
 stress|zombies, SHM and temp leaks under repeated runs|setup|minutes|
 mcp|the nexus MCP server, all groups|setup, python3|minutes|
@@ -67,7 +68,7 @@ bench|stack bench (parser and typecheck)|stack|minutes|
 bench-runtime|executable benchmarks in bench/runtime|setup|minutes|
 perf|performance model benchmarks (model/performance)|setup, quiet machine|1 hour|
 quick|model lint unit|||
-ci|what CI runs: shard 1 runs rust lint typecheck-bench concurrency daemon packet-io expose recursion-depth, then every shard runs haskell|||
+ci|what CI runs: shard 1 runs rust lint typecheck-bench concurrency daemon packet-io expose runtime-install recursion-depth, then every shard runs haskell|||
 all|every suite except setup tla perf bench bench-runtime manager|||
 '
 
@@ -185,6 +186,7 @@ suite() {
         daemon) runtime_env "$SUITES/daemon/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
         packet-io) runtime_env "$SUITES/packet-io/run-all.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
         expose) runtime_env "$SUITES/expose/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
+        runtime-install) "$SUITES/runtime-install/run-tests.sh" ;;
         recursion-depth)
             if [[ $CI -eq 1 ]]; then
                 MORLOC_STRESS_LANGS="${MORLOC_STRESS_LANGS:-py cpp rust}" "$SUITES/stress/deep-recursion.sh"
@@ -215,12 +217,12 @@ expand() {
         quick) echo model lint unit ;;
         ci)
             if [[ -z "$shard_index" || "$shard_index" == 1 ]]; then
-                echo rust lint typecheck-bench concurrency daemon packet-io expose
+                echo rust lint typecheck-bench concurrency daemon packet-io expose runtime-install
                 linux && echo recursion-depth
             fi
             echo haskell ;;
         all) echo model lint rust haskell integration typecheck-bench concurrency daemon packet-io \
-                  expose recursion-depth stress mcp errors ;;
+                  expose runtime-install recursion-depth stress mcp errors ;;
         *) echo "$1" ;;
     esac
 }

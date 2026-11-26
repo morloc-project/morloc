@@ -23,6 +23,7 @@ components built against different ABIs.
 -}
 module Morloc.Abi
   ( abiVersion
+  , headerAbiVersion
   ) where
 
 import Data.Maybe (listToMaybe, mapMaybe)
@@ -36,9 +37,13 @@ import Text.Read (readMaybe)
 -- test also guards).
 abiVersion :: Int
 abiVersion =
-  case listToMaybe (mapMaybe parseDefine (T.lines DF.libmorlocHeader)) of
+  case headerAbiVersion DF.libmorlocHeader of
     Just n -> n
     Nothing -> error "morloc.h does not define MORLOC_ABI_VERSION as an integer"
+
+-- | The @MORLOC_ABI_VERSION@ a @morloc.h@ declares, if it declares one.
+headerAbiVersion :: T.Text -> Maybe Int
+headerAbiVersion = listToMaybe . mapMaybe parseDefine . T.lines
   where
     parseDefine line =
       case T.words (T.strip line) of

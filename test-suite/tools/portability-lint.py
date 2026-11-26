@@ -15,8 +15,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-SCAN = ["test-suite", "bench", "data/lang", "data/misc"]
-SKIP_DIRS = {"__pycache__", ".git", "pools", "shims"}
+SCAN = ["test-suite", "bench", "data/lang", "data/misc", "data/rust"]
+SKIP_DIRS = {"__pycache__", ".git", "pools", "shims", "target"}
 
 # (pattern, which files, what to do instead)
 RULES = [

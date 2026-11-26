@@ -56,10 +56,9 @@
   lib and include files (SystemConfig.hs, the force clean) before the
   language init scripts write them again, so a `morloc make` or a Python
   or R pool started meanwhile finds them missing (a clean failure, not a
-  crash). morloc.h is written in place (`TIO.writeFile`), so a compile
-  during init can read it partly written. Each header is renamed into
-  place, but a C++ build during init can still take some headers old and
-  some new; LIFE-6 checks neither the archive nor the headers.
+  crash). Each header is renamed into place, but a C++ build during init
+  can still take some headers old and some new; LIFE-6 checks neither the
+  archive nor the headers.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
   locked with morloc-runtime" (0.113.0); scripts/bump-version.sh:36 bumps
@@ -250,11 +249,19 @@
   look for mim under data/rust/target, where mim has not been built since it
   moved to morloc-manager. test-suite/unit/VersionConstraintTests.hs:8 cites
   data/rust/morloc-deps/src/constraint.rs, which no longer exists.
-- **The installed header is not the one the build id covers.** [read
-  2026-11-26] Gap in LIFE-6. Init writes $MORLOC_HOME/include/morloc.h from
-  the copy embedded in the compiler (SystemConfig.hs:161-163), and the
-  shims compile against it. libmorloc and the build id come from the Rust
-  workspace (MORLOC_RUST_DIR or the persisted $MORLOC_HOME/rust) and its
-  include/morloc.h. An init that falls back to a stale persisted copy
-  (warned, not refused) builds bindings against one header and libmorloc
-  against another, and both carry the same build id.
+- **Inits of two homes sharing one state relink each other's nexus.**
+  [read 2026-11-26] Gap beside LIFE-6. The cargo target dir
+  (Config.rustBuildDir) belongs to the state, but the nexus build script
+  reads MORLOC_HOME (morloc-nexus/build.rs, rerun-if-env-changed), which
+  install.sh sets per home. Inits of two homes on one state therefore
+  relink target/release/morloc-nexus for each other, and install.sh copies
+  it after cargo has released the target lock, while the init lock
+  (withInitLock) is per home. The same holds for
+  target/release/libmorloc_runtime.a when the two homes build different
+  sources: one init's link reads the archive the other just rebuilt. A
+  truncated nexus or archive fails closed (the exec or the link fails). The
+  unsound case: home A ends with B's libmorloc and nexus, which agree, so
+  LIFE-6 passes, beside A's own header, and A's pools compile against A's
+  header and load B's library, and nothing catches it. Fix options: a runtime target dir per home (one runtime
+  compile per home, no cross-home reuse; needs a ruling), or a lock on the
+  shared target held across build and copy (model first).
