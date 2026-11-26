@@ -53,7 +53,7 @@ rust|cargo test over data/rust|libmorloc (setup)|3-5 min|shard 1
 model|spec format and test citations (model/check.sh)|python3|seconds|in unit
 tla|TLA+ models (model/runtime/tla/check.sh)|java 11+|10 min|
 lint|portability lint of shell and make files|python3|seconds|shard 1
-typecheck-bench|morloc typecheck time on stress programs|setup|1 min|shard 1
+typecheck-bench|typecheck stress programs under a time limit (perf typechecking --check)|setup|1 min|shard 1
 concurrency|bidirectional callbacks between pools|setup|1 min|shard 1
 daemon|nexus daemon, router, HTTP/TCP/socket, SHM leaks|setup|1-2 min|shard 1
 packet-io|packet round trips across volumes and pools|setup|1 min|shard 1
@@ -64,12 +64,10 @@ stress|zombies, SHM and temp leaks under repeated runs|setup|minutes|
 mcp|the nexus MCP server, all groups|setup, python3|minutes|
 errors|deliberately broken programs fail cleanly|setup|2 min|
 manager|mim serving path|mim, docker or podman|minutes|
-bench|stack bench (parser and typecheck)|stack|minutes|
-bench-runtime|executable benchmarks in bench/runtime|setup|minutes|
 perf|performance model benchmarks (model/performance)|setup, quiet machine|1 hour|
 quick|model lint unit|||
 ci|what CI runs: shard 1 runs rust lint typecheck-bench concurrency daemon packet-io expose runtime-install recursion-depth, then every shard runs haskell|||
-all|every suite except setup tla perf bench bench-runtime manager|||
+all|every suite except setup tla perf manager|||
 '
 
 usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -181,7 +179,7 @@ suite() {
         model) bash model/check.sh ;;
         tla) bash model/runtime/tla/check.sh ${EXTRA[@]+"${EXTRA[@]}"} ;;
         lint) python3 "$TS/tools/portability-lint.py" ;;
-        typecheck-bench) runtime_env "$ROOT/bench/typecheck/run-benchmarks.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
+        typecheck-bench) runtime_env python3 "$ROOT/model/performance/benchmarks/perf.py" typechecking --check ;;
         concurrency) runtime_env "$SUITES/concurrency/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
         daemon) runtime_env "$SUITES/daemon/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
         packet-io) runtime_env "$SUITES/packet-io/run-all.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
@@ -197,15 +195,6 @@ suite() {
         mcp) "$SUITES/mcp/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
         errors) "$SUITES/errors/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
         manager) "$SUITES/manager/run-tests.sh" ${EXTRA[@]+"${EXTRA[@]}"} ;;
-        bench) stack bench ${STACK[@]+"${STACK[@]}"} ;;
-        bench-runtime)
-            local d ok=0
-            for d in "$ROOT"/bench/runtime/*/; do
-                echo "--- ${d%/}"
-                (cd "$d" && make --quiet) || ok=1
-                (cd "$d" && make --quiet clean > /dev/null 2>&1)
-            done
-            return $ok ;;
         perf) bash model/performance/benchmarks/run.sh ${EXTRA[@]+"${EXTRA[@]}"} ;;
         *) return 127 ;;
     esac

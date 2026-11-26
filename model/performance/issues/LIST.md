@@ -16,3 +16,7 @@ From lib/biolib/runtime-bench (runtime/issues/encode-throughput.md):
 - [model-records.md](model-records.md): ZIP-5 limits fail in recorded runs, `Measured: pending` despite runs, ZIP-5/6 frame size mismatch, ZIP-4 answered by data, ZIP-8 title, stale COPY-3/6 prose
 - [stdlib-algorithms.md](stdlib-algorithms.md): parallel's streaming fold-maps are quadratic for list and Str monoids
 - [call-and-stream-copies.md](call-and-stream-copies.md): measured 2026-11-13: Python hashes its schema string per call, mid-size inline values slower than by reference, Python/R @next not in place, channel landing copy, whole-list @load vs the in-place slice, slices left on the copy path, the JSON render copy (small), C++ function values copy list arguments, a capturing @fold step copies its accumulator
+
+From benchmarks/typechecking (runtime/issues/LIST.md, typecheck time):
+
+- [typechecking.md](typechecking.md): typecheck time grows faster than linearly in composition chains, `where` nesting, parenthesized nesting and method uses (TYCK-6..10)

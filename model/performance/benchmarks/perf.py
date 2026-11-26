@@ -16,6 +16,7 @@ up against each other and against the spec's `Goal:` and `Limit:` lines.
 import math
 import os
 import platform
+import signal
 import subprocess
 import sys
 import threading
@@ -57,10 +58,11 @@ class Timing:
         return self.walls[len(self.walls) // 2]
 
 
-def timed(cmd, cwd, env=None, stdin=None):
+def timed(cmd, cwd, env=None, stdin=None, timeout=None):
     """Run cmd once; return (wall seconds, max RSS KiB of the largest
-    descendant, stdout bytes). Fails loudly on a nonzero exit."""
-    return timed_cpu(cmd, cwd, env=env, stdin=stdin)[:3]
+    descendant, stdout bytes). Fails loudly on a nonzero exit, and with
+    `timeout` (seconds) kills cmd's session and raises TimeoutError."""
+    return timed_cpu(cmd, cwd, env=env, stdin=stdin, timeout=timeout)[:3]
 
 
 def meminfo_kib(*keys):
@@ -134,7 +136,7 @@ def take_last(acc):
     return acc
 
 
-def timed_cpu(cmd, cwd, env=None, stdin=None, sample=False):
+def timed_cpu(cmd, cwd, env=None, stdin=None, sample=False, timeout=None):
     """timed, plus the CPU seconds of cmd and its waited-for descendants.
     With `sample`, LAST["tree_pss_kib"] is the run's sampled peak PSS over
     its whole session; with OPTIONS sync, the page cache is synced first
@@ -154,14 +156,25 @@ def timed_cpu(cmd, cwd, env=None, stdin=None, sample=False):
     t0 = time.perf_counter()
     p = subprocess.Popen(cmd, cwd=cwd, env=full_env, stdin=stdin_f,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         start_new_session=sample)
+                         start_new_session=sample or timeout is not None)
     sampler = TreeSampler(p.pid) if sample else None
+    expired = threading.Event()
+
+    def kill():
+        expired.set()
+        os.killpg(p.pid, signal.SIGKILL)
+
+    timer = threading.Timer(timeout, kill) if timeout is not None else None
+    if timer:
+        timer.start()
     readers = [threading.Thread(target=drain, args=("out", p.stdout)),
                threading.Thread(target=drain, args=("err", p.stderr))]
     for r in readers:
         r.start()
     _, status, usage = os.wait4(p.pid, 0)
     t1 = time.perf_counter()
+    if timer:
+        timer.cancel()
     if sampler:
         LAST["tree_pss_kib"] = sampler.stop()
     for r in readers:
@@ -169,6 +182,8 @@ def timed_cpu(cmd, cwd, env=None, stdin=None, sample=False):
     p.returncode = os.waitstatus_to_exitcode(status)
     if stdin:
         stdin_f.close()
+    if expired.is_set():
+        raise TimeoutError(f"{cmd} in {cwd} did not finish in {timeout} s")
     if p.returncode != 0:
         sys.stderr.write(bufs["err"].decode(errors="replace"))
         raise RuntimeError(f"{cmd} exited {p.returncode}")
@@ -340,7 +355,7 @@ class Bench:
         self.fits.append((item, param, value, unit, note))
         print(f"  => {item} {param} = {value:.4g} {unit} {note}", flush=True)
 
-    def sweep(self, series, xs, cmd_of, reps=None, env=None, cwd_of=None):
+    def sweep(self, series, xs, cmd_of, reps=None, env=None, cwd_of=None, timeout=None):
         """Time cmd_of(x) for every x, interleaved: each repetition visits
         every x once, so a change in machine load during the sweep reaches
         all points rather than tilting the fit. Returns the best time per x."""
@@ -350,14 +365,16 @@ class Bench:
         ext = {x: {} for x in xs}
         for _ in range(reps or self.reps):
             for x in xs:
-                w, r, _, c = timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env)
+                w, r, _, c = timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env,
+                                       timeout=timeout)
                 walls[x].append(w)
                 cpus[x].append(c)
                 rss[x] = max(rss[x], r)
                 take_last(ext[x])
         if OPTIONS["tree_mem"]:
             for x in xs:
-                timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env, sample=True)
+                timed_cpu(cmd_of(x), cwd_of(x) if cwd_of else self.dir, env=env, sample=True,
+                          timeout=timeout)
                 take_last(ext[x])
         return [self.point(series, x, Timing(walls[x], rss[x], b"", cpus[x], ext[x])) for x in xs]
 
@@ -396,6 +413,17 @@ class Bench:
         self.record(item, f"{series}.c", c / UNITS[c_unit], c_unit, f"r2={r2:.4f}")
         self.record(item, f"{series}.b", b / UNITS[b_unit], b_unit, note)
         return c, b, r2
+
+    def check_point(self, series, x, cmd, cwd, limit_s):
+        """Run cmd once, for --check. Returns [] if it succeeds within
+        limit_s seconds, else a one-line failure."""
+        try:
+            wall, _, _ = timed(cmd, cwd, timeout=limit_s)
+        except (TimeoutError, RuntimeError) as e:
+            print(f"  {series:<24} x={x:<12} FAIL", flush=True)
+            return [f"{self.name} {series} x={x}: {e}"]
+        print(f"  {series:<24} x={x:<12} {fmt_time(wall):>10}  ok (limit {limit_s} s)", flush=True)
+        return []
 
     def save(self, run_dir):
         os.makedirs(run_dir, exist_ok=True)
@@ -437,6 +465,9 @@ def main():
     ap.add_argument("--reps", type=int, default=7)
     ap.add_argument("--quick", action="store_true",
                     help="smaller sweeps; results are not saved")
+    ap.add_argument("--check", action="store_true",
+                    help="the bench's check(b): one run per series under a time "
+                         "limit; exit 1 on any failure; nothing saved")
     ap.add_argument("--run", help="results/<RUN> to write into (default: date-commit)")
     ap.add_argument("--label", help="appended to the default run name")
     a = ap.parse_args()
@@ -446,6 +477,14 @@ def main():
     spec.loader.exec_module(mod)
     b = Bench(a.name, 2 if a.quick else a.reps)
     b.quick = a.quick
+    if a.check:
+        if not hasattr(mod, "check"):
+            sys.exit(f"{a.name} has no check mode")
+        print(f"{a.name}: check, load {b.load:.2f}", flush=True)
+        failures = mod.check(b)
+        for f in failures:
+            print(f"FAIL {f}", file=sys.stderr)
+        sys.exit(1 if failures else 0)
     print(f"{a.name}: load {b.load:.2f}, {b.reps} reps", flush=True)
     mod.run(b)
     if not a.quick:
