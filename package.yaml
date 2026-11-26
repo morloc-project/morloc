@@ -132,21 +132,6 @@ executables:
       - temporary
       - text
 
-  morloc-codegen-generic:
-    main:          Main.hs
-    source-dirs:   exe/morloc-codegen-generic
-    ghc-options:
-      - -Wall
-      - -O2
-    dependencies:
-      - morloc
-      - base
-      - aeson
-      - binary
-      - bytestring
-      - text
-      - yaml
-
 tests:
   morloc-test:
     main:          Main.hs
