@@ -19,7 +19,9 @@ import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Types as JSONT
 import qualified Morloc.Data.PoolHash as PoolHash
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map as Map
@@ -744,7 +746,23 @@ cmdDump args _ config buildConfig = do
       return True
 
 cmdInit :: InitCommand -> Config.Config -> IO Bool
-cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
+cmdInit ic config
+  | initCheck ic && (initForce ic == ForceOverwrite || initSlurmSupport ic || initSanitize ic) = do
+      hPutStrLn stderr "morloc init --check builds nothing, so it takes no -f, --slurm or --sanitize"
+      return False
+  | initCheck ic, bad@(_ : _) <- filter (`notElem` MSC.bindingLanguages) (map MT.pack (initCheckLangs ic)) = do
+      hPutStrLn stderr $
+        "morloc init --check: no language binding is named " <> MT.unpack (MT.intercalate ", " bad)
+          <> "; the bindings are " <> MT.unpack (MT.intercalate ", " MSC.bindingLanguages)
+      return False
+  | initCheck ic = do
+      report <- MSC.checkBindings config (map MT.pack (initCheckLangs ic))
+      BS.putStr (TE.encodeUtf8 (report <> "\n"))
+      return True
+  | not (null (initCheckLangs ic)) = do
+      hPutStrLn stderr "morloc init: --lang is used only with --check"
+      return False
+  | otherwise = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
 
 -- | Print the language-support table as JSON, parsed from the embedded
 -- requirements.yaml files. Consumed by the native backend (pixi solve-clamp +
@@ -981,12 +999,8 @@ instance JSON.FromJSON ModuleManifest where
     where
       parseExport = JSON.withObject "Export" $ \o ->
         (,) <$> o JSON..: "name" <*> o JSON..: "type"
-      -- Accept both the legacy bare-string form ("foo") and the new
-      -- object form ({"name": "foo", "git_hash": "..."}). Only the name
-      -- is needed for `morloc list`'s reverse-dep view; hash provenance
-      -- in this report is a future enhancement.
-      parseDepName (JSON.String s) = return s
-      parseDepName v = JSON.withObject "MorlocDep" (\o -> o JSON..: "name") v
+      -- Only the name is needed for `morloc list`'s reverse-dep view.
+      parseDepName = JSON.withObject "MorlocDep" (\o -> o JSON..: "name")
 
 instance JSON.FromJSON ProgramManifest where
   parseJSON = JSON.withObject "ProgramManifest" $ \o ->

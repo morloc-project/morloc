@@ -61,14 +61,14 @@ pidns`, written by rename before anything else lands there. Fixed under
 Status: implemented
 Checked by: a_process_runs_only_on_the_build_it_was_made_with, the_build_id_is_the_hash_of_the_runtime_source_wherever_it_lies, a_pool_refuses_another_build, every_binding_checks_the_build_it_was_made_with
 
-The build id is per run: it catches an install changing under a run, not
-a program built against an older runtime, whose compatibility
-MORLOC_ABI_VERSION alone governs, so a runtime update never forces a
-rebuild. The id is a hash of the runtime source (the Rust workspace's
-runtime, types and manifest crates and the lock file), so a build and its
-persisted copy agree; only Rust sources and the Cargo files count.
-libmorloc reports it as `morloc_build_id()`; init fails when the nexus it
-installed refuses the libmorloc it installed. The
+The build id is per run: it catches an install changing under a run. A
+program built by another morloc version is refused by ART-5. The id is a hash of the runtime source (the Rust workspace's
+runtime, types and manifest crates, the lock file and the workspace's
+`include/morloc.h`), so a build and its persisted copy agree; only Rust
+sources, the Cargo files and that header count.
+libmorloc reports it as `morloc_build_id()`; the runtime's install.sh
+checks the nexus it built against the libmorloc it built before installing
+either, and fails when the nexus refuses it. The
 nexus, installed with libmorloc, refuses a libmorloc whose id differs from
 its own, and passes the id to its pools as `MORLOC_BUILD_ID`, replacing any
 it inherited. A pool calls `morloc_require_build` before anything else

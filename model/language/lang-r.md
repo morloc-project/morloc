@@ -9,7 +9,7 @@ and 64-bit integers), RECUR-3 (R's recursion limit).
 
 ### RLANG-1 A sourced R function never changes an argument by reference
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-11-25
 
 Ordinary R values copy on modify, so changing a local variable that holds
 an argument is allowed. A sourced function never changes an argument

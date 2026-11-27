@@ -1,0 +1,149 @@
+# R language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
+
+# Identity and metadata
+name: r
+extension: R
+aliases: []
+is_compiled: false
+# Rscript runs a file as the console does, parsing the text read so far
+# again after each line of an unfinished expression, which is quadratic in
+# the length of a function (START-4). The pool is instead parsed once and
+# its expressions evaluated in order; the pool file is its first
+# argument. Warnings print as they are raised until the last expression,
+# which starts the pool.
+run_command: ["Rscript", "-e", "local({ f <- commandArgs(TRUE)[1]; assign(\".morloc.poolfile\", f, envir = globalenv()); x <- parse(f, keep.source = FALSE); w <- options(warn = 1); for (i in seq_along(x)) { if (i == length(x)) options(w); eval(x[[i]], globalenv()) } })"]
+serial_type: "character"
+# Base R (nchar, paste, regex, jsonlite, etc.) raises "embedded nul in string"
+# on NUL-bearing CHARSXPs. The morloc runtime rejects NULs at the R boundary.
+allow_string_null: false
+fork_workers: true
+# Record kinds the compiler generates definitions for (GEN-2). A record with
+# no form of its own in this language takes the default kind.
+generated_types:
+  records:
+    default: list
+    kinds:
+      list: { form: list, legacy: [list] }
+preamble:
+  # bit64 provides the 'integer64' S3 class used by R to represent
+  # Int64 / UInt64 / IFile handles (stdlib/root-r/main.loc). Loaded
+  # silently because morloc-generated pools should not emit user-
+  # visible R startup noise. The C runtime (rmorloc.c) marshals the
+  # integer64 bytes directly, but downstream R code (arithmetic,
+  # printing, coercion) needs the bit64 S3 methods on PATH.
+  - 'suppressPackageStartupMessages(library(bit64))'
+  - 'dyn.load("{{home}}/lib/librmorloc.so")'
+  # SHIM-5: R does not keep a binary interface across minor versions.
+  - 'local({ built <- sub("[.][^.]*$", "", .Call("morloc_built_r_version")); running <- paste(R.version$major, sub("[.].*$", "", R.version$minor), sep = "."); if (!identical(built, running)) stop("the morloc R binding was built for R ", built, " and this is R ", running, "; run `morloc init -f` (in a managed environment, `mim update --reinit`)", call. = FALSE) })'
+  - '.morloc.pooldir <- dirname(get(".morloc.poolfile", envir = globalenv()))'
+  - '.morloc.libdir <- "{{state}}/modules/R"'
+  # Put each library's R directory (modules/R/<library>, PKG-3) on .libPaths()
+  # so an installed package there loads with library(). Guarded so a missing dir adds no noise.
+  - 'if (dir.exists(.morloc.libdir)) .libPaths(c(list.dirs(.morloc.libdir, recursive = FALSE), .libPaths()))'
+  - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { src <- normalizePath(file.path(.morloc.pooldir, "..", "..", "..", p), mustWork=FALSE); cwd <- file.path(".", p); if (file.exists(src)) src else if (file.exists(cwd)) cwd else file.path(.morloc.libdir, p) }, chdir=TRUE)'
+  # User R files load further files with .morloc.source and may read these
+  # paths, so they are also bound where user files run.
+  - 'local(for (name in c(".morloc.source", ".morloc.pooldir", ".morloc.libdir")) assign(name, get(name), envir = globalenv()))'
+
+# Literals
+ldBoolTrue: "TRUE"
+ldBoolFalse: "FALSE"
+ldNullLiteral: "NULL"
+ldNullCheckTemplate: "!is.null({{expr}})"
+ldListLengthTemplate: "length({{expr}})"
+ldRealPosInf: "Inf"
+ldRealNegInf: "-Inf"
+ldRealNaN: "NaN"
+
+# Constructors
+ldListStyle: type_dependent
+ldTupleConstructor: "list"
+ldRecordConstructor: "list"
+
+# Access styles
+ldIndexStyle: one_double_bracket
+ldKeyAccess: "double_bracket"
+ldFieldAccess: dollar
+
+# Serialize/deserialize
+ldSerializeFn: ".__morloc$morloc_put_value"
+ldTableImportFn: ".__morloc$mlc_table_import"
+ldDeserializeFn: ".__morloc$morloc_get_value"
+ldReleasePacketFn: ".__morloc$morloc_release_packet_shm"
+ldIntrinsicPrefix: ".__morloc$morloc_"
+ldHelperVarPrefix: ".morloc_"
+
+# Foreign call
+ldForeignCallFn: ".__morloc$morloc_foreign_call"
+ldForeignCallIntSuffix: "L"
+ldIntLiteralSuffix: "L"
+ldIntLiteralSuffixLimit: 2147483647
+ldIntLiteralPlainTypes: ["numeric"]
+ldIntLiteralWide:
+  bit64: 'bit64::as.integer64("{{n}}")'
+
+# Remote call
+ldRemoteCallFn: ".__morloc$morloc_remote_call"
+
+# Record handling
+ldDictStyleRecords: false
+ldEnumLitByName: true
+
+# Arguments are promises, forced when the callee first reads them
+ldLazyArgs: true
+
+# FORK-17: the call of user code with the fork check around it
+ldForkCheck: '.__mlc_checked($CALL)'
+
+# Import syntax
+ldQualifiedImports: false
+
+# Template fields
+# A sourced symbol is an R identifier or operator, emitted verbatim.
+ldNamePattern: "[A-Za-z._][A-Za-z0-9._]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
+ldAssignOp: "<-"
+ldLambdaTemplate: "function({{args}}) { {{body}} }"
+ldDoBlockExpr: "(function() {{expr}})"
+ldDoBlockBlock: "(function(){\n{{body}}\n})"
+ldPassTemplate: "structure({{fn}}, morloc_mid = {{mid}}L, morloc_captured = list())"
+ldPartialTemplate: "local({ {{bind_context}}mlc_clo <- function({{bound_args}}) { {{fn}}({{all_args}}) }; attr(mlc_clo, \"morloc_mid\") <- {{mid}}L; attr(mlc_clo, \"morloc_captured\") <- {{captured_list}}; mlc_clo })"
+ldImportTemplate: ".morloc.source(\"{{path}}\")"
+ldSocketPathTemplate: "paste0(.__morloc$global_state$tmpdir, \"/\", {{socket}})"
+ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
+ldReturnTemplate: "return({{expr}})"
+ldReservedPrefixes: [".__mm_", ".__morloc", ".morloc_"]
+ldReservedNames: [".morloc.source", ".morloc.pooldir", ".morloc.libdir", ".morloc.poolfile"]
+ldManifoldPrefix: ".__mm_"
+ldPoolQualifier: ".__morloc$"
+ldFuncDefHeader: "{{name}} <- function({{args}})"
+ldBlockStyle: braces
+ldFrameLabelStmt: "attr({{fname}}, \"morloc_frame\") <- \"{{label}}\""
+ldPatternStyle: concat_call
+ldConcatFn: "paste0"
+ldQuoteTerminator: '"'
+ldQuoteTerminatorEsc: '\"'
+ldAtomicTypes: ["integer", "numeric", "double", "logical", "character"]
+ldAtomicListFn: "c"
+ldGenericListFn: "list"
+ldStrLiteralMap:
+  character: ""
+ldMapStyle: apply_callback
+ldDispatchLocalHeader: ".dispatch <- list()"
+ldDispatchLocalEntry: ".dispatch[[{{mid}}L]] <- mlc_manifold({{mid}}L)"
+ldDispatchLocalFooter: ""
+ldDispatchRemoteHeader: ".remote_dispatch <- list()"
+ldDispatchRemoteEntry: ".remote_dispatch[[{{mid}}L]] <- get(\"{{name}}_remote\", envir = globalenv(), inherits = FALSE)"
+ldDispatchRemoteFooter: ""
+ldClosureRegisterEntry: ".dispatch[[{{mid}}L]] <- mlc_make_closure_dispatch({{mid}}L, {{args}}, {{res}})"
+ldClosureTableHeader: ""
+ldClosureTableEntry: "mlc_closure_table[[\"{{mid}}\"]] <- list({{caps}}, {{bnds}})"
+ldWireConverterScope: "environment({{name}}) <- globalenv()"
+ldLogWrap: ".__morloc$.mlc_wrap_log"
+
+# Pool template (loaded from pool.R, left empty here)
+ldPoolTemplate: ""
+ldBreakMarker: "# <<<BREAK>>>"
+ldCommentMarker: "#"
+ldContinueStmt: "next"

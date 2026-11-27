@@ -14,7 +14,7 @@ suspension, not run (see `EFF`).
 
 ### EVAL-2 Pure work may be reordered; only effects are ordered
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-11-25
 
 The compiler chooses the order of pure work. It may move, parallelize or
 reorder it, including the arguments of one call, to make it faster or to

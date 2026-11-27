@@ -3,8 +3,8 @@
 Governed by model/language/interfaces.md (IFACE-6, IFACE-8, IFACE-12,
 IFACE-14, IFACE-15). Repro programs: web/morloc-studio/public/assets/
 home-examples/smiles (`structure` with `@mime`-typed `@render` actions) and
-test-suite/golden-tests/multi-output-stream (streaming commands). Paths are
-under data/rust/.
+test-suite/golden/interop/multi-output-stream (streaming commands). Paths are
+under runtime/.
 
 - **A call that streams its output is refused off the CLI.** Violates
   IFACE-6 and IFACE-8 (the output must reach the caller). It is refused

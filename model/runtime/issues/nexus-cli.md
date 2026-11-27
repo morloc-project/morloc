@@ -84,14 +84,12 @@
   `estimate_payload_size` bounds a value by its one block's size; a value
   spread over several blocks can exceed it, and a compressed stream then
   fails "frame index exceeds reserved space" (speculative).
-- **`-o` empties its target before anything can fail.** [reproduced
+- **`view -o` empties its target before anything can fail.** [reproduced
   2026-11-02, data loss] `view t.packet -f json -o t.packet` emptied the
-  input, and `./nexus -o in.pk --output-form packet @ echo in.pk` destroyed
-  in.pk; a failing run leaves an existing file empty, and a failed `view
-  -o` leaves an empty output file [reproduced, 0.109.0]. The redirect
-  truncates first: process.rs `redirect_stdout_to` (`File::create`, :885).
-  Fix: write a sibling temporary file and rename it on success; whether a
-  failed command must leave the target unchanged needs a ruling.
+  input, and a failed `view -o` leaves an empty output file [reproduced,
+  0.109.0]. view.rs:686 and :946 call process.rs
+  `redirect_stdout_in_place` (`File::create`, :911). A command's `-o` is
+  staged and renamed on success since 738a8b210 (SLOT-40).
 - **The view pattern checker accepts what the walker refuses.**
   [reproduced 2026-11-02] `.[i]` and `.[i:j]` on a Str pass pattern.rs and
   fail in the walker; one function (`infer_chain_schema`) should decide.

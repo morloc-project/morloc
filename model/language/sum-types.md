@@ -40,7 +40,7 @@ a compile error.
 
 ### SUM-5 Comparison follows declaration order, in every language
 Intent: proposed
-Code: deviates (issues/values.md)
+Code: conforms 2026-11-25
 
 `==` compares constructors, then fields. `<` orders constructors by their
 position in the declaration, then the fields of equal constructors in order.

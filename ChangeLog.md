@@ -1,3 +1,51 @@
+0.114.0 [2026-11-27]
+--------------------
+
+Breaking changes
+ * `MORLOC_RUST_DIR` is now `MORLOC_RUNTIME_DIR`
+ * Language binding markers record every input a binding is built from
+ * The deprecated `@literal` directive is removed
+ * Support for `morloc-dependencies` in project yaml files is dropped
+ * `morloc install` over HTTPS never prompts for a username or password
+ * A language description can no longer name an external pool printer
+
+New features
+ * `morloc init --check [--lang L]` reports each language binding's state
+   (ok, absent, stale, unavailable, outside-prefix) as JSON. It builds and
+   writes nothing and takes no lock, so it runs in a read-only image;
+   `lang-support` advertises it as `bindings_check: 1` (schema 1.1)
+
+Changed
+ * Init and `morloc make` check the installed runtime and bindings against
+   the compiler: init rebuilds what disagrees, and make refuses, naming the
+   binding, why it is stale and the command that repairs it
+ * Init refuses a runtime source whose crates are at another morloc version
+   or whose header differs from the compiler's, including a
+   `$MORLOC_HOME/runtime` link to one, and rebuilds a kept runtime whose
+   nexus reports another version; such a runtime used to install and then
+   refuse every program
+ * Init builds the runtime in a staging directory and installs it only once
+   it has built and passed its checks, so a failed build leaves the
+   existing install untouched
+ * The Rust binding (`rustmorloc`) is installed by the compiler at every
+   init, so generated Rust code always calls the binding of the compiler
+   that generated it
+ * The R binding refuses an R of another minor version, and the Python
+   binding names the repair when its module will not import
+ * A failed module fetch is reported as an install error naming the URL and
+   passing on git's message
+
+Fixes
+ * Importing a non-existing repository no longer hangs on git's password prompt
+ * A local install at `@branch:<name>` works for a branch other than the
+   one checked out ("pathspec did not match")
+ * An incremental init keeps the home's SLURM and sanitize settings instead
+   of turning both off
+ * A failed runtime build no longer leaves a home with a new header beside
+   the old libmorloc
+ * A launcher path occupied by a directory is refused before any pool is
+   compiled, instead of escaping as an uncaught exception after the build
+
 0.113.0 [2026-11-24]
 --------------------
 

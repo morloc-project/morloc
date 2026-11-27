@@ -73,12 +73,10 @@ module Morloc.Namespace.Prim
 import Data.Aeson (FromJSON (..))
 import Data.Char (isAlphaNum)
 import qualified Data.Aeson as Aeson
-import Data.Binary (Binary)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as DT
-import GHC.Generics (Generic)
 import Morloc.Data.Doc
 import Morloc.Internal
 import Morloc.Language (Lang (..))
@@ -211,9 +209,7 @@ newtype ClassName = ClassName {unClassName :: Text} deriving (Show, Eq, Ord)
 newtype CVar = CV {unCVar :: Text} deriving (Show, Eq, Ord)
 
 -- | Record field key
-newtype Key = Key {unKey :: Text} deriving (Show, Eq, Ord, Generic)
-
-instance Binary Key
+newtype Key = Key {unKey :: Text} deriving (Show, Eq, Ord)
 
 -- | Source label for grouping manifold configurations
 newtype Label = Label {unLabel :: Text} deriving (Show, Eq, Ord)

@@ -52,7 +52,7 @@ timing (from the 2026-11-12 audit of the output-path work).
   of large node elements that shows a gain.
 - **No registry class fits a C++ test hook compiled into every pool.**
   [read, 2026-11-22] STATE-1: `par_failure_probe` in
-  data/lang/cpp/cppmorloc.cpp is a plain (non-atomic) function pointer
+  binders/cpp/cppmorloc.cpp is a plain (non-atomic) function pointer
   that only test code (golden par-pool) sets, but it is compiled into
   every C++ pool. `test-only` requires the value to be compiled only into
   tests, and `counter` describes an atomic; the row says `counter` for

@@ -38,7 +38,7 @@ same name sees what was taken.
   reported nothing. C++ moves (OWN-2) are planned per segment.
 - **The C++ OWN-1 check runs only under `MORLOC_CHECK_OWNERSHIP`.**
   [read, 2026-10-21] Against compiler/README.md (fail loudly).
-  Pools/CAbi/Members/Cpp.hs:555 reads the variable; only
+  Pools/CAbi/Members/Cpp.hs:734 reads the variable; only
   GoldenMakefileTests.hs sets it, so a user build compiles a C++ pool that
   reads a moved-from value. Rust relies on rustc, whose error does not
   name OWN-1. Cost of enabling it by default is unmeasured.

@@ -16,6 +16,7 @@ never repairs the input or guesses.
 
 - `frontend/`: from source text to a typechecked program with general types.
 - `codegen/`: from implementations chosen per call to pools and a manifest.
+- `init/`: what `morloc init` installs in a home, and how a build judges it.
 
 ## Planned files
 
@@ -30,5 +31,6 @@ never repairs the input or guesses.
 | codegen/ownership.md | OWN | each read of a value is a borrow, a copy or a move |
 | codegen/emit.md | EMIT | generated pools and the manifest |
 | codegen/nominal.md | NOM | declared types identified by key |
+| init/bindings.md | SHIM | installed language bindings and when they are current |
 
 Only `frontend/typecheck.md`, `codegen/effect-boundaries.md`, `codegen/ownership.md`, `codegen/emit.md` and `codegen/nominal.md` are started.

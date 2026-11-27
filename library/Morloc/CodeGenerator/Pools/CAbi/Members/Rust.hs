@@ -112,13 +112,14 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import qualified Morloc.CodeGenerator.Platform as P
 import qualified Morloc.CodeGenerator.SystemConfig as SC
+import Morloc.RustBinding (rustBindingDir)
 import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
 import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses, depNamespaces, nameRoot)
 
--- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
+-- | Duplicated here (as in Cpp.hs) to match binders/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
 -- so pool naming (@pool.rs@) and the registry's Lang agree.
 rustLang :: ML.Lang
@@ -1836,9 +1837,9 @@ translate srcs es = do
       poolSrc = unmarkedSrc <> "\n" <> rustUserCalls userCalls <> "\n"
       crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
       (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home envPrefix profile
-  -- The pool starts from the environment's lock: the lock persisted with the
-  -- Rust workspace (so every crate shared with rustmorloc resolves to the
-  -- version rustmorloc was built against) extended by the crates earlier
+  -- The pool starts from the environment's lock: the installed Rust
+  -- binding's lock (SHIM-6, so every crate rustmorloc uses resolves to the
+  -- version it pins) extended by the crates earlier
   -- pools resolved. Cargo prunes the entries the pool does not use and never
   -- re-resolves what the lock pins, so the shared target-dir holds one build
   -- of each dependency rather than one per registry-index snapshot, and the
@@ -1874,9 +1875,8 @@ translate srcs es = do
 -- | The two locks a pool build reads and the one it writes back to.
 data RustLocks = RustLocks
   { rlBase :: FilePath
-  -- ^ the workspace lock persisted by @morloc init@ beside the rustmorloc
-  -- source the pool path-depends on; immutable runtime, the authority for
-  -- every crate rustmorloc pulls in
+  -- ^ the lock of the rustmorloc copy the pool path-depends on (SHIM-6),
+  -- the authority for every crate rustmorloc pulls in
   , rlEnv :: FilePath
   -- ^ the environment lock under the mutable state root: the base extended
   -- by every crate a pool built here has resolved; absent until first needed
@@ -1888,7 +1888,7 @@ rustLockPaths = do
   state <- MM.asks configState
   return
     RustLocks
-      { rlBase = home </> "rust" </> "Cargo.lock"
+      { rlBase = rustBindingDir home </> "Cargo.lock"
       , rlEnv = state </> "cache" </> "rust-env.v2.lock"
       }
 
@@ -1899,8 +1899,8 @@ readRustLock lockPath = do
     then liftIO (MT.readFile lockPath)
     else
       MM.throwFailed $
-        "missing Rust workspace lock at " <> squotes (pretty lockPath)
-          <> "; run `morloc init -f` to persist the Rust runtime source"
+        "missing the Rust binding's lock at " <> squotes (pretty lockPath)
+          <> "; run `morloc init`, which installs the Rust binding (rustmorloc)"
 
 readLockIfPresent :: FilePath -> MorlocMonad Text
 readLockIfPresent lockPath = do
@@ -3719,8 +3719,8 @@ resolveRustProfile lp = do
                   <> T.intercalate ", " (map fst table)
 
 -- | Render the generated pool crate's @Cargo.toml@ and @build.rs@. rustmorloc
--- is a path dependency on the source persisted at @$MORLOC_HOME/rust@ (by
--- @morloc init@); external crates come from the DAG-wide rust-deps union.
+-- is a path dependency on the copy @morloc init@ installs for this compiler
+-- (SHIM-6); external crates come from the DAG-wide rust-deps union.
 -- @build.rs@ carries the libmorloc.so link (link-search under
 -- @$MORLOC_HOME/lib@; libmorloc is found at run time via the nexus-exported
 -- LD_LIBRARY_PATH). The release profile must set @panic = "unwind"@ to match
@@ -3729,7 +3729,7 @@ resolveRustProfile lp = do
 -- never collides one program's pool binary with another's.
 makeCargoDocs :: Text -> Map.Map Text Text -> Map.Map Text FilePath -> FilePath -> Maybe FilePath -> RustProfile -> (MDoc, MDoc)
 makeCargoDocs crateName deps localCrates home envPrefix profile =
-  let rustmorlocPath = home </> "rust" </> "rustmorloc"
+  let rustmorlocPath = rustBindingDir home
       libDir = home </> "lib"
       nameLit = dquotes (pretty crateName)
       -- A local crate (path dep) overrides any registry version line of the same
@@ -3759,10 +3759,9 @@ makeCargoDocs crateName deps localCrates home envPrefix profile =
           , vsep localLines
           , ""
           , "[profile.release]"
-          -- The defaults match the data/rust workspace profile so the
-          -- rustmorloc built by `morloc init`'s warm-up is reused here rather
-          -- than recompiled under a differing fingerprint; a non-default lto
-          -- or opt-level builds (and caches) its own set of dependencies.
+          -- The defaults are what `morloc init` warms the cache with; a
+          -- non-default lto or opt-level builds (and caches) its own set of
+          -- dependencies.
           , "opt-level = " <> pretty (rpOptLevel profile)
           , "lto = " <> pretty (rpLto profile)
           , [idoc|panic = "unwind"|]

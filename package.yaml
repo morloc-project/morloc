@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.113.0
+version:          0.114.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -23,36 +23,40 @@ extra-source-files:
   - README.md
   - ChangeLog.md
   # libraries
-  - data/lang/cpp/pool.cpp
+  - binders/cpp/pool.cpp
   # universal c header
-  - data/morloc/morloc.h
+  - runtime/include/morloc.h
   # shared language config
-  - data/lang/languages.yaml
+  - binders/languages.yaml
   # dependency/requirements config (core toolchain + per-language)
-  - data/lang/requirements.yaml
-  - data/lang/py/requirements.yaml
-  - data/lang/r/requirements.yaml
-  - data/lang/cpp/requirements.yaml
-  - data/lang/rust/requirements.yaml
+  - binders/requirements.yaml
+  - binders/py/requirements.yaml
+  - binders/r/requirements.yaml
+  - binders/cpp/requirements.yaml
+  - binders/rust/requirements.yaml
   # per-language files
-  - data/lang/c/lang.yaml
-  - data/lang/cpp/lang.yaml
-  - data/lang/cpp/cppmorloc.hpp
-  - data/lang/cpp/mlc_rec.hpp
-  - data/lang/cpp/cppmorloc.cpp
-  - data/lang/cpp/morloc_pch.hpp
-  - data/lang/cpp/pool.cpp
-  - data/lang/cpp/init.sh
-  - data/lang/py/lang.yaml
-  - data/lang/py/pymorloc.c
-  - data/lang/py/setup.py
-  - data/lang/py/Makefile
-  - data/lang/py/pool.py
-  - data/lang/py/init.sh
-  - data/lang/r/lang.yaml
-  - data/lang/r/rmorloc.c
-  - data/lang/r/pool.R
-  - data/lang/r/init.sh
+  - binders/c/lang.yaml
+  - binders/cpp/lang.yaml
+  - binders/cpp/cppmorloc.hpp
+  - binders/cpp/mlc_rec.hpp
+  - binders/cpp/cppmorloc.cpp
+  - binders/cpp/morloc_pch.hpp
+  - binders/cpp/pool.cpp
+  - binders/cpp/init.sh
+  - binders/py/lang.yaml
+  - binders/py/pymorloc.c
+  - binders/py/setup.py
+  - binders/py/Makefile
+  - binders/py/pool.py
+  - binders/py/init.sh
+  - binders/r/lang.yaml
+  - binders/r/rmorloc.c
+  - binders/r/pool.R
+  - binders/r/init.sh
+  - binders/rust/rustmorloc/Cargo.toml
+  - binders/rust/rustmorloc/Cargo.lock
+  - binders/rust/rustmorloc/build.rs
+  - binders/rust/rustmorloc/src/*.rs
 
 default-extensions:
   - TypeOperators
@@ -60,7 +64,6 @@ default-extensions:
 dependencies:
   - base
   - aeson
-  - binary
   - array
   - bytestring
   - containers
@@ -132,25 +135,13 @@ executables:
       - temporary
       - text
 
-  morloc-codegen-generic:
-    main:          Main.hs
-    source-dirs:   exe/morloc-codegen-generic
-    ghc-options:
-      - -Wall
-      - -O2
-    dependencies:
-      - morloc
-      - base
-      - aeson
-      - binary
-      - bytestring
-      - text
-      - yaml
-
 tests:
   morloc-test:
     main:          Main.hs
-    source-dirs:   test-suite
+    source-dirs:
+      - test-suite
+      - test-suite/harness
+      - test-suite/unit
     ghc-options:
       - -threaded
       - -rtsopts
@@ -184,19 +175,3 @@ tests:
       - text
       - time
       - unix
-
-benchmarks:
-  morloc-bench:
-    main:          Bench.hs
-    source-dirs:   bench
-    ghc-options:
-      - -threaded
-      - -rtsopts
-      - -with-rtsopts=-N
-      - -O2
-    dependencies:
-      - morloc
-      - base
-      - tasty-bench
-      - text
-      - filepath

@@ -40,7 +40,7 @@ values, so a borrowing result does not build (EVAL-7).
 
 ### RUST-3 A mapped Rust type may be read from several threads at once
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-11-25
 
 A mapped type is `Sync` in practice, not only in its declaration: reading
 it through `&T` is safe while other threads do the same with the same value

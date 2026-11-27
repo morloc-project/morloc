@@ -21,14 +21,14 @@
   ALIAS-13 first narrows the choice.
 - **A record literal's fields are checked at the record's full
   unfolding.** [read] Violates ALIAS-10. `checkE (NamS rs)`
-  (Frontend/Typecheck.hs:2621) checks each field against
+  (Frontend/Typecheck.hs:2634) checks each field against
   `TE.evaluateType` of the whole record type and returns that unfolding, so
   `?(Inner Str)` in a field is spelled as the expanded record. The TupS case
   beside it reduces one step and returns the written type. Reachable
   effect: printed types and CLI metadata of record values; codegen accepts
   either spelling (null-record-payload).
 - ALIAS-14 is open, and the unit test "mutually recursive aliases are
-  rejected" (`type A = [B]; type B = [A]`, test-suite/UnitTypeTests.hs)
+  rejected" (`type A = [B]; type B = [A]`, test-suite/unit/Types/SumTypes.hs)
   asserts one answer. If the ruling makes such recursion legal under
   ALIAS-7, the test becomes an accept test.
 - [read] Several parallel unfolding mechanisms (TEQ-1). A newtype with no

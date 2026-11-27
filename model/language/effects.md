@@ -101,7 +101,7 @@ signature. Declaring effects the body does not run is legal.
 
 ### EFF-11 Effects originate only in source signatures
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/effects.md)
 
 A sourced function's declared row is an unchecked claim by its author.
 Every other row is inferred from composition.

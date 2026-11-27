@@ -21,33 +21,43 @@ correctness, test-first, comments, ASCII-only). Repo-specific rules follow.
 
 ## Checking code
 
+Every test, check and benchmark runs through one entry point,
+`test-suite/run` (`test-suite/run list` shows every suite, its cost and what
+it needs). See `test-suite/CLAUDE.md`.
+
 After making a substantial change to the Haskell code, run:
 
-$ stack install --no-run-tests 
-$ stack test morloc:morloc-test  # This is the usual test
+$ test-suite/run setup           # stack install + morloc init -f from this tree
+$ test-suite/run unit            # unit tests: the usual check
+$ test-suite/run golden/<group>  # the goldens near the change
 
-To run the full heavy integrated test suite, run:
+To run the full golden suite (EXPENSIVE; only at the very end of a session):
 
-$ stack test # ONLY do this at the very end of a session; IT IS EXPENSIVE
+$ test-suite/run haskell -j 6
 
-If you make any change to the non-haskell code in data/, then you MUST run
+If you make any change to the non-haskell code in binders/ or runtime/, then you MUST run
 
-$ MORLOC_RUST_DIR=$PWD/data/rust morloc init -f
+$ MORLOC_RUNTIME_DIR=$PWD/runtime morloc init -f   # what `test-suite/run setup` does
 
 from the repo root. This rebuilds shared libraries, the nexus executable, and
-language bindings. `MORLOC_RUST_DIR` is required: a bare `morloc init -f`
+language bindings. `MORLOC_RUNTIME_DIR` is required: a bare `morloc init -f`
 rebuilds from the installed copy of the runtime sources, not your working tree,
 so your edit is silently absent from the library under test and the change
 appears to have no effect.
 
-After changing anything under `data/rust/`, run:
+The Rust language binding (`binders/rust/rustmorloc`) is embedded in the
+compiler like the other bindings, so an edit to it needs `test-suite/run
+setup` (stack install, then init) before it reaches a Rust pool.
 
-$ cargo test --workspace --manifest-path data/rust/Cargo.toml
+After changing anything under `runtime/` or the Rust binding, run:
 
-- Stack test runs unit tests and golden-tests
-- Golden-tests are full morloc programs
-  - Each golden test is in the path @test-suite/golden-tests/<testname>
-  - Every directory there is discovered and run; nothing needs registering
+$ test-suite/run rust            # cargo test over runtime and the Rust binding
+
+- `test-suite/run haskell` runs unit tests and golden tests
+- Golden tests are full morloc programs
+  - Each golden test is in the path @test-suite/golden/<group>/<testname>
+    (spec tests in @test-suite/golden/spec/<prefix>/); names are unique
+  - Every test directory there is discovered and run; nothing needs registering
   - These tests produce build errors in `build.err` and runtime errors in
     `obs.err`. These outputs are VITAL to debugging errors.
 
@@ -62,8 +72,8 @@ format in `model/README.md`: `model/language/` (what programs mean),
 `model/compiler/` (internal contracts) and `model/runtime/` (below).
 `bash model/check.sh` checks the items and their test citations. A spec
 test is named for its item (`spec-alias-3-1`): a case in
-`test-suite/SpecTests.hs` (or another test-suite module, for a compiler
-item), or a golden `test-suite/golden-tests/spec-*/`.
+`test-suite/unit/Spec/<Chapter>.hs` (or another `test-suite/unit/` module,
+for a compiler item), or a golden `test-suite/golden/spec/<prefix>/spec-*/`.
 Before changing behavior a spec item governs, read the item; a `ruled`
 item outranks the code.
 
@@ -140,7 +150,7 @@ merit an entry, skip it and say so in the summary.
 
 ## Testing Conventions
 - tests should be written for all new features
-- tests may be unit tests or integrated golden-tests
+- tests may be unit tests or integrated golden tests
 - test strategies, and justification for why they cover the new feature, should be provided
 
 ## Development Commands
@@ -152,8 +162,8 @@ morloc typecheck script.loc
 # Dump intermediate representations
 morloc dump script.loc
 
-# Run specific tests
-stack test --test-arguments=--pattern=native-morloc
+# Run specific tests (any tasty pattern; quotes and $ are passed intact)
+test-suite/run -p native-morloc haskell
 ```
 
 ## Code Style

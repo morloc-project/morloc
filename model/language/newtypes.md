@@ -4,7 +4,7 @@
 
 ### NEWT-1 A newtype is distinct from its representation
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 `newtype N = T` makes `N` a new type that crosses language boundaries in
 the form of `T`. `N == T` never holds, and a value moves between them only
@@ -38,7 +38,7 @@ program is rejected.
 
 ### NEWT-5 A declaration with no right-hand side is a primitive
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 `newtype X a` and `type X a` both declare an opaque nominal type with no
 morloc representation. It is either a built-in wire primitive, which the
@@ -48,7 +48,7 @@ value of it cannot cross between languages.
 
 ### NEWT-6 Representation chains do not cycle
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 `newtype A = B` with `newtype B = A`, or any longer cycle, is a declaration
 error.

@@ -16,21 +16,21 @@ import Morloc.Test.Common
 -- The MCP server (`morloc-nexus mcp <target>`) exposes a compiled
 -- program's exported functions as MCP tools over stdio JSON-RPC. These
 -- tests drive it through the suite's stdio JSON-RPC client
--- (test-suite/mcp-tests/mcp_client.py) -- the same client the standalone
+-- (test-suite/integration/suites/mcp/mcp_client.py) -- the same client the standalone
 -- ./run-tests.sh uses -- so the tricky session/handshake logic has one
 -- implementation. The focus is on how docstring / type features map to
 -- the tool surface (tools/list) and how MCP named arguments invert to the
 -- positional call (tools/call). The comprehensive matrix lives in
--- test-suite/mcp-tests/README.md; this is a representative subset that
+-- test-suite/integration/suites/mcp/README.md; this is a representative subset that
 -- runs under `stack test`.
 -- ======================================================================
 
--- | Compile an mcp-tests .loc program into a fresh temp dir (copying every
+-- | Compile an mcp suite .loc program into a fresh temp dir (copying every
 -- .py, including the client). Returns the work dir; the compiled wrapper is
 -- at <workDir>/nexus and the client at <workDir>/mcp_client.py.
 compileMcpProgram :: TestEnv -> String -> IO FilePath
 compileMcpProgram env locFile = do
-  let srcDir = teSuiteDir env </> "mcp-tests"
+  let srcDir = teSuiteDir env </> "integration" </> "suites" </> "mcp"
   tmpBase <- getCanonicalTemporaryDirectory
   tmpDir <- createTempDirectory tmpBase "morloc-mcp"
   copyFile (srcDir </> locFile) (tmpDir </> locFile)

@@ -19,7 +19,7 @@
 - [read, 2026-11-15] Dead code: the `IAccess` printers are never reached,
   nothing builds an `IAccess` (Grammars/Translator/Generic.hs:1254-1259,
   CppPrinter.hs:86-88, RustPrinter.hs:99-101). The comment at
-  data/lang/py/pymorloc.c:2191-2196 cites a code-generator note that does
+  binders/py/pymorloc.c:2191-2196 cites a code-generator note that does
   not exist and calls the variant pair form interim.
 - [read] morloc-runtime/src/ipc.rs is dead code: `send_and_receive` (:25)
   and `read_packet` are public and uncalled (callers use ipc_ffi.rs), and
@@ -34,36 +34,40 @@
   packet.rs:191, :207); kind 0x02 XXHASH is defined and unused. c_abi_layout.rs
   `expression_structs_match_the_header` (:525) checks neither struct, and
   `expression_union_is_wide_enough` (:672) compares only size and
-  alignment, so missing union members pass. Neither side tests that
-  BaseTypes.hs `mlcKind*` (:195-196) equals morloc.h `MLC_KIND_*`. Fix:
-  mirror the structs and kinds, and check members and kinds in tests.
-- **ABI version never gated.** [read] Spec gap: no item covers the ABI
-  version. library/Morloc/Abi.hs:18-22 says provisioning compares
-  `morloc_abi_version()` and `morloc-nexus --abi-version` against
-  `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
-  printed (executable/Subcommands.hs:795) and unit-tested
-  (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
-  calls the gate deferred and relies on one release tag. A runtime built
-  from another release's source loads silently. [reproduced] A program
-  built before `morloc init` installs a newer runtime keeps its generated
-  pool code against the new libraries: after 7205b50c an older R pool fails
-  every call with `could not find function ".mlc_entry"`, which the new
-  librmorloc dispatch calls. LIFE-6 covers only skew within a run (nexus,
-  libmorloc, pymorloc, rmorloc); a built program against a newer runtime is
-  left to the ABI version, which nothing gates.
+  alignment, so missing union members pass. Fix: mirror the structs and
+  kinds, and check members and kinds in tests.
 - **Init still has windows a concurrent build can see.** [read
   2026-11-22] Gap beside LIFE-6. `morloc init -f` removes the init-owned
   lib and include files (SystemConfig.hs, the force clean) before the
   language init scripts write them again, so a `morloc make` or a Python
   or R pool started meanwhile finds them missing (a clean failure, not a
-  crash). morloc.h is written in place (`TIO.writeFile`), so a compile
-  during init can read it partly written. Each header is renamed into
-  place, but a C++ build during init can still take some headers old and
-  some new; LIFE-6 checks neither the archive nor the headers.
-- **Crate versions claim a lockstep they lack.** [read]
-  morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
-  locked with morloc-runtime" (0.112.0); scripts/bump-version.sh:36 bumps
-  only nexus, manifest and runtime.
+  crash). Each header is renamed into place, but a C++ build during init
+  can still take some headers old and some new; LIFE-6 checks neither the
+  archive nor the headers. `morloc make` checks the header and binding
+  markers (installedRuntimeMismatches) without the init lock, so during
+  `init -f`, which clears the markers before the shims rebuild, a build
+  can find a language unconfigured and compile against bindings being
+  replaced.
+- **Within one morloc version, a built program runs on a newer runtime
+  unchecked.** [reproduced] ART-5 compares version strings, which do not
+  change between development commits, and the build id is per run. A
+  program built before `morloc init` installs a newer runtime keeps its
+  generated pool code against the new libraries: after 7205b50c an older R
+  pool fails every call with `could not find function ".mlc_entry"`, which
+  the new librmorloc dispatch calls.
+- **The compiler cannot tell an uninitialized runtime source edit.** [read
+  2026-11-26] The compiler embeds only morloc.h from runtime. After an
+  edit to the runtime source without `morloc init -f` (with MORLOC_RUNTIME_DIR
+  at the edited tree), `morloc make` passes and Rust and C++ pools build
+  against the previous runtime and its persisted copy. The same holds the
+  other way since the compiler carries the Rust binding (SHIM-6): an init
+  that reuses a persisted runtime source older than the compiler's tree
+  pairs this compiler's rustmorloc with that source's morloc-runtime-types,
+  which fails at the pool's compile when they disagree. Releases are not
+  affected: the compiler and the runtime source come from one tag, and
+  provisioning always re-runs init. A fix pins the compiler to the runtime
+  source it was built from (a build id embedded at compile time), which
+  would make every runtime edit need `stack install`; needs a ruling.
 - **Rust crates are resolved per pool, outside the environment's solve.**
   [read] Rust pools resolve rust-deps one pool at a time against an
   environment lock the compiler maintains (Build/CargoLock.hs), while
@@ -149,7 +153,7 @@
   The crate's own lint denials (json.rs casts) go unchecked while this
   stops the run. About 60 safe `pub fn`s in morloc-runtime take raw
   pointers (heuristic).
-- [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
+- [reproduced] `morloc init -f` exits 0 when binders/cpp/cppmorloc.cpp
   fails to compile, leaving the previous libcppmorloc.a installed. Strict
   conda mode now aborts; outside it the shim build is an `optionalStep`
   that only warns (SystemConfig.hs:320).
@@ -236,3 +240,44 @@
   2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
   `bracket`. A SIGKILL (the MCP eval wall-clock kill, memguard) skips a
   bracket; unconfirmed.
+- **Inits of two homes sharing one state relink each other's nexus.**
+  [read 2026-11-26] Gap beside LIFE-6. The cargo target dir
+  (Config.rustBuildDir) belongs to the state, but the nexus build script
+  reads MORLOC_HOME (morloc-nexus/build.rs, rerun-if-env-changed), which
+  install.sh sets per home. Inits of two homes on one state therefore
+  relink target/release/morloc-nexus for each other, and install.sh copies
+  it after cargo has released the target lock, while the init lock
+  (withInitLock) is per home. The same holds for
+  target/release/libmorloc_runtime.a when the two homes build different
+  sources: one init's link reads the archive the other just rebuilt. A
+  truncated nexus or archive fails closed (the exec or the link fails). The
+  unsound case: home A ends with B's libmorloc and nexus, which agree, so
+  LIFE-6 passes, beside A's own header, and A's pools compile against A's
+  header and load B's library, and nothing catches it. Fix options: a runtime target dir per home (one runtime
+  compile per home, no cross-home reuse; needs a ruling), or a lock on the
+  shared target held across build and copy (model first).
+- **The persisted runtime source keeps its original mtimes.** [read
+  2026-11-26] Init copies the source with a tar pipe (SystemConfig.hs
+  copyTree), which preserves mtimes, and cargo decides a path dependency's
+  freshness by mtime. A persisted morloc-runtime-types whose files are older
+  than the artifacts in the shared rust-build cache (for example a source
+  unpacked with its archive mtimes, or one switched back to an older tree)
+  can leave a Rust pool linking a stale runtime-types build, since the crate
+  version does not change within a development cycle.
+- **A language init skips is a warning even in strict mode.** [read
+  2026-11-26] SystemConfig.hs's language loop warns and continues when a
+  language's tools are not in the conda prefix, so an init asked to build
+  that language exits 0 without it; a caller that re-runs init until the
+  binding exists loops.
+- **R's init breaks when R_HOME is set.** [reproduced 2026-11-26] R's
+  front-end script prints `WARNING: ignoring environment value of R_HOME`
+  to stdout when `$R_HOME` is set to another home, before handling its
+  arguments (`R_HOME=/x R RHOME` prints the warning, then the home).
+  binders/r/init.sh's `R_HOME=$(R RHOME)` then captures two lines and
+  links against `-L"<warning>\n<home>/lib"`.
+- **Old copies of the Rust binding are never removed.** [read 2026-11-26]
+  Init writes `$MORLOC_HOME/lang/rust/rustmorloc-<hash>` for its compiler
+  (SHIM-6) and leaves other compilers' copies, since nothing tells whether a
+  build of another compiler still reads one. Each rustmorloc edit in
+  development leaves another copy (about 300 KB) behind.
+

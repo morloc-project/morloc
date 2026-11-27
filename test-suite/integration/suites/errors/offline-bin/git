@@ -1,0 +1,21 @@
+#!/bin/sh
+# git without network. A clone of a remote URL is answered as GitHub answers
+# one for a repository that does not exist: git asks for a username, unless
+# GIT_TERMINAL_PROMPT=0 forbids it. Every other use runs the real git.
+case "$1" in
+    clone)
+        for a in "$@"; do
+            case "$a" in
+                https://*|http://*|git@*|ssh://*)
+                    if [ "${GIT_TERMINAL_PROMPT:-1}" = 0 ]; then
+                        echo "fatal: could not read Username for 'https://github.com': terminal prompts disabled" >&2
+                    else
+                        echo "Username for 'https://github.com':" >&2
+                    fi
+                    exit 128 ;;
+            esac
+        done ;;
+esac
+self=$(cd "$(dirname "$0")" && pwd)
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -x -F "$self" | paste -s -d ':' -)
+exec git "$@"

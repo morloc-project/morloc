@@ -55,26 +55,16 @@
 The items below moved from mim's issue list (morloc-manager
 model/issues/LIST.md), checked against the code 2026-11-04 [read].
 
-- **`morloc install owner/name` may parse as core module `owner`.**
-  `moduleInstallParser` (library/Morloc/Module.hs:1354) has no `eof`;
-  with no source prefix `parseModname Nothing` (:1402) parses a core
-  module and drops `/name`, on the classic path (:822) and in
-  `extractModuleName` (:765). Registry installs try
-  `tryParseRegistryModule` first (:816). Unreproduced.
 - **The default config file is never read.** `--config` defaults to ""
-  (executable/UI.hs:551), which Subcommands.hs:131 turns into
-  `loadMorlocConfig Nothing`, loading no file (Config.hs:118-121). So
-  `registry`, `lang_overrides` and `plane` are unreachable without
-  `--config`. The default is named `$MORLOC_HOME/config` (Config.hs:49).
-  See the manual item in spec-and-docs.md.
-- **`installed_hash` records the requested pin.** Module.hs:1111-1113 takes
+  (executable/UI.hs:611), which Subcommands.hs:137 turns into
+  `loadMorlocConfig Nothing`, loading no file (Config.hs:115-120). So
+  `lang_overrides` is unreachable without `--config`. The default is
+  named `$MORLOC_HOME/config` (Config.hs:49).
+- **`installed_hash` records the requested pin.** Module.hs:1635-1637 takes
   the snapshot, else the pin, else Nothing; the fetched HEAD is never read.
-- **Registry installs and `install --build` disagree on the path.** Install
-  writes `plane/<owner>/<name>` (Module.hs:818); `--build` looks in
-  `plane/<name>` (Subcommands.hs:232).
 - **envspec `modules` is first-wins, the resolver closer-wins.**
-  `dedupFst` in EnvSpec.hs:200 (defined :265) versus `addPin`
-  (Module.hs:128).
+  `dedupFst` in EnvSpec.hs:196 (defined :261) versus `addPin`
+  (Module.hs:393).
 - **An empty `MORLOC_HOME`/`MORLOC_STATE` is unset to Haskell, set to the
   nexus.** Config.hs:86, :147, :256 treat empty as unset; morloc-nexus
   main.rs:39 and :51 do not (main.rs:413 does for `MORLOC_STATE`).
@@ -113,14 +103,14 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   interface-install.asc:214.
 
 - **The Python binding build discards the environment's CFLAGS.**
-  [read, 2026-11-19] data/lang/py/init.sh exports
+  [read, 2026-11-19] binders/py/init.sh exports
   `CFLAGS="$SANITIZE_FLAGS"`, empty unless sanitizing, so the activation's
   CFLAGS (`-isystem $CONDA_PREFIX/include`, ...) never reach setuptools.
   Impact unknown: setup.py names its include dirs itself.
 
 - **The python version window is never checked against the binding.**
   [reproduced, 2026-11-19] Gap: no spec item says how the runtime window in
-  data/lang/py/requirements.yaml is verified. LangSupportTests asserts only
+  binders/py/requirements.yaml is verified. LangSupportTests asserts only
   the ceiling string; nothing builds pymorloc.c at the window's ends. The
   window was wrong when written: `<3.14` admitted 3.13, which also failed
   (`_PyLong_AsByteArray` gained an argument in 3.13; compile 627b58b74's

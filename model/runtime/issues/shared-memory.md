@@ -3,7 +3,7 @@
 Changes here touch locks and ownership: model first.
 
 - **C++ trackers on helper threads never flush.** [read] Per-thread
-  trackers in the C++ pool (data/lang/cpp/pool.cpp, `thread_local`
+  trackers in the C++ pool (binders/cpp/pool.cpp, `thread_local`
   ShmTracker) are flushed at dispatch end or thread exit; a persistent
   thread that is not a dispatch worker (OpenMP, TBB, a user pool) never
   flushes, so a long-lived daemon leaks the blocks it allocates there.
@@ -165,7 +165,7 @@ Changes here touch locks and ownership: model first.
 - **A borrowed packet release still returns the packet's SHM block.**
   [read, 2026-11-23] The borrowed form keeps a packet's malloc'd bytes for
   a closure that captured the packet, but still gives back the shared
-  memory block it points into (data/lang/cpp/pool.cpp:266-271, rustmorloc
+  memory block it points into (binders/cpp/pool.cpp:266-271, rustmorloc
   lib.rs:926-931), so the closure would read a freed block. STATE-3 gives
   such a packet the enclosing call's lifetime: keep the bytes and the
   tracker entry until the dispatch-end flush. Reachable only when a closure

@@ -14,14 +14,14 @@ equality is coinductive: a pair met again while it is being compared holds. A ty
 
 ### TEQ-2 Sugar names the type it abbreviates
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 `[a] == List a`, `() == Unit`, and `(a1, ..., an) == TupleN a1 ... an`
 for n >= 2.
 
 ### TEQ-3 A newtype is equal only to itself
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 `newtype N = T` gives `N == N` and never `N == T` (NEWT-1).
 

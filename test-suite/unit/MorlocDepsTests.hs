@@ -1,0 +1,441 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+-- |
+-- Module      : MorlocDepsTests
+-- Description : Unit tests for the morloc-deps package.yaml field
+--               and the closer-to-install-root-wins resolver.
+module MorlocDepsTests
+  ( morlocDepsTests
+  ) where
+
+import Control.Exception (SomeException, try)
+import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
+import qualified Data.Yaml as Yaml
+import qualified Morloc.Monad as MM
+import qualified System.Directory as SD
+import System.FilePath ((</>))
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit
+
+import Morloc.Module
+  ( OverwriteProtocol (..)
+  , PinEntry (..)
+  , addPin
+  , caseClash
+  , hashEq
+  , loadModuleMetadata
+  , loadSnapshot
+  , parseSnapshotLine
+  , reconcileOverwrite
+  )
+import Morloc.Namespace.Prim (Defaultable (..))
+import Morloc.Namespace.State
+  ( Config (..)
+  , MorlocError
+  , MorlocMonad
+  , PackageMeta (..)
+  , MorlocDep (..)
+  )
+
+-- | Run a MorlocMonad-returning action and extract the Either result.
+runMM :: MorlocMonad a -> IO (Either MorlocError a)
+runMM action = do
+  home <- SD.getHomeDirectory
+  let cfg =
+        Config
+          { configHome = home <> "/.local/share/morloc"
+          , configState = home <> "/.local/share/morloc"
+          , configLibrary = home <> "/.local/share/src/morloc"
+          , configTmpDir = home <> "/.morloc/tmp"
+          , configBuildConfig = home <> "/.morloc/.build-config.yaml"
+          , configLangOverrides = mempty
+          }
+  ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
+  return r
+
+-- | Decode a YAML payload as PackageMeta. Returns Either parse error / value.
+parsePackageYaml :: BS.ByteString -> Either Yaml.ParseException PackageMeta
+parsePackageYaml = Yaml.decodeEither'
+
+morlocDepsTests :: TestTree
+morlocDepsTests =
+  testGroup
+    "morloc-deps"
+    [ packageYamlParserTests
+    , resolverTests
+    , packageSetupParserTests
+    , moduleVersionGateTests
+    , snapshotLineTests
+    , loadSnapshotTests
+    , caseClashTests
+    ]
+
+-- | Installed modules whose names differ only in case would share one
+-- directory on a case-insensitive filesystem.
+caseClashTests :: TestTree
+caseClashTests =
+  testCase "a name differing from an installed one only in case clashes" $ do
+    tmp <- SD.getTemporaryDirectory
+    let lib = tmp </> "morloc-case-clash-test"
+    SD.createDirectoryIfMissing True (lib </> "foo")
+    SD.createDirectoryIfMissing True (lib </> "bar")
+    clash <- caseClash (lib </> "Foo")
+    none <- caseClash (lib </> "baz")
+    same <- caseClash (lib </> "foo")
+    SD.removeDirectoryRecursive lib
+    clash @?= Just "foo"
+    none @?= Nothing
+    same @?= Nothing
+
+-- ---------------------------------------------------------------------------
+-- loadSnapshot: directory merge, dotfile skipping, conflict detection
+-- ---------------------------------------------------------------------------
+
+-- | Run a MorlocMonad action with configState pointed at a test dir, so
+-- 'loadSnapshot' reads @<stateDir>/snapshots@.
+runMMSnapshot :: FilePath -> MorlocMonad a -> IO (Either MorlocError a)
+runMMSnapshot stateDir action = do
+  home <- SD.getHomeDirectory
+  let cfg =
+        Config
+          { configHome = home <> "/.local/share/morloc"
+          , configState = stateDir
+          , configLibrary = stateDir <> "/src/morloc"
+          , configTmpDir = home <> "/.morloc/tmp"
+          , configBuildConfig = home <> "/.morloc/.build-config.yaml"
+          , configLangOverrides = mempty
+          }
+  ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
+  return r
+
+loadSnapshotTests :: TestTree
+loadSnapshotTests =
+  testGroup
+    "loadSnapshot"
+    [ testCase "merges files and skips dot-files (temp/junk)" $ do
+        tmp <- SD.getTemporaryDirectory
+        let stateDir = tmp </> "morloc-snap-merge"
+            snapDir = stateDir </> "snapshots"
+        SD.createDirectoryIfMissing True snapDir
+        writeFile (snapDir </> "stdlib.txt") "# hdr\nroot abc\nmath def\n"
+        -- an interrupted mim deposit / editor artifact: MUST be ignored
+        writeFile (snapDir </> ".stdlib.txt.tmp") "root ZZZZ\n"
+        r <- runMMSnapshot stateDir loadSnapshot
+        SD.removeDirectoryRecursive stateDir
+        case r of
+          Left e -> assertFailure (show e)
+          Right m -> do
+            Map.lookup "root" m @?= Just ("abc", Nothing)
+            Map.lookup "math" m @?= Just ("def", Nothing)
+    , testCase "conflicting hashes across (non-dot) files is rejected" $ do
+        tmp <- SD.getTemporaryDirectory
+        let stateDir = tmp </> "morloc-snap-conflict"
+            snapDir = stateDir </> "snapshots"
+        SD.createDirectoryIfMissing True snapDir
+        writeFile (snapDir </> "a.txt") "root H1\n"
+        writeFile (snapDir </> "b.txt") "root H2\n"
+        r <- runMMSnapshot stateDir loadSnapshot
+        SD.removeDirectoryRecursive stateDir
+        case r of
+          Left _ -> return ()
+          Right _ -> assertFailure "expected a conflicting-pins error"
+    , testCase "absent snapshot dir yields empty map" $ do
+        tmp <- SD.getTemporaryDirectory
+        let stateDir = tmp </> "morloc-snap-absent"
+        SD.createDirectoryIfMissing True stateDir
+        r <- runMMSnapshot stateDir loadSnapshot
+        SD.removeDirectoryRecursive stateDir
+        case r of
+          Left e -> assertFailure (show e)
+          Right m -> Map.null m @?= True
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Snapshot pin-file line parsing (the `name hash` on-demand pin table)
+-- ---------------------------------------------------------------------------
+
+snapshotLineTests :: TestTree
+snapshotLineTests =
+  testGroup
+    "snapshot pin-file line parser"
+    [ testCase "name and hash" $
+        parseSnapshotLine "root-py 64bc6da7391cbb1784af32ce621dddee56b121f8"
+          @?= Just (Right ("root-py", "64bc6da7391cbb1784af32ce621dddee56b121f8", Nothing))
+    , testCase "extra whitespace is tolerated" $
+        parseSnapshotLine "   math-py    303b8805d406690f3e1d584375001708d9451c42  "
+          @?= Just (Right ("math-py", "303b8805d406690f3e1d584375001708d9451c42", Nothing))
+    , testCase "trailing comment is stripped" $
+        parseSnapshotLine "bits 3ce5cc2ae8673b3799d0f8dc942a9931e344c162  # bits v0.2"
+          @?= Just (Right ("bits", "3ce5cc2ae8673b3799d0f8dc942a9931e344c162", Nothing))
+    , testCase "full-line comment is ignored" $
+        parseSnapshotLine "# stdlib snapshot for morloc 0.98" @?= Nothing
+    , testCase "blank line is ignored" $
+        parseSnapshotLine "   " @?= Nothing
+    , testCase "name without a hash is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "lonely-name"))
+    , testCase "PKG-7: library line with its source" $
+        parseSnapshotLine "weena/bits 3ce5 github:weena/bits"
+          @?= Just (Right ("weena/bits", "3ce5", Just "github:weena/bits"))
+    , testCase "PKG-7: shipped library line needs no source" $
+        parseSnapshotLine "bio/convert 3ce5"
+          @?= Just (Right ("bio/convert", "3ce5", Nothing))
+    , testCase "PKG-7: unshipped library line without a source is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "weena/bits 3ce5"))
+    , testCase "PKG-7: std/ spelling is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "std/root 3ce5"))
+    , testCase "PKG-7: a stdlib line gives no source" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "root 3ce5 github:morloclib/root"))
+    , testCase "PKG-7: a fourth token is an error" $
+        assertBool "expected Left" (isLeftJust (parseSnapshotLine "root 3ce5 x y"))
+    ]
+  where
+    isLeftJust (Just (Left _)) = True
+    isLeftJust _ = False
+
+-- ---------------------------------------------------------------------------
+-- morloc-version gate integration (loadModuleMetadata, the make-time path)
+-- ---------------------------------------------------------------------------
+
+-- | Write a minimal module fixture (package.yaml + a placeholder main.loc) into
+-- a fresh temp dir and return the main.loc path. `extra` is appended to the
+-- package.yaml (e.g. a morloc-version line).
+writeModuleFixture :: String -> String -> IO FilePath
+writeModuleFixture sub extra = do
+  tmp <- SD.getTemporaryDirectory
+  let dir = tmp </> ("morloc-gate-" ++ sub)
+  SD.createDirectoryIfMissing True dir
+  writeFile (dir </> "package.yaml") ("name: gatemod\nversion: 0.0.0\n" ++ extra)
+  writeFile (dir </> "main.loc") "module gatemod ()\n"
+  return (dir </> "main.loc")
+
+-- | loadModuleMetadata reports the gate failure via `ioError`, which escapes the
+-- MorlocMonad runner as an IO exception (not a Left); accept either an exception
+-- or a MorlocError Left as "rejected".
+loadRejects :: FilePath -> IO Bool
+loadRejects mainLoc = do
+  outcome <- try (runMM (loadModuleMetadata True mainLoc))
+  return $ case (outcome :: Either SomeException (Either MorlocError ())) of
+    Left _ -> True             -- ioError path
+    Right (Left _) -> True     -- throwError path
+    Right (Right ()) -> False
+
+moduleVersionGateTests :: TestTree
+moduleVersionGateTests =
+  testGroup
+    "morloc-version gate (loadModuleMetadata integration)"
+    [ testCase "rejects a module whose morloc-version excludes the compiler" $ do
+        mainLoc <- writeModuleFixture "reject" "morloc-version: \">=99.0\"\n"
+        rejected <- loadRejects mainLoc
+        assertBool "expected the out-of-range module to be rejected at load" rejected
+    , testCase "accepts a satisfiable morloc-version" $ do
+        mainLoc <- writeModuleFixture "accept" "morloc-version: \">=0.1\"\n"
+        rejected <- loadRejects mainLoc
+        assertBool "expected the in-range module to load" (not rejected)
+    , testCase "accepts a module with no morloc-version" $ do
+        mainLoc <- writeModuleFixture "absent" ""
+        rejected <- loadRejects mainLoc
+        assertBool "expected an unconstrained module to load" (not rejected)
+    ]
+
+-- ---------------------------------------------------------------------------
+-- YAML parser tests
+-- ---------------------------------------------------------------------------
+
+packageYamlParserTests :: TestTree
+packageYamlParserTests =
+  testGroup
+    "package.yaml :: morloc-deps parser"
+    [ testCase "missing field defaults to []" $ do
+        let yamlText = "name: foo\nversion: 0.1.0\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageMorlocDependencies pm @?= []
+    , testCase "explicit empty list" $ do
+        let yamlText = "name: foo\nmorloc-deps: []\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageMorlocDependencies pm @?= []
+    , testCase "two valid entries parsed in order" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n\
+              \  - name: table\n\
+              \    git-hash: 9f8e7d6c5b4a39281706050403020100f0e1d2c3\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [ MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"
+                  , MorlocDep "table" "std" Nothing "9f8e7d6c5b4a39281706050403020100f0e1d2c3"
+                  ]
+    , testCase "canonical morloc-deps key is parsed" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [MorlocDep "root" "std" Nothing "1a2b3c4d5e6f7890abcdef1234567890abcdef12"]
+    , testCase "morloc-deps is read when the removed key is also present" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111\n\
+              \morloc-dependencies:\n\
+              \  - name: table\n\
+              \    git-hash: bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [MorlocDep "root" "std" Nothing "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"]
+    , testCase "the removed morloc-dependencies key is not read" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-dependencies:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageMorlocDependencies pm @?= []
+    , testCase "missing git-hash field is rejected" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n"
+        case parsePackageYaml yamlText of
+          Left _ -> return ()  -- expected: parse failure
+          Right pm ->
+            assertFailure $
+              "expected parse failure on missing git-hash; got: "
+                <> show (packageMorlocDependencies pm)
+    , testCase "non-string git-hash is rejected" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: 12345\n"
+        -- An unquoted numeric git-hash is parsed by YAML as a number. Coercing
+        -- it back to text would silently drop leading zeros, so the parser
+        -- rejects it and asks for a quoted string.
+        case parsePackageYaml yamlText of
+          Left _ -> return ()  -- expected: parse failure, must be quoted
+          Right pm ->
+            assertFailure $
+              "expected parse failure on numeric git-hash; got: "
+                <> show (packageMorlocDependencies pm)
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Resolver tests (closer-to-install-root wins)
+-- ---------------------------------------------------------------------------
+
+resolverTests :: TestTree
+resolverTests =
+  testGroup
+    "Resolver: closer-to-install-root wins"
+    [ testCase "two distinct pins at depth 0 coexist" $ do
+        result <- runMM $ do
+          m1 <- addPin Map.empty 0 "root-pkg" "X" "hashX" Nothing
+          addPin m1 0 "root-pkg" "Y" "hashY" Nothing
+        case result of
+          Left e -> assertFailure (show e)
+          Right m -> do
+            Map.lookup "X" m @?= Just (PinEntry "hashX" 0 "root-pkg" Nothing)
+            Map.lookup "Y" m @?= Just (PinEntry "hashY" 0 "root-pkg" Nothing)
+
+    , testCase "shallower pin wins over deeper pin" $ do
+        result <- runMM $ do
+          m1 <- addPin Map.empty 0 "root-pkg" "X" "rootHash" Nothing
+          addPin m1 1 "child-pkg" "X" "childHash" Nothing
+        case result of
+          Left e -> assertFailure (show e)
+          Right m ->
+            Map.lookup "X" m @?= Just (PinEntry "rootHash" 0 "root-pkg" Nothing)
+
+    , testCase "deeper-existing replaced by shallower new pin" $ do
+        result <- runMM $ do
+          m1 <- addPin Map.empty 2 "grandchild-pkg" "X" "grandHash" Nothing
+          addPin m1 1 "sibling-pkg" "X" "siblingHash" Nothing
+        case result of
+          Left e -> assertFailure (show e)
+          Right m ->
+            Map.lookup "X" m @?= Just (PinEntry "siblingHash" 1 "sibling-pkg" Nothing)
+
+    , testCase "siblings at same depth with same hash is no-op" $ do
+        result <- runMM $ do
+          m1 <- addPin Map.empty 1 "sibling-A" "X" "hashAgree" Nothing
+          addPin m1 1 "sibling-B" "X" "hashAgree" Nothing
+        case result of
+          Left e -> assertFailure (show e)
+          Right m ->
+            -- whoever got there first owns the entry; same hash either way
+            Map.lookup "X" m @?= Just (PinEntry "hashAgree" 1 "sibling-A" Nothing)
+
+    , testCase "siblings at same depth with different hash errors" $ do
+        result <- runMM $ do
+          m1 <- addPin Map.empty 1 "sibling-A" "X" "hashOne" Nothing
+          addPin m1 1 "sibling-B" "X" "hashTwo" Nothing
+        case result of
+          Right m -> assertFailure ("expected conflict error, got: " <> show m)
+          Left _ -> return ()  -- expected
+
+    , testCase "case-insensitive hash equality" $ do
+        let upper = "ABCDEF1234567890"
+            lower = "abcdef1234567890"
+        assertBool "case insensitive match" (hashEq upper lower)
+        assertBool "different lengths still fail to match" $
+          not (hashEq "abc" "abcdef")
+
+    , testCase "reconcileOverwrite forces reinstall on hash mismatch" $ do
+        reconcileOverwrite DoNotOverwrite (Just "expected") (Just "actual")
+          @?= ForceOverwrite
+
+    , testCase "reconcileOverwrite forces reinstall when pin set but no fdb" $ do
+        reconcileOverwrite DoNotOverwrite (Just "expected") Nothing
+          @?= ForceOverwrite
+
+    , testCase "reconcileOverwrite leaves DoNotOverwrite when hashes agree" $ do
+        reconcileOverwrite DoNotOverwrite (Just "abc") (Just "ABC")
+          @?= DoNotOverwrite
+
+    , testCase "reconcileOverwrite leaves DoNotOverwrite when no pin and no fdb" $ do
+        reconcileOverwrite DoNotOverwrite Nothing Nothing
+          @?= DoNotOverwrite
+
+    , testCase "reconcileOverwrite preserves explicit ForceOverwrite" $ do
+        reconcileOverwrite ForceOverwrite Nothing Nothing
+          @?= ForceOverwrite
+    ]
+
+-- ---------------------------------------------------------------------------
+-- package.yaml :: setup field parser tests
+-- ---------------------------------------------------------------------------
+
+packageSetupParserTests :: TestTree
+packageSetupParserTests =
+  testGroup
+    "package.yaml :: setup parser"
+    [ testCase "missing field defaults to Nothing" $ do
+        let yamlText = "name: foo\nversion: 0.1.0\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageSetup pm @?= Nothing
+    , testCase "string value parses as Just" $ do
+        let yamlText = "name: foo\nsetup: setup.sh\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageSetup pm @?= Just "setup.sh"
+    , testCase "nested path parses as Just" $ do
+        let yamlText = "name: foo\nsetup: scripts/install.sh\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm -> packageSetup pm @?= Just "scripts/install.sh"
+    ]

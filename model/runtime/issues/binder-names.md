@@ -77,7 +77,7 @@ calls are qualified (`__morloc_src_<name>.f`).
   name (`MT.drop 1`, `manifoldIdOf`), so renaming manifolds needs the id
   passed through first. The C++ prefix needs a ruling (briefs/B14-B15.md).
 - [read 2026-11-02] Generated binders outside every reserved prefix: R
-  `mlc_clo` (data/lang/r/lang.yaml:98 `ldPartialTemplate`); Rust
+  `mlc_clo` (binders/r/lang.yaml:98 `ldPartialTemplate`); Rust
   `mlc_<n>_<j>` (Rust.hs:594) and `__a<i>` (Rust.hs:1127, :1319); C++
   `e` (Cpp.hs:1466), `mlc_r` (:2436) and `__a<i>` (:2034). Users already
   source `mlc_*` names (goldens string-encoding, native-morloc-3). The fix

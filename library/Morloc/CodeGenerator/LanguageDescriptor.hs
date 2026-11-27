@@ -199,8 +199,6 @@ data LangDescriptor = LangDescriptor
   , -- FORK-17: a call of user code with the fork check around it, the call
     -- written as $CALL; empty when the pool checks some other way.
     ldForkCheck :: !Text
-  , -- External codegen (optional)
-    ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
     ldTableImportFn :: !(Maybe Text) -- e.g. "mlc_table_import"
   , -- The program's generated record classes (GEN-11): qualified name to
@@ -383,7 +381,6 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldAllowStringNull" (Y.Bool True)
             . ins "ldLazyArgs" (Y.Bool False)
             . ins "ldForkCheck" (Y.String "")
-            . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
             . ins "ldGeneratedClasses" (Y.Object mempty)
             . ins "ldRealPosInf" (Y.String "")
@@ -521,7 +518,6 @@ defaultLangDescriptor name ext =
     , ldAllowStringNull = True
     , ldLazyArgs = False
     , ldForkCheck = ""
-    , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
     , ldGeneratedClasses = Map.empty
     , ldSourceHooks = []

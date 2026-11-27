@@ -174,6 +174,7 @@ renderLangSupport ls =
   jsonObj
     [ ("schema_version", jsonStr Morloc.Version.langSupportSchemaVersion)
     , ("morloc_version", jsonStr (lsMorlocVersion ls))
+    , ("bindings_check", jsonInt 1)
     , ("toolchain", jsonArr (map pkgJson (lsToolchain ls)))
     , ("languages", jsonObj [(name, langJson e) | (name, e) <- Map.toAscList (lsLanguages ls)])
     ]

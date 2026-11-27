@@ -1,0 +1,77 @@
+# Core morloc build toolchain -- the conda packages required to build the morloc
+# runtime (libmorloc.so, morloc-nexus, rustmorloc) regardless of which pool
+# languages a program uses. Cross-cutting, so it lives here beside languages.yaml
+# rather than under a single language.
+#
+# Per-language requirements live in binders/<lang>/requirements.yaml.
+toolchain:
+  - { package: rust,         version: "*", phase: build }
+  # c-compiler and cxx-compiler are both core: the runtime and every pool build
+  # (cargo/cc-rs and the C++ pools) need the conda toolchain ACTIVATION -- the
+  # activate.d scripts that export $CC/$CXX/$AR/$RANLIB/... In a language-free
+  # solve (e.g. `mim-env clean`, which resets to a baseline that declares no
+  # pool language), c-compiler alone lands the compiler binaries but NOT the
+  # activation packages (gcc_linux-64/binutils_linux-64), so $AR is unset and
+  # cc-rs fails with "failed to find tool ar". cxx-compiler hard-depends on that
+  # activation chain, so keeping it in core guarantees $AR is always exported,
+  # not only when a program happens to declare a cpp pool.
+  #
+  # Both are pinned to one 1.x release: the 2.x metapackages depend on the bare
+  # `gcc`/`clang` packages instead of `gcc_linux-64`/`clang_osx-arm64`, so a 2.x
+  # solve has no compiler activation at all -- no activate.d, no $CC/$CXX/$AR,
+  # and on macOS no `bin/gcc` either. Within 1.x each release fixes the compiler
+  # line (1.11.0: gcc 14 on Linux, clang 19 on macOS), so a new release changes
+  # the toolchain only when this pin moves. Keep cpp/requirements.yaml equal.
+  - { package: c-compiler,   version: "==1.11.0", phase: build }
+  - { package: cxx-compiler, version: "==1.11.0", phase: build }
+  - { package: make,         version: "*", phase: build }
+  - { package: pkg-config,   version: "*", phase: build }
+  # git is universal to the installation system: `morloc install` clones modules
+  # and resolves git-pinned morloc-dependencies (build AND interactive runtime).
+  - { package: git,         version: "*", phase: both }
+
+# Dev environments build the morloc COMPILER from source. Both lists below are
+# dev-only (`mim new --dev`, always a debian/ubuntu container); released
+# environments download a prebuilt compiler and use neither. They exist because
+# the compiler is built in TWO phases that see different toolchains:
+#
+#   Phase 1 (image build, as root): the conda env does not exist yet -- it is
+#   mounted only at run time. The Dockerfile installs ghcup + stack here, and
+#   `stack setup` later fetches the GHC bindist. The only package manager is apt,
+#   so the libs those bootstrap binaries dynamically link, plus xz to unpack the
+#   bindist, must come from apt. That is `dev-apt`.
+#
+#   Phase 2 (run time, dev shell): the conda env is mounted and ACTIVE. GHC
+#   compiles the compiler's Haskell dependencies through the conda toolchain
+#   (conda's cc/ld), so the C libraries those deps link resolve in the conda env,
+#   NOT in /usr/lib. That is `dev-conda`.
+#
+# The Haskell toolchain (GHC + stack) itself comes from ghcup, not conda
+# (conda's ghc/stack are too old and conda-forge has no GHC 9.6). A lib in both
+# lists is consumed by a different tool in each phase.
+
+# System build tools + libs the dev build needs from apt rather than conda:
+#   - build-essential: binutils (`/usr/bin/strip`, `ar`, ...) that the Haskell
+#     build shells out to -- Cabal's copy/register step strips the built exes and
+#     libs with the system strip, independent of the conda cc/ld GHC links with.
+#   - libgmp/libtinfo(libncurses)/libz/libffi: linked by the ghcup + stack
+#     bootstrap binaries at image-build time, when the conda env is not mounted
+#     yet, so they cannot come from conda.
+#   - xz-utils: unpacks the GHC bindist.
+dev-apt:
+  - build-essential
+  - libgmp-dev
+  - libncurses-dev
+  - zlib1g-dev
+  - libffi-dev
+  - xz-utils
+
+# Phase-2 conda deps: C libraries the compiler's Haskell dependencies link when
+# built through the active conda toolchain -- gmp (integer-gmp), zlib (zlib and
+# digest packages), ncurses/libtinfo, libffi (the RTS), xz.
+dev-conda:
+  - gmp
+  - zlib
+  - ncurses
+  - libffi
+  - xz

@@ -1092,13 +1092,10 @@ checkJson (CheckPath (PathPerm p)) =
 -- sentinel meaning "use the runtime classifier"; it is never written
 -- by users (the parser rejects `@source auto`) but the manifest uses
 -- it as the default for list / compound types where the classifier
--- handles inline-or-file dispatch. `@literal` is the deprecated
--- alias for `@source inline`.
-resolvedSourceJson :: Maybe Bool -> Maybe SourceAtom -> Maybe WireShape -> Text
-resolvedSourceJson _ (Just a) _ = sourceAtomJson a
-resolvedSourceJson mLit Nothing mshape
-  | mLit == Just True = sourceAtomJson SourceInline
-  | otherwise = case fmap underOptional mshape of
+-- handles inline-or-file dispatch.
+resolvedSourceJson :: Maybe SourceAtom -> Maybe WireShape -> Text
+resolvedSourceJson (Just a) _ = sourceAtomJson a
+resolvedSourceJson Nothing mshape = case fmap underOptional mshape of
       Just (WScalar _) -> sourceAtomJson SourceInline
       Just WStr        -> sourceAtomJson SourceInline
       -- An IFile's command-line form is the path the pool opens, never
@@ -1136,7 +1133,6 @@ checksJson cs = jsonArr (map checkJson cs)
 -- to the classifier sentinel `"auto"`.
 ioShapeFields :: Maybe WireShape
               -> Bool
-              -> Maybe Bool
               -> Maybe SourceAtom
               -> Maybe FormAtom
               -> [Check]
@@ -1144,8 +1140,8 @@ ioShapeFields :: Maybe WireShape
               -> Maybe FormAtom
               -> [Check]
               -> [(Text, Text)]
-ioShapeFields mschema many mLit mSrc mForm cks mLSrc mLForm lcks =
-  [ ("source",      resolvedSourceJson mLit mSrc mschema)
+ioShapeFields mschema many mSrc mForm cks mLSrc mLForm lcks =
+  [ ("source",      resolvedSourceJson mSrc mschema)
   , ("form",        resolvedFormJson mForm)
   , ("checks",      checksJson cks)
   , ("list_source", resolvedListSourceJson mLSrc)
@@ -1328,7 +1324,7 @@ argToJson key mEmit mGeneral mShape _ _ (CmdArgPos r) =
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r)))
        , ("name", jsonMaybeStr (argPosDocName r))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
+       , ("quoted", jsonBool (isQuotedArg (argPosDocSource r) (argPosDocMany r) mShape))
        , ("many", jsonBool (argPosDocMany r))
        , ("stdin", jsonBool (argPosDocStdin r))
        , ("desc", jsonStrArr (argPosDocDesc r))
@@ -1336,7 +1332,6 @@ argToJson key mEmit mGeneral mShape _ _ (CmdArgPos r) =
        , ("metadata", metadataEmpty)
        ]
     ++ ioShapeFields mShape (argPosDocMany r)
-         (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
     ++ parseFields (argPosDocParse r) (argPosDocType r)
@@ -1346,7 +1341,7 @@ argToJson key mEmit mGeneral mShape _ _ (CmdArgOpt r) =
     ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
-       , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mShape))
+       , ("quoted", jsonBool (isQuotedArg (argOptDocSource r) (argOptDocMany r) mShape))
        , ("many", jsonBool (argOptDocMany r))
        , ("short", cliOptShortJson (argOptDocArg r))
        , ("long", cliOptLongJson (argOptDocArg r))
@@ -1356,7 +1351,6 @@ argToJson key mEmit mGeneral mShape _ _ (CmdArgOpt r) =
        , ("metadata", metadataEmpty)
        ]
     ++ ioShapeFields mShape (argOptDocMany r)
-         (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
     ++ parseFields (argOptDocParse r) (argOptDocType r)
@@ -1451,8 +1445,8 @@ schemaField (Just s) mGen =
 -- the JSON parser. With `@source file` the argv is a path, read
 -- unquoted. An IFile's argv is the path its handle names, so it is
 -- quoted the same way as a Str.
-isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe WireShape -> Bool
-isQuotedArg _literal mSource many mshape =
+isQuotedArg :: Maybe SourceAtom -> Bool -> Maybe WireShape -> Bool
+isQuotedArg mSource many mshape =
   case mshape of
     Nothing -> False
     Just s

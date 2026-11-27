@@ -16,7 +16,7 @@ names the command that rebuilds the state.
 
 ### PLANE-2 A state's stores belong to its plane
 Intent: ruled 2026-11-15
-Code: unaudited
+Code: conforms 2026-11-25
 
 Module records, exposed resources, installed programs, snapshots and the
 origins file carry no plane key: each belongs to the one plane of its
@@ -32,7 +32,7 @@ version or flavor is not its own.
 
 ### PLANE-4 JSON is how data crosses planes
 Intent: ruled 2026-11-15
-Code: unaudited
+Code: deviates (../runtime/issues/packet-header.md)
 
 JSON carries no plane. It is the only form in which data passes between
 planes.

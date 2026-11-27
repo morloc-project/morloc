@@ -224,6 +224,8 @@ data InitCommand = InitCommand
   , initForce :: OverwriteProtocol
   , initSlurmSupport :: Bool
   , initSanitize :: Bool
+  , initCheck :: Bool
+  , initCheckLangs :: [String]
   }
 
 initCommandParser :: Parser InitCommand
@@ -235,6 +237,11 @@ initCommandParser =
     <*> optForce
     <*> optSlurmSupport
     <*> optSanitize
+    <*> switch
+      ( long "check"
+          <> help "Report, as JSON, whether the installed runtime and language bindings match this compiler; build nothing"
+      )
+    <*> many (strOption (long "lang" <> metavar "LANG" <> help "With --check, report only this language's binding (py, r or cpp); repeatable"))
 
 initSubcommand :: Mod CommandFields CliCommand
 initSubcommand = command "init" (info (CmdInit <$> initCommandParser) (progDesc "Initialize morloc environment"))

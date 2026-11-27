@@ -32,7 +32,8 @@ file mark taken off an argument of a call packet read from a file (FMT-10;
 readers skip it). (2 xxhash: defined, unused.)
 
 ### FMT-4 A relative pointer is volume index (bits 62-48) and offset (47-0); -1 is null
-Status: draft
+Status: implemented
+Checked by: roundtrip_vol_idx_and_offset, relnull_is_sentinel, primary_volume_matches_header, small_values_decode_as_vol0, an_unrebased_offset_does_not_resolve
 Volume 0 is never mapped; in a self-contained buffer, volume 0 offsets are
 relative to the buffer start.
 
@@ -55,12 +56,14 @@ rules aligned to max field; `m` same with alignment 8 (an open question);
 numeric array data 64-byte aligned.
 
 ### FMT-7 Schema counts and name lengths are base-64, low digit first
-Status: draft
+Status: implemented
+Checked by: test_parse_long_record_key, test_parse_long_recursive_name, test_enum_at_the_count_boundary, test_malformed_count_is_rejected, test_render_wide_schema_roundtrips
 Digits 0-9a-zA-Z+/; >= 64 written `=` <low digit> <rest>. Name lengths are
 BYTES.
 
 ### FMT-8 A stream file is head, data batches, footer, 8-byte tail
-Status: draft
+Status: implemented
+Checked by: stream_tail_roundtrip, stream_tail_magic_is_reversed_packet_magic, stream_tail_rejects_wrong_magic, stream_file_roundtrip_with_footer, final_footer_packet_carries_all_blocks_including_status, repair_keeps_every_complete_sub_packet_and_marks_the_footer_repaired
 Tail = footer length u32 LE + bytes 07 07 f8 6d. Footer holds subpacket
 index, final marker, status (0 closed, 1 paused, 2 failed, 3 repaired by
 `morloc-nexus file --repair`; SLOT-28).

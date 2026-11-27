@@ -1,0 +1,37 @@
+[package]
+name = "morloc-nexus"
+version = "0.114.0"
+edition = "2021"
+description = "Morloc nexus: CLI dispatcher for multi-language pool orchestration"
+# The compiler's version (SHIM-7); scripts/bump-version.sh sets it.
+
+[[bin]]
+name = "morloc-nexus"
+path = "src/main.rs"
+
+[dependencies]
+morloc-manifest = { path = "../morloc-manifest" }
+# Only the stateless types crate -- not morloc-runtime. State-touching
+# functions (shm, eval_arena, daemon recovery, packet config) reach
+# libmorloc.so at load time via DT_NEEDED (configured in build.rs) so
+# there is a single per-process copy of every static.
+morloc-runtime-types = { path = "../morloc-runtime-types" }
+libc = { workspace = true }
+# Used by `morloc-nexus file` to probe whether a buffer is valid
+# MessagePack via a recursive marker walker. Same crate / version
+# already pulled by morloc-runtime, so no new transitive deps.
+rmp = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+chrono = "0.4"
+# Already a transitive dep via clap's suggestion machinery; declared
+# explicitly so `did_you_mean` can reuse the same Levenshtein
+# implementation clap uses for its own error hints.
+strsim = "0.11"
+# MCP carries binary tool output only as base64 (image / audio / resource
+# blocks). Same version already resolved in the workspace lockfile, so no new
+# transitive version.
+base64 = "0.22"

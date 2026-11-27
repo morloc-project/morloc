@@ -102,7 +102,7 @@ new term a signature avoids it.
 ### SIG-10 Every type in a built program is known and checked statically
 Intent: ruled 2026-11-01
 Tests: spec-sig-10-1, spec-sig-10-2, spec-sig-10-3, spec-sig-10-4, spec-sig-10-5
-Code: deviates (compiler/issues/specialization.md)
+Code: deviates (../compiler/issues/specialization.md)
 
 Every term in a program that `morloc make` builds has a type fixed at
 compile time, declared by a signature or inferred. A program in which a

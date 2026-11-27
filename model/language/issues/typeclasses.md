@@ -198,3 +198,9 @@
   `modelStep :: Ord k =>` calls `without :: Eq k => ...`. Ruling needed:
   either `Ord` takes `Eq` as a superclass, or such signatures must name
   both classes and that test changes.
+- **Class default methods do not exist.** [read, 2026-11-25] Violates
+  CLS-7, CLS-8, CLS-9, CLS-10, CLS-11. A class body is a signature list
+  only (Frontend/Parser.y typeclass_decl), so a method definition inside
+  `class ... where` is a parse error. With no defaults there are no
+  alternative defaults (CLS-9), no class-level typing (CLS-10) and nothing
+  that reaches every instance (CLS-11).

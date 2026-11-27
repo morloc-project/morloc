@@ -29,13 +29,15 @@ import Control.Monad.Except (catchError, throwError)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Config as MC
+import qualified Morloc.Language as ML
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Build.CargoLock as CL
-import Morloc.CodeGenerator.SystemConfig (strictToolchainError)
+import Morloc.CodeGenerator.SystemConfig (Mismatch (..), installedRuntimeMismatches, strictToolchainError)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
+import Morloc.Namespace.Expr (BuildConfig (..))
 import Morloc.ProgramBuilder.Install (matchGlob)
 import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
 import qualified Morloc.System as MS
@@ -175,6 +177,12 @@ buildProgram (manifest, wrappers, pools) = do
   swapTarget <- swapTargetOf
   origDir <- liftIO SD.getCurrentDirectory
 
+  forM_ wrappers $ \(WrapperFile path _) -> do
+    isDir <- liftIO $ SD.doesDirectoryExist path
+    when isDir . MM.throwRejected . pretty $
+      "Cannot write the launcher '" <> path <> "': a directory of that name already exists. "
+        <> "Choose a different output name with --cli-out/-o, or remove the directory."
+
   -- Resolve the project root while the working directory is still the one it was
   -- parsed relative to. 'stateProjectRoot' is the entry file's directory as typed,
   -- so `morloc make main.loc` makes it "."; resolved after the chdir below it would
@@ -219,6 +227,7 @@ buildProgram (manifest, wrappers, pools) = do
     buildAll projectRoot ss = do
       mapM_ writeScript ss
       syncEnvDeps projectRoot
+      requireInstalledRuntime (Set.toList (Set.fromList (map scriptLang ss)))
       checkToolBins
       mapM_ requireStrictToolchain (Set.toList (Set.fromList [k | s <- ss, SysRequireToolchain k <- scriptMake s]))
       mapM_ runMakes ss
@@ -385,13 +394,6 @@ removeDirIfExists dir = do
 
 writeWrapper :: WrapperFile -> IO ()
 writeWrapper (WrapperFile path body) = do
-  -- A directory occupying the launcher path is the common recoverable
-  -- mistake (the chosen output name collides with an existing directory);
-  -- name the conflict instead of leaking a raw "is a directory" IOError.
-  isDir <- SD.doesDirectoryExist path
-  when isDir . ioError . userError $
-    "Cannot write the launcher '" <> path <> "': a directory of that name already exists. "
-      <> "Choose a different output name with --cli-out/-o, or remove the directory."
   SD.createDirectoryIfMissing True (takeDirectory path)
   MT.writeFile path body
   callProcess "chmod" ["755", path]
@@ -428,6 +430,30 @@ describeWriteFailure (Failed _ e) = do
              <> "Choose a different output name with -o, or remove the directory."
       else "Failed to write generated file:" <+> pretty (show e)
 describeWriteFailure _ = return "Failed to write generated files."
+
+-- | The installed header and the bindings of the program's languages are the
+-- ones this compiler emits code for: a compiler installed over a home without
+-- a fresh init would otherwise compile pools against another compiler's
+-- bindings.
+requireInstalledRuntime :: [Lang] -> MorlocMonad ()
+requireInstalledRuntime langs = do
+  config <- MM.ask
+  buildConfig <- liftIO $ MC.loadBuildConfig config
+  let sanitize = fromMaybe False (buildConfigSanitize buildConfig)
+  problems <- liftIO $ installedRuntimeMismatches sanitize (map ML.langName langs) (MC.configHome config)
+  mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
+  mImmutable <- liftIO $ lookupEnv "MORLOC_IMMUTABLE"
+  let remedy :: String
+      remedy = case (mImmutable, mEnv) of
+          (Just i, _) | not (null i) && i /= "0" -> "rebuild this read-only environment with `mim update --reinit`"
+          (_, Just e) | not (null e) -> "run `morloc init -f`, or update the environment with `mim update --reinit`"
+          _ -> "run `morloc init -f`"
+      (byInit, byEnv) = partition mismatchInitRepairs problems
+  unless (null problems) $
+    MM.throwFailed . vsep $
+      ["the morloc runtime or language bindings installed for this compiler cannot build this program:"]
+        ++ map (("  " <>) . pretty . mismatchText) (byEnv ++ byInit)
+        ++ ["To repair the installed runtime and bindings, " <> pretty remedy <> "." | not (null byInit)]
 
 -- | In strict conda mode, fail if a build of this kind would run a program
 -- from outside the environment.

@@ -115,16 +115,16 @@ import qualified Morloc.Version as Version
 import qualified Morloc.Version.Constraint as VC
 import System.Directory
 import System.Environment (getEnvironment)
-import System.IO.Error (ioeGetErrorString, isAlreadyExistsError)
+import System.IO.Error (ioeGetErrorString, isAlreadyExistsError, isUserError)
 import System.Posix.Files (createLink)
 import System.Posix.Process (getProcessID)
 import System.Posix.Types (ProcessID)
 import System.Exit (ExitCode(..))
 import System.IO (hClose, stderr)
 import System.Process
-  ( callProcess
-  , createProcess
+  ( createProcess
   , proc
+  , readCreateProcessWithExitCode
   , readProcess
   , waitForProcess
   , CreateProcess(..)
@@ -414,8 +414,8 @@ addPin pinMap depth declaredBy depName depHash depFrom =
           return $ Map.insert depName (PinEntry depHash depth declaredBy depFrom) pinMap
 
 -- | Read the @installed_hash@ field from a module's fdb manifest.
--- Returns @Nothing@ if the manifest is absent, malformed, or has no hash
--- (e.g. legacy installs predating this schema bump).
+-- Returns @Nothing@ if the manifest is absent, malformed, or records no
+-- hash (an install not made from a git checkout writes @null@).
 readInstalledHash :: FilePath -> Text -> IO (Maybe Text)
 readInstalledHash fdbDir modName = do
   let manifestPath = fdbDir </> keyStem modName ++ ".module"
@@ -912,21 +912,6 @@ loadModuleMetadata isRoot main = do
     case maybef of
       (Just f) -> readPackageYaml f
       Nothing -> return defaultValue
-  -- Nudge the top-level project off the deprecated `morloc-dependencies` key,
-  -- which has been renamed to `morloc-deps`. Both are still accepted (see the
-  -- FromJSON PackageMeta instance); the warning is scoped to the root so that
-  -- imported modules still using the old alias do not spam the build.
-  when isRoot $ case maybef of
-    Just f -> do
-      raw <- readPackageYaml f :: MorlocMonad Aeson.Value
-      case raw of
-        Aeson.Object o
-          | KM.member "morloc-dependencies" o && not (KM.member "morloc-deps" o) ->
-              MM.say $
-                "warning: package.yaml key 'morloc-dependencies' is deprecated;"
-                  <+> "rename it to 'morloc-deps'"
-        _ -> return ()
-    Nothing -> return ()
   -- Reject include entries that escape the package directory. Absolute
   -- paths and `..` traversals are not allowed because they would break
   -- reproducibility and tie installs to ambient filesystem layout.
@@ -1423,7 +1408,11 @@ installRequest overwrite gitprot mayTypecheck userRequests inProgress pinMap dep
               installLocalIO tmpDir selector path
             ModuleSourceRemoteGit remote ->
               installRemoteIO gitprot tmpDir remote
-      liftIO $ (removePathForcibly tmpDir >> ioAction) `onException` runCleanup tmpDir
+      fetchResult <- liftIO . Exc.try $ (removePathForcibly tmpDir >> ioAction) `onException` runCleanup tmpDir
+      case fetchResult of
+        Right () -> return ()
+        Left (e :: IOException) ->
+          moduleInstallError $ squotes (pretty key) <> ":" <+> pretty (ioeGetErrorString e)
 
       metaOrErr <- liftIO $ do
         let pkgYaml = tmpDir </> "package.yaml"
@@ -2058,23 +2047,42 @@ installLocalGitRepoIO sourceDir targetDir selector = do
       -- Copy the working tree, filtering out .git and ignored files
       Install.copyAllFiltered sourceDir targetDir
     LatestOnBranch branch -> do
-      callProcess "git" ["clone", "-q", sourceDir, targetDir]
-      callProcess "git" ["-C", targetDir, "checkout", "refs/heads/" ++ MT.unpack branch]
+      runGit ["clone", "-q", sourceDir, targetDir]
+      runGit ["-C", targetDir, "checkout", "-q", "-B", MT.unpack branch, "refs/remotes/origin/" ++ MT.unpack branch]
     CommitHash hash -> do
-      callProcess "git" ["clone", "-q", sourceDir, targetDir]
-      callProcess "git" ["-C", targetDir, "checkout", "--detach", MT.unpack hash]
+      runGit ["clone", "-q", sourceDir, targetDir]
+      runGit ["-C", targetDir, "checkout", "--detach", MT.unpack hash]
     ReleaseTag tag -> do
-      callProcess "git" ["clone", "-q", sourceDir, targetDir]
-      callProcess "git" ["-C", targetDir, "checkout", "refs/tags/" ++ MT.unpack tag]
+      runGit ["clone", "-q", sourceDir, targetDir]
+      runGit ["-C", targetDir, "checkout", "refs/tags/" ++ MT.unpack tag]
 
   -- Remove .git and ignored files from installed copy
   Install.cleanIgnoredFiles targetDir
+
+-- | Run git with its output captured and its credential prompts disabled, so
+-- that a fetch either succeeds with what the environment's credential
+-- helpers give or fails. A failure is an IOException holding git's stderr.
+runGit :: [String] -> IO ()
+runGit args = do
+  baseEnv <- getEnvironment
+  let quiet = [("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")]
+      env' = quiet ++ filter ((`notElem` map fst quiet) . fst) baseEnv
+  (ec, _, err) <- readCreateProcessWithExitCode ((proc "git" args) {env = Just env'}) ""
+  case ec of
+    ExitSuccess -> return ()
+    ExitFailure c ->
+      ioError . userError $ unwords ("git" : args) ++ " (exit " ++ show c ++ "):\n" ++ MT.unpack (MT.strip (MT.pack err))
 
 -- | Install from a remote git source (pure IO)
 installRemoteIO :: GitProtocol -> FilePath -> GitRemote -> IO ()
 installRemoteIO gitprot targetDir remote = do
   let gitUrl = buildGitUrl gitprot remote
-  callProcess "git" ["clone", "-q", gitUrl, targetDir]
+  runGit ["clone", "-q", gitUrl, targetDir] `catch` \(e :: IOException) ->
+    if isUserError e
+      then ioError . userError $
+        "no repository at " ++ gitUrl ++ " can be read without a password prompt: it may not exist,"
+          ++ " or it may be private with no git credential helper for it\n" ++ ioeGetErrorString e
+      else ioError e
   checkoutRefIO targetDir (gitReference remote)
   Install.cleanIgnoredFiles targetDir
 
@@ -2100,7 +2108,7 @@ getBaseUrl RemoteAzure = "dev.azure.com"
 -- | Checkout a specific git reference (pure IO)
 checkoutRefIO :: FilePath -> GitSnapshotSelector -> IO ()
 checkoutRefIO targetDir selector =
-  let gitQuiet args = callProcess "git" (["-c", "advice.detachedHead=false", "-C", targetDir] ++ args)
+  let gitQuiet args = runGit (["-c", "advice.detachedHead=false", "-C", targetDir] ++ args)
    in case selector of
         LatestDefaultBranch -> return ()
         LatestOnBranch branch -> do

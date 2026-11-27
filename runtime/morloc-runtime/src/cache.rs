@@ -1,0 +1,1255 @@
+//! File-based packet caching with xxHash keys.
+//! Replaces cache.c.
+
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::path::PathBuf;
+use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use morloc_runtime_types::publish_once::PublishOnce;
+
+use crate::cschema::CSchema;
+use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::hash;
+use crate::recur::Resolver;
+use crate::schema::Schema;
+use crate::shm;
+use crate::walk::{self, Frame, Stack, Visit, Walker};
+
+use crate::ffi::parse_schema;
+use crate::ffi::free_schema;
+use crate::utility::write_atomic;
+use crate::utility::read_binary_file;
+use crate::packet_ffi::morloc_packet_size;
+use crate::packet_ffi::get_morloc_data_packet_value;
+
+/// Resolve the on-disk path `<cache_dir>/<label>/<key:016x>.dat`,
+/// creating the label directory if needed. Returns a heap C-string the
+/// caller frees with `libc::free`, or null with `*errmsg` set on
+/// failure.
+unsafe fn resolve_cache_filename(
+    key: u64,
+    label: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    let mut err: *mut c_char = ptr::null_mut();
+    let cache_path_c = morloc_cache_path(label, &mut err);
+    if cache_path_c.is_null() {
+        if !err.is_null() { *errmsg = err; }
+        return ptr::null_mut();
+    }
+    let filename = make_cache_filename(key, cache_path_c, &mut err);
+    libc::free(cache_path_c as *mut c_void);
+    if filename.is_null() {
+        if !err.is_null() { *errmsg = err; }
+        return ptr::null_mut();
+    }
+    filename
+}
+
+/// Resolve the shared content-addressed data directory
+/// `<cache_base>/data/`, creating it on demand. Heap C-string the
+/// caller frees with `libc::free`, or null with `*errmsg` set.
+unsafe fn resolve_data_dir(errmsg: *mut *mut c_char) -> *mut c_char {
+    let dir = match cache_base() {
+        Ok(base) => base.join("data"),
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(e));
+            return ptr::null_mut();
+        }
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other(format!(
+                "failed to create cache data directory: {}",
+                dir.display()
+            )),
+        );
+        return ptr::null_mut();
+    }
+    match CString::new(dir.to_string_lossy().as_bytes()) {
+        Ok(cs) => crate::error::malloc_cstr(&cs),
+        Err(_) => {
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other("cache data path contains an interior NUL".into()),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Resolve `<cache_base>/data/<data_hash:016x>.dat`.
+unsafe fn resolve_data_filename(
+    data_hash: u64,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    let dir = resolve_data_dir(errmsg);
+    if dir.is_null() {
+        return ptr::null_mut();
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    let filename = make_cache_filename(data_hash, dir, &mut err);
+    libc::free(dir as *mut c_void);
+    if filename.is_null() {
+        if !err.is_null() { *errmsg = err; }
+        return ptr::null_mut();
+    }
+    filename
+}
+
+// ── Pool-source fingerprint (from MORLOC_POOL_HASH) ─────────────────────────
+
+/// Parsed once on first call, cached for the lifetime of the process.
+/// The pool source fingerprint is mixed into every cache key so editing
+/// the morloc source (or any declared @hash-include@ file) invalidates
+/// the cache. `0` is returned if the env var is absent or unparseable;
+/// that means the runtime keeps working (cache keys still derive from
+/// midx + args) but the source-edit-invalidation property is lost.
+fn pool_hash() -> u64 {
+    static CACHED: PublishOnce<u64> = PublishOnce::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("MORLOC_POOL_HASH")
+            .ok()
+            .and_then(|s| u64::from_str_radix(s.trim(), 16).ok())
+            .unwrap_or(0)
+    })
+}
+
+/// C-ABI accessor for the pool's source fingerprint. Pool wrap code
+/// calls this once at first cache lookup to mix into the cache key.
+pub(crate) fn morloc_pool_hash() -> u64 {
+    pool_hash()
+}
+
+// ── Cache base directory ──────────────────────────────────────────────────
+
+/// Resolve the cache base directory. Precedence:
+///
+///   1. `MORLOC_CACHE_BASE` env var (explicit override; useful for
+///      Docker bind mounts and shared filesystems where SLURM workers
+///      need the same path).
+///   2. `$XDG_CACHE_HOME/morloc/cache` if `XDG_CACHE_HOME` is set.
+///   3. `~/.cache/morloc/cache` default.
+///   4. `cache` in the per-user runtime directory if `HOME` is also unset.
+fn cache_base() -> Result<PathBuf, String> {
+    static CACHED: PublishOnce<Result<PathBuf, String>> = PublishOnce::new();
+    CACHED
+        .get_or_init(|| {
+            if let Ok(s) = std::env::var("MORLOC_CACHE_BASE") {
+                if !s.is_empty() {
+                    return Ok(PathBuf::from(s));
+                }
+            }
+            if let Ok(s) = std::env::var("XDG_CACHE_HOME") {
+                if !s.is_empty() {
+                    return Ok(PathBuf::from(s).join("morloc/cache"));
+                }
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                if !home.is_empty() {
+                    return Ok(PathBuf::from(home).join(".cache/morloc/cache"));
+                }
+            }
+            // NET-4
+            morloc_runtime_types::private_dir::runtime_dir()
+                .map(|d| d.join("cache"))
+                .map_err(|e| format!("no private directory for the cache: {e}"))
+        })
+        .clone()
+}
+
+/// Resolve the per-label cache directory, creating it on demand. Returns
+/// an absolute path string the caller frees via `libc::free`. NULL on
+/// failure. A NULL or empty `label` resolves to `_unlabeled`.
+pub(crate) unsafe fn morloc_cache_path(
+    label: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    clear_errmsg(errmsg);
+    let label_part = if label.is_null() {
+        "_unlabeled".to_string()
+    } else {
+        match CStr::from_ptr(label).to_str() {
+            Ok(s) if !s.is_empty() => s.to_string(),
+            _ => "_unlabeled".to_string(),
+        }
+    };
+    let dir = match cache_base() {
+        Ok(base) => base.join(label_part),
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(e));
+            return ptr::null_mut();
+        }
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other(format!(
+                "failed to create cache directory: {}",
+                dir.display()
+            )),
+        );
+        return ptr::null_mut();
+    }
+    match CString::new(dir.to_string_lossy().as_bytes()) {
+        Ok(cs) => crate::error::malloc_cstr(&cs),
+        Err(_) => {
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other("cache path contains an interior NUL".into()),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
+// ── Hit/miss counters ──────────────────────────────────────────────────────
+
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static CACHE_STORES: AtomicU64 = AtomicU64::new(0);
+
+/// Increment the cache hit counter. Called by the labeled-call wrap on
+/// every successful lookup.
+pub(crate) fn morloc_cache_record_hit() {
+    CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the cache miss counter. Called by the labeled-call wrap
+/// before it falls through to compute the value.
+pub(crate) fn morloc_cache_record_miss() {
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the cache store counter. Called by the labeled-call wrap
+/// after it has written a freshly-computed value to disk.
+pub(crate) fn morloc_cache_record_store() {
+    CACHE_STORES.fetch_add(1, Ordering::Relaxed);
+}
+
+// ── Cache key computation ──────────────────────────────────────────────────
+
+/// Compute a cache key from the manifold id and the schema-resolved
+/// content of each argument packet. Formula:
+///
+///   key = mix(pool_hash, midx)
+///   for each arg_packet, arg_schema:
+///       key = mix(key, hash_morloc_packet(arg_packet, arg_schema, key))
+///
+/// The hash dereferences any shared-memory relative pointers in the
+/// packet so two structurally equivalent inputs map to the same key
+/// regardless of whether the data is inlined in the packet or stored
+/// in shared memory. Hashing raw packet bytes would be wrong: SHM
+/// addressing puts a relptr inside the packet, and two equivalent
+/// values with different relptrs would hash differently.
+///
+/// `arg_schemas[i]` must be a non-null, well-formed schema string for
+/// `arg_packets[i]`. If any schema is null, missing, or unparseable the
+/// function aborts (returns 0); silently falling back to byte hashing
+/// is unsafe -- it would let a SHM-backed cache miss masquerade as a
+/// "different input" forever.
+pub(crate) unsafe fn morloc_cache_key_compute(
+    midx: u32,
+    arg_packets: *const *const u8,
+    arg_schemas: *const *const c_char,
+    n_args: usize,
+    errmsg: *mut *mut c_char,
+) -> u64 {
+    clear_errmsg(errmsg);
+
+    let mut key = crate::utility::mix(pool_hash(), midx as u64);
+
+    for i in 0..n_args {
+        let packet = *arg_packets.add(i);
+        let schema_cstr = *arg_schemas.add(i);
+        if packet.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "cache_key_compute: arg {} packet pointer is NULL", i
+            )));
+            return 0;
+        }
+        if schema_cstr.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "cache_key_compute: arg {} schema string is NULL", i
+            )));
+            return 0;
+        }
+
+        let mut perr: *mut c_char = ptr::null_mut();
+        let schema = parse_schema(schema_cstr, &mut perr);
+        if schema.is_null() {
+            if !perr.is_null() {
+                *errmsg = perr;
+            } else {
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "cache_key_compute: failed to parse schema for arg {}", i
+                )));
+            }
+            return 0;
+        }
+
+        let mut arg_hash: u64 = 0;
+        let ok = hash_morloc_packet(
+            packet,
+            schema as *const CSchema,
+            key,
+            &mut arg_hash,
+            &mut perr,
+        );
+        free_schema(schema);
+        if !ok {
+            if !perr.is_null() {
+                *errmsg = perr;
+            } else {
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "cache_key_compute: hash_morloc_packet failed for arg {}", i
+                )));
+            }
+            return 0;
+        }
+        key = crate::utility::mix(key, arg_hash);
+    }
+    key
+}
+
+/// Shared read-side path for both `morloc_cache_lookup` and
+/// `get_cache_packet`: read `filename`, run `cache_entry_is_valid`,
+/// return the malloc'd bytes on success. Consumes and frees
+/// `filename`; on any failure frees the malloc'd bytes too and
+/// returns a null pointer with `*size_out = 0`.
+unsafe fn read_and_validate_cache_file(
+    filename: *mut c_char,
+    size_out: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut sb: libc::stat = std::mem::zeroed();
+    if libc::stat(filename, &mut sb) != 0 {
+        libc::free(filename as *mut c_void);
+        return ptr::null_mut(); // miss: not an error
+    }
+    let mut file_size: usize = 0;
+    let data = read_binary_file(filename, &mut file_size, &mut err);
+    if data.is_null() {
+        libc::free(filename as *mut c_void);
+        if !err.is_null() { *errmsg = err; }
+        return ptr::null_mut();
+    }
+    if !cache_entry_is_valid(filename, data, file_size) {
+        libc::free(data as *mut c_void);
+        libc::free(filename as *mut c_void);
+        return ptr::null_mut();
+    }
+    libc::free(filename as *mut c_void);
+    if !size_out.is_null() {
+        *size_out = file_size;
+    }
+    data
+}
+
+// ── Label-aware lookup / store wrappers ────────────────────────────────────
+
+/// Look up a cached result packet under @label/@ for the given key.
+/// Returns the packet bytes (caller frees with `libc::free`) and writes
+/// the byte length into `*size_out` on hit. Returns NULL on miss or on
+/// any I/O error. Does not record hit/miss -- callers do that
+/// explicitly so the cross-pool dispatch loop and the intra-pool
+/// `call_cached` helper attribute their own results.
+pub(crate) unsafe fn morloc_cache_lookup(
+    key: u64,
+    label: *const c_char,
+    size_out: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+    if !size_out.is_null() {
+        *size_out = 0;
+    }
+    let filename = resolve_cache_filename(key, label, errmsg);
+    if filename.is_null() {
+        return ptr::null_mut();
+    }
+    read_and_validate_cache_file(filename, size_out, errmsg)
+}
+
+/// Peek at a cache entry's on-disk packet header and decide whether it
+/// belongs to the current cache format. Returns false and unlinks the
+/// stale files if not.
+///
+/// Cases returning false (miss + side-effect unlink):
+/// - The bytes are shorter than a packet header (corrupt).
+/// - Header claims `source=FILE, format=DATA` but the referenced
+///   content sidecar does not exist or is empty; unlink the dangling
+///   indirection and the sidecar.
+/// - Any other data packet: the store writes only `FILE` indirections to
+///   `DATA` sidecars. A value carried inline or by reference would be
+///   decoded as one the program built rather than checked as data read
+///   back from disk, and a file of another format is not an entry the
+///   store wrote; unlink the indirection.
+///
+/// Non-data headers pass through (the caller trusts the packet
+/// framework to reject any leftover invalid combinations).
+unsafe fn cache_entry_is_valid(
+    indirection_filename: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> bool {
+    use morloc_runtime_types::packet::{
+        PACKET_FORMAT_DATA, PACKET_SOURCE_FILE, PacketHeader,
+    };
+    if data_len < 32 {
+        libc::unlink(indirection_filename);
+        return false;
+    }
+    let hdr_arr: [u8; 32] = match std::slice::from_raw_parts(data, 32).try_into() {
+        Ok(a) => a,
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+    let hdr = match PacketHeader::from_bytes(&hdr_arr) {
+        Ok(h) => h,
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+    if !hdr.is_data() {
+        return true; // Non-data (call/ping/stream) -- not our concern.
+    }
+    let cmd = hdr.command.data;
+    let src = cmd.source;
+    let fmt = cmd.format;
+    if src != PACKET_SOURCE_FILE || fmt != PACKET_FORMAT_DATA {
+        libc::unlink(indirection_filename);
+        return false;
+    }
+
+    let payload_start = 32 + hdr.offset as usize;
+    let payload_len = hdr.length as usize;
+    if payload_start.saturating_add(payload_len) > data_len {
+        libc::unlink(indirection_filename);
+        return false;
+    }
+    let ref_filename_str = match crate::packet_ffi::file_path(data.add(payload_start), payload_len) {
+        Ok(s) => s.to_string(),
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+    let ref_cstring = match CString::new(ref_filename_str.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => { libc::unlink(indirection_filename); return false; }
+    };
+
+    // Atomicity: the content sidecar must exist and be non-empty.
+    // A missing or empty file means the two-file write got
+    // interrupted between rename(2) calls. `unlink` on a missing
+    // sidecar is a no-op.
+    let mut sb: libc::stat = std::mem::zeroed();
+    let sidecar_ok =
+        libc::stat(ref_cstring.as_ptr(), &mut sb) == 0 && sb.st_size > 0;
+    if !sidecar_ok {
+        libc::unlink(ref_cstring.as_ptr());
+        libc::unlink(indirection_filename);
+        return false;
+    }
+    true
+}
+
+/// Store a cached value under two files:
+///
+///   `<cache_base>/<label>/<call_key:016x>.dat`
+///       A `PACKET_TYPE_DATA` indirection packet
+///       (source=FILE, format=DATA, compression=NONE) whose payload is
+///       the path to the content file.
+///   `<cache_base>/data/<data_hash:016x>.dat`
+///       A full voidstar data packet (32-byte header + SCHEMA_STRING
+///       metadata + optional zstd payload), content-addressed.
+///
+/// `data_hash = hash_voidstar(voidstar)` — the schema-directed
+/// structural hash — so equal values from different call sites (any
+/// label, any pool language) collapse onto one content file
+/// regardless of allocation history.
+///
+/// Content ordering: content file is written first (via rename), then
+/// the indirection. A crash between the two leaves an orphan content
+/// file that a later run silently overwrites via the same content
+/// hash. The reverse ordering would leave an indirection pointing at
+/// a missing content file, which the reader treats as a cache miss.
+pub(crate) unsafe fn morloc_cache_store(
+    key: u64,
+    label: *const c_char,
+    data: *const u8,
+    size: usize,
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> bool {
+    clear_errmsg(errmsg);
+
+    if data.is_null() || size == 0 {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "cache_store: NULL or empty packet".into()
+        ));
+        return false;
+    }
+    if schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "cache_store: NULL schema string".into()
+        ));
+        return false;
+    }
+
+    let mut err: *mut c_char = ptr::null_mut();
+
+    let schema = parse_schema(schema_str, &mut err);
+    if schema.is_null() {
+        if !err.is_null() { *errmsg = err; }
+        else {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "cache_store: failed to parse schema".into()
+            ));
+        }
+        return false;
+    }
+
+    // Materialize the packet into SHM voidstar so we can hash and
+    // re-serialize it. This handles RPTR / FILE / MESG uniformly.
+    let voidstar = get_morloc_data_packet_value(data, schema, &mut err);
+    if voidstar.is_null() {
+        free_schema(schema);
+        if !err.is_null() { *errmsg = err; }
+        else {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "cache_store: get_morloc_data_packet_value failed".into()
+            ));
+        }
+        return false;
+    }
+
+    let rs = CSchema::to_rust(schema);
+    // Seed 0 is the shared default across the runtime.
+    let data_hash = match hash_voidstar_value(voidstar as *const u8, &rs, 0) {
+        Ok(h) => h,
+        Err(e) => {
+            free_schema(schema);
+            set_errmsg(errmsg, &e);
+            return false;
+        }
+    };
+
+    let dat_filename = resolve_data_filename(data_hash, &mut err);
+    if dat_filename.is_null() {
+        free_schema(schema);
+        if !err.is_null() { *errmsg = err; }
+        return false;
+    }
+
+    // Skip the dat write if the content-addressed file is already
+    // present. Two distinct call sites returning the same value share
+    // one on-disk copy.
+    let dat_already_exists = {
+        let mut sb: libc::stat = std::mem::zeroed();
+        libc::stat(dat_filename, &mut sb) == 0
+    };
+    if !dat_already_exists {
+        let packet_bytes = match build_persistence_data_packet(
+            voidstar as *const u8, schema, &mut err,
+        ) {
+            Some(b) => b,
+            None => {
+                libc::free(dat_filename as *mut c_void);
+                free_schema(schema);
+                if !err.is_null() { *errmsg = err; }
+                return false;
+            }
+        };
+        let rc = write_atomic(
+            dat_filename,
+            packet_bytes.as_ptr(),
+            packet_bytes.len(),
+            &mut err,
+        );
+        if rc != 0 {
+            libc::free(dat_filename as *mut c_void);
+            free_schema(schema);
+            if !err.is_null() { *errmsg = err; }
+            return false;
+        }
+    }
+
+    let pkt = crate::packet_ffi::make_data_indirection_packet(dat_filename, schema);
+    libc::free(dat_filename as *mut c_void);
+    free_schema(schema);
+    if pkt.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other(
+            "cache_store: make_data_indirection_packet failed".into()
+        ));
+        return false;
+    }
+
+    let pkt_size = morloc_packet_size(pkt, &mut err);
+    if !err.is_null() {
+        libc::free(pkt as *mut c_void);
+        *errmsg = err;
+        return false;
+    }
+
+    let pkt_filename = resolve_cache_filename(key, label, errmsg);
+    if pkt_filename.is_null() {
+        libc::free(pkt as *mut c_void);
+        return false;
+    }
+
+    let rc = write_atomic(pkt_filename, pkt, pkt_size, &mut err);
+    libc::free(pkt_filename as *mut c_void);
+    libc::free(pkt as *mut c_void);
+    if rc != 0 {
+        if !err.is_null() { *errmsg = err; }
+        return false;
+    }
+    true
+}
+
+// ── hash_voidstar ──────────────────────────────────────────────────────────
+
+pub(crate) unsafe fn hash_voidstar(
+    data: *const c_void,
+    schema: *const CSchema,
+    seed: u64,
+    errmsg: *mut *mut c_char,
+) -> u64 {
+    clear_errmsg(errmsg);
+    let rs = CSchema::to_rust(schema);
+    match hash_voidstar_value(data as *const u8, &rs, seed) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            0
+        }
+    }
+}
+
+/// The hash of a value under its schema, as `hash_voidstar` computes it.
+pub(crate) fn hash_voidstar_value(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    seed: u64,
+) -> Result<u64, MorlocError> {
+    let mut w = HashWalk { res: Resolver::new(schema), h: seed };
+    let mut st = Stack::new();
+    st.enter(schema, data, ());
+    walk::run(&mut w, &mut st)?;
+    Ok(w.h)
+}
+
+/// A left-to-right fold of the value into one register. Every node folds
+/// its SerialType tag into the register on its first visit, so structurally
+/// distinct schemas can never share a payload hash: without it,
+/// single-element wrappings collide -- `[[1.0, 2.0]]` as `[[Real]]` walks a
+/// 1-iteration outer loop into a fixed-width inner array of 16 bytes and
+/// returns `xxh64({1.0,2.0}, 0)`, exactly the hash `[Real]` produces for
+/// `[1.0, 2.0]`. Arrays additionally mix in their size so `[[a,b]]` and
+/// `[[a],[b]]` differ even when their flat element bytes and total counts
+/// match. A back-reference folds its own tag and then the declaration's,
+/// so the key of a recursive value depends on where the schema was cut.
+///
+/// The register threads through the children of a container in order, so
+/// a resumed visit continues from the register as the last child left it
+/// and folds nothing of its own.
+struct HashWalk<'r> {
+    res: Resolver<'r>,
+    h: u64,
+}
+
+impl<'r> HashWalk<'r> {
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, ());
+            Ok(Visit::Deferred)
+        }
+    }
+
+    fn fold(&mut self, bytes: &[u8]) {
+        self.h = hash::xxh64_with_seed(bytes, self.h);
+    }
+}
+
+impl<'r> Walker<()> for HashWalk<'r> {
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        use crate::schema::SerialType;
+        use crate::utility::mix;
+
+        // SAFETY: frames hold nodes of the tree the resolver was built from;
+        // `data` points at a value laid out as that schema describes, and
+        // every read is within the bounds the schema and headers give.
+        let written: &'r Schema = unsafe { &*f.schema };
+        let s = if written.serial_type == SerialType::Recur {
+            if f.idx == 0 {
+                self.h = mix(self.h, SerialType::Recur as u64);
+            }
+            self.res.resolve(written)?
+        } else {
+            written
+        };
+        if f.idx == 0 {
+            self.h = mix(self.h, s.serial_type as u64);
+        }
+        let data = f.data;
+        unsafe {
+            match s.serial_type {
+                SerialType::Int => {
+                    // Inline BigInt: hash the value directly for size <= 1
+                    let size = *(data as *const usize);
+                    if size <= 1 {
+                        self.fold(std::slice::from_raw_parts(data.add(8), 8));
+                    } else {
+                        let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
+                        self.fold(crate::voidstar::int_limb_bytes(size, relptr)?);
+                    }
+                }
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Cache key is content-derived. Resolve TAG_HANDLE to its
+                    // path via the local SHM registry so two handles to the
+                    // same file produce the same hash. TAG_PATH reads the
+                    // path straight out of the suballoc.
+                    use morloc_runtime_types::stream_handle as sh;
+                    let tag = sh::read_tag(data);
+                    let payload = sh::read_payload(data);
+                    let owned: Vec<u8>;
+                    let borrowed: &[u8];
+                    if tag == sh::TAG_PATH {
+                        borrowed = match crate::voidstar::path_suballoc(&crate::voidstar::Arena, payload)? {
+                            Some(block) => &block[8..],
+                            None => &[],
+                        };
+                    } else if tag == sh::TAG_HANDLE {
+                        owned = crate::stream::handle_path(sh::payload_handle(payload))?.into_bytes();
+                        borrowed = &owned;
+                    } else {
+                        return Err(MorlocError::Other(format!(
+                            "cache hash: unsupported stream-handle tag {}", tag,
+                        )));
+                    }
+                    self.fold(borrowed);
+                }
+                SerialType::String | SerialType::Array => {
+                    let arr = &*(data as *const shm::Array);
+                    let elem_width = if s.parameters.is_empty() {
+                        1 // string bytes
+                    } else {
+                        s.parameters[0].width
+                    };
+                    if f.idx == 0 {
+                        self.h = mix(self.h, arr.size as u64);
+                        // Empty collection: arr.data is RELNULL, so there is
+                        // no data region to resolve; hash the size-mixed
+                        // register with no bytes.
+                        if arr.size == 0 {
+                            self.fold(&[]);
+                            return Ok(());
+                        }
+                        // Bulk-hash the flat data region (String bytes, or an
+                        // Array of fixed-width elements), else fold per
+                        // element. The bulk path still folds the element's
+                        // SerialType tag, as the per-element walk it replaces
+                        // would, so `[U8]` and `[I8]` with identical bytes
+                        // do not collide.
+                        if s.array_data_is_flat() {
+                            if let Some(e) = s.parameters.first() {
+                                self.h = mix(self.h, e.serial_type as u64);
+                            }
+                            let elem_data = shm::rel2abs(arr.data)?;
+                            self.fold(std::slice::from_raw_parts(elem_data, elem_width * arr.size));
+                            return Ok(());
+                        }
+                    }
+                    let elem_data = shm::rel2abs(arr.data)?;
+                    for i in f.idx..arr.size {
+                        let child = &s.parameters[0];
+                        if self.child(st, &f, i, child, elem_data.add(i * elem_width))? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    if s.is_fixed_width() {
+                        self.fold(std::slice::from_raw_parts(data, s.width));
+                    } else {
+                        for i in f.idx..s.parameters.len() {
+                            let child = &s.parameters[i];
+                            if self.child(st, &f, i, child, data.add(s.offsets[i]))? == Visit::Deferred {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                SerialType::Optional => {
+                    // The slot is a relative pointer, so its bytes are an
+                    // ADDRESS. Hashing them makes equal values at different
+                    // offsets differ, and -- far worse -- makes different
+                    // values that land on the same recycled block agree.
+                    // Hash presence, then the pointed-to value.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let relptr = *(data as *const shm::RelPtr);
+                    if relptr == shm::RELNULL || s.parameters.is_empty() {
+                        self.fold(&[0u8]);
+                    } else {
+                        let inner = shm::rel2abs(relptr)?;
+                        self.h = mix(self.h, 1);
+                        self.child(st, &f, 0, &s.parameters[0], inner)?;
+                    }
+                }
+                SerialType::Variant => {
+                    // Tag then payload, for the same reason as Optional:
+                    // bytes 8..16 are a pointer. The tag alone is not enough
+                    // -- two values of one arm would collide -- and the 7
+                    // pad bytes between are never hashed, so they cannot
+                    // perturb the key.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let tag = *data;
+                    let arm = s.parameters.get(tag as usize).ok_or_else(|| {
+                        MorlocError::Serialization(format!(
+                            "variant tag {} is out of range; the type has {} arms",
+                            tag, s.size
+                        ))
+                    })?;
+                    self.h = mix(self.h, tag as u64);
+                    let relptr = *(data.add(8) as *const shm::RelPtr);
+                    if relptr == shm::RELNULL {
+                        self.fold(&[]);
+                    } else {
+                        let inner = shm::rel2abs(relptr)?;
+                        self.child(st, &f, 0, arm, inner)?;
+                    }
+                }
+                SerialType::Recur => {
+                    return Err(MorlocError::Schema(
+                        "back-reference resolves to a back-reference".to_string(),
+                    ));
+                }
+                SerialType::Table => {
+                    // `data` is the table's block. Its bytes are its value:
+                    // every offset is block-relative and the padding is
+                    // zeroed, so equal tables produce equal blocks.
+                    let n = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
+                    self.fold(std::slice::from_raw_parts(data, n));
+                }
+                // Everything below is a fixed-width scalar holding no
+                // pointer, so its bytes ARE its value. Enumerated rather
+                // than left to a catch-all: a type whose slot holds a
+                // relative pointer must never reach a raw-byte hash, and a
+                // wildcard here is how one silently would.
+                SerialType::Nil
+                | SerialType::Bool
+                | SerialType::Sint8
+                | SerialType::Sint16
+                | SerialType::Sint32
+                | SerialType::Sint64
+                | SerialType::Uint8
+                | SerialType::Uint16
+                | SerialType::Uint32
+                | SerialType::Uint64
+                | SerialType::Float32
+                | SerialType::Float64
+                | SerialType::Enum => {
+                    self.fold(std::slice::from_raw_parts(data, s.width));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── hash_morloc_packet ─────────────────────────────────────────────────────
+
+pub(crate) unsafe fn hash_morloc_packet(
+    packet: *const u8,
+    schema: *const CSchema,
+    seed: u64,
+    hash_out: *mut u64,
+    errmsg: *mut *mut c_char,
+) -> bool {
+    clear_errmsg(errmsg);
+    *hash_out = 0;
+
+    use crate::packet_ffi::read_morloc_packet_header;
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let header = read_morloc_packet_header(packet, &mut err);
+    if header.is_null() {
+        if !err.is_null() {
+            *errmsg = err;
+        }
+        return false;
+    }
+
+    let cmd_type = (*header).command_type();
+    if cmd_type == crate::packet::PACKET_TYPE_CALL {
+        let midx = { (*header).command.call.midx };
+        *hash_out = crate::utility::mix(seed, midx as u64);
+        for span in crate::packet_ffi::call_args(packet, header) {
+            let span = match span {
+                Ok(s) => s,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return false;
+                }
+            };
+            let arg_bytes = std::slice::from_raw_parts(packet.add(span.start), span.len());
+            *hash_out = crate::utility::mix(*hash_out, hash::xxh64_with_seed(arg_bytes, *hash_out));
+        }
+    } else if cmd_type == crate::packet::PACKET_TYPE_DATA {
+        let voidstar = get_morloc_data_packet_value(packet, schema, &mut err);
+        if voidstar.is_null() {
+            if !err.is_null() {
+                *errmsg = err;
+            }
+            return false;
+        }
+        let rs = CSchema::to_rust(schema);
+        match hash_voidstar_value(voidstar, &rs, seed) {
+            Ok(h) => *hash_out = h,
+            Err(e) => {
+                set_errmsg(errmsg, &e);
+                return false;
+            }
+        }
+    } else {
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other(format!("Cannot hash packet with command 0x{:02x}", cmd_type)),
+        );
+        return false;
+    }
+
+    true
+}
+
+// ── Cache filename generation ──────────────────────────────────────────────
+
+pub(crate) unsafe fn make_cache_filename_ext(
+    key: u64,
+    cache_path: *const c_char,
+    ext: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    clear_errmsg(errmsg);
+    let path = CStr::from_ptr(cache_path).to_string_lossy();
+    let extension = CStr::from_ptr(ext).to_string_lossy();
+    let filename = format!("{}/{:016x}{}", path, key, extension);
+    match CString::new(filename) {
+        Ok(cs) => crate::error::malloc_cstr(&cs),
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other("CString conversion failed".into()));
+            ptr::null_mut()
+        }
+    }
+}
+
+pub(crate) unsafe fn make_cache_filename(
+    key: u64,
+    cache_path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    // `.dat` for every on-disk cache entry -- both the caller-key index
+    // and the content-hash blob. Reader tells them apart by inspecting
+    // the packet header bytes.
+    let ext = CString::new(".dat").unwrap();
+    make_cache_filename_ext(key, cache_path, ext.as_ptr(), errmsg)
+}
+
+/// Compression level read from `MORLOC_CACHE_COMPRESSION_LEVEL`. Default
+/// is 0 (uncompressed) so `morloc dump` renders cache entries without
+/// paying decompression cost. Users opt into higher levels via env for
+/// large-payload workloads where disk footprint matters. Cached once on
+/// first read like `pool_hash` and `cache_base`. A value that is not a
+/// level is an error, never a silent 0.
+fn read_cache_compression_level() -> Result<crate::compression::CompressionLevel, MorlocError> {
+    use crate::compression::CompressionLevel;
+    static CACHED: PublishOnce<Result<CompressionLevel, String>> = PublishOnce::new();
+    CACHED
+        .get_or_init(|| match std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL") {
+            Err(_) => Ok(CompressionLevel::NONE),
+            Ok(s) => s
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| format!("got {:?}", s))
+                .and_then(|n| CompressionLevel::from_int(n).map_err(|e| e.to_string()))
+                .map_err(|e| format!("MORLOC_CACHE_COMPRESSION_LEVEL: {}", e)),
+        })
+        .clone()
+        .map_err(MorlocError::Other)
+}
+
+/// Serialize an SHM voidstar as a self-contained MORLOC_DATA_PACKET
+/// suitable for on-disk persistence. Runs the persistence rewrite
+/// (TAG_HANDLE -> TAG_PATH, stdio rejection) then optionally zstd-
+/// compresses per `MORLOC_CACHE_COMPRESSION_LEVEL`. The returned bytes
+/// are the entire packet (32-byte header + SCHEMA_STRING metadata +
+/// payload); write them to disk as one atomic file.
+pub(crate) unsafe fn build_persistence_data_packet(
+    voidstar: *const u8,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> Option<Vec<u8>> {
+    use morloc_runtime_types::packet::{
+        append_metadata_entry, METADATA_TYPE_SCHEMA_STRING,
+        PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
+        PACKET_FORMAT_VOIDSTAR, PacketHeader,
+    };
+
+    let rs = CSchema::to_rust(schema);
+
+    let mut blob = match crate::voidstar::flatten_to_buffer(
+        voidstar as crate::shm::AbsPtr,
+        &rs,
+    ) {
+        Ok(b) => b,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+
+    // TAG_HANDLE -> TAG_PATH: slot ids don't survive across nexus
+    // lifetimes. Guards against stdio-bound handles (rejected with a
+    // typed error before any bytes reach disk).
+    let fields = match crate::handle_scan::collect_stream_fields(&blob, &rs) {
+        Ok(f) => f,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+    if let Err(e) = crate::handle_scan::rewrite_handles_to_paths(&mut blob, &fields) {
+        set_errmsg(errmsg, &e);
+        return None;
+    }
+
+    let clvl = match read_cache_compression_level() {
+        Ok(l) => l,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+    let payload = match crate::compression::compress_payload_zstd(&blob, clvl) {
+        Ok((bytes, _frames)) => bytes,
+        Err(e) => { set_errmsg(errmsg, &e); return None; }
+    };
+    let compression_byte = if clvl.is_none() {
+        PACKET_COMPRESSION_NONE
+    } else {
+        PACKET_COMPRESSION_ZSTD
+    };
+    drop(blob);
+
+    let schema_str = crate::schema::schema_to_string(&rs);
+    let mut schema_body = schema_str.into_bytes();
+    schema_body.push(0); // NUL-terminator matches decode_schema_entry
+    let metadata = append_metadata_entry(
+        &[], METADATA_TYPE_SCHEMA_STRING, &schema_body,
+    );
+    let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload.len() as u64);
+    header.offset = metadata.len() as u32;
+    let hdr_bytes = header.to_bytes();
+    // Patch the compression field in the serialized form; the offset is
+    // derived from the header layout rather than written down here.
+    let mut hdr_bytes = hdr_bytes;
+    hdr_bytes[morloc_runtime_types::packet::PKT_COMPRESSION_OFF] = compression_byte;
+
+    let mut out = Vec::with_capacity(32 + metadata.len() + payload.len());
+    out.extend_from_slice(&hdr_bytes);
+    out.extend_from_slice(&metadata);
+    out.extend_from_slice(&payload);
+    Some(out)
+}
+
+#[cfg(test)]
+mod hash_pointer_tests {
+    use super::*;
+    use crate::json;
+    use crate::schema::parse_schema;
+
+    // Hash two independently built values of the same content. Anything whose
+    // voidstar slot holds a relative pointer lands at a different offset on
+    // each build, so a hash over the slot's raw bytes differs here -- and,
+    // once a freed block is recycled, two DIFFERENT values agree instead.
+    // That is a cache hit returning the previous call's result, so these
+    // assert on structure rather than address.
+    fn hash_of(json_text: &str, schema_str: &str) -> u64 {
+        let schema = parse_schema(schema_str).unwrap();
+        let ptr = json::read_json_with_schema(json_text, &schema).unwrap();
+        hash_voidstar_value(ptr as *const u8, &schema, 0).unwrap()
+    }
+
+    // The store writes only file indirections to DATA sidecars. Any other
+    // file format is not an entry it wrote: a miss, and the indirection goes.
+    #[test]
+    fn only_a_data_file_indirection_is_a_cache_entry() {
+        let dir = std::env::temp_dir().join(format!("morloc-cache-entry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sidecar = dir.join("value.dat");
+        std::fs::write(&sidecar, b"payload").unwrap();
+        let side_c = CString::new(sidecar.to_str().unwrap()).unwrap();
+        let schema_c = CString::new("i4").unwrap();
+        let check = |fmt: u8, name: &str| unsafe {
+            let schema = crate::ffi::parse_schema(schema_c.as_ptr(), &mut ptr::null_mut());
+            let p = crate::packet_ffi::make_program_file_packet(side_c.as_ptr(), schema, fmt);
+            let h = &*(p as *const morloc_runtime_types::packet::PacketHeader);
+            let bytes = std::slice::from_raw_parts(p, 32 + h.offset as usize + h.length as usize).to_vec();
+            let indir = dir.join(name);
+            std::fs::write(&indir, &bytes).unwrap();
+            let indir_c = CString::new(indir.to_str().unwrap()).unwrap();
+            let valid = cache_entry_is_valid(indir_c.as_ptr(), bytes.as_ptr(), bytes.len());
+            (valid, indir.exists())
+        };
+        use morloc_runtime_types::packet::{PACKET_FORMAT_DATA, PACKET_FORMAT_MSGPACK, PACKET_FORMAT_TEXT};
+        assert_eq!(check(PACKET_FORMAT_DATA, "data.ind"), (true, true));
+        assert_eq!(check(PACKET_FORMAT_TEXT, "text.ind"), (false, false));
+        assert_eq!(check(PACKET_FORMAT_MSGPACK, "mpk.ind"), (false, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn optional_hash_is_content_addressed() {
+        let _shm = crate::init_test_shm();
+        assert_eq!(hash_of("42", "?i4"), hash_of("42", "?i4"));
+        assert_eq!(hash_of("null", "?i4"), hash_of("null", "?i4"));
+        assert_ne!(
+            hash_of("42", "?i4"),
+            hash_of("43", "?i4"),
+            "distinct payloads must not collide"
+        );
+        assert_ne!(
+            hash_of("null", "?i4"),
+            hash_of("0", "?i4"),
+            "absent must differ from a present zero"
+        );
+    }
+
+    #[test]
+    fn table_hash_covers_the_block_and_round_trips_through_a_flat_packet() {
+        use arrow_array::{Int64Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+        use std::sync::Arc;
+        let _shm = crate::init_test_shm();
+        let schema = parse_schema("T").unwrap();
+        let table = |xs: Vec<i64>| {
+            let s = ArrowSchema::new(vec![Field::new("x", DataType::Int64, true)]);
+            let b = RecordBatch::try_new(Arc::new(s), vec![Arc::new(Int64Array::from(xs))]).unwrap();
+            let rel = crate::arrow_shm::write_batch(&b, None).unwrap();
+            (b, shm::rel2abs(rel).unwrap())
+        };
+        let hash = |p: *mut u8| {
+            hash_voidstar_value(p as *const u8, &schema, 0).unwrap()
+        };
+        let (b1, t1) = table(vec![1, 2, 3]);
+        let (_, t2) = table(vec![1, 2, 3]);
+        let (_, t3) = table(vec![1, 2, 4]);
+        assert_eq!(hash(t1), hash(t2), "equal tables in different blocks must agree");
+        assert_ne!(hash(t1), hash(t3));
+
+        // The flat form is the block itself, and reading it back yields an
+        // equal table in a fresh block.
+        let flat = crate::voidstar::flatten_to_buffer(t1, &schema).unwrap();
+        assert_eq!(flat.len(), unsafe { crate::arrow_shm::block_size(t1 as *const _) }.unwrap());
+        let back = crate::voidstar::read_binary(&flat, &schema).unwrap();
+        let batch = unsafe { crate::arrow_shm::shm_to_batch(back as *const _) }.unwrap();
+        assert_eq!(batch, b1);
+        assert_eq!(hash(back), hash(t1));
+    }
+
+    #[test]
+    fn optional_of_compound_hash_is_content_addressed() {
+        let _shm = crate::init_test_shm();
+        assert_eq!(hash_of("[1,2,3]", "?ai4"), hash_of("[1,2,3]", "?ai4"));
+        assert_ne!(hash_of("[1,2,3]", "?ai4"), hash_of("[1,2,4]", "?ai4"));
+    }
+
+    #[test]
+    fn variant_hash_covers_tag_and_payload() {
+        let _shm = crate::init_test_shm();
+        let sch = "v26Circle1f83Dot0";
+        assert_eq!(hash_of(r#"{"Circle":[1.5]}"#, sch), hash_of(r#"{"Circle":[1.5]}"#, sch));
+        assert_eq!(hash_of(r#""Dot""#, sch), hash_of(r#""Dot""#, sch));
+        assert_ne!(
+            hash_of(r#"{"Circle":[1.5]}"#, sch),
+            hash_of(r#"{"Circle":[2.5]}"#, sch),
+            "same arm, different payload"
+        );
+        assert_ne!(
+            hash_of(r#"{"Circle":[1.5]}"#, sch),
+            hash_of(r#""Dot""#, sch),
+            "different arms"
+        );
+    }
+
+    #[test]
+    fn recursive_variant_hash_resolves_the_back_reference() {
+        let _shm = crate::init_test_shm();
+        // A back-reference must resolve to its declaration; without that the
+        // node has only a placeholder width and cannot be hashed correctly.
+        let sch = "&4Treev24Leaf04Node2^4Tree^4Tree";
+        let leaf = r#""Leaf""#;
+        let node = r#"{"Node":["Leaf","Leaf"]}"#;
+        assert_eq!(hash_of(leaf, sch), hash_of(leaf, sch));
+        assert_eq!(hash_of(node, sch), hash_of(node, sch));
+        assert_ne!(hash_of(leaf, sch), hash_of(node, sch));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn morloc_pool_hash() -> u64 {
+        super::morloc_pool_hash()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_cache_record_hit() {
+        super::morloc_cache_record_hit()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_cache_record_miss() {
+        super::morloc_cache_record_miss()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_cache_record_store() {
+        super::morloc_cache_record_store()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_key_compute(midx: u32, arg_packets: *const *const u8, arg_schemas: *const *const c_char, n_args: usize, errmsg: *mut *mut c_char) -> u64 {
+        super::morloc_cache_key_compute(midx, arg_packets, arg_schemas, n_args, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_lookup(key: u64, label: *const c_char, size_out: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::morloc_cache_lookup(key, label, size_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_store(key: u64, label: *const c_char, data: *const u8, size: usize, schema_str: *const c_char, errmsg: *mut *mut c_char) -> bool {
+        super::morloc_cache_store(key, label, data, size, schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn hash_voidstar(data: *const c_void, schema: *const CSchema, seed: u64, errmsg: *mut *mut c_char) -> u64 {
+        super::hash_voidstar(data, schema, seed, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_cache_filename_ext(key: u64, cache_path: *const c_char, ext: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::make_cache_filename_ext(key, cache_path, ext, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_cache_filename(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::make_cache_filename(key, cache_path, errmsg)
+    }
+
+}

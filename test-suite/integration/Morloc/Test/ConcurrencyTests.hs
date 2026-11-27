@@ -10,7 +10,7 @@ import Morloc.Test.Common
 
 -- | A concurrency test spec: compile a .loc file, run each subcommand
 data ConcSpec = ConcSpec
-  { csLocFile :: String -- .loc filename (relative to concurrency-tests/)
+  { csLocFile :: String -- .loc filename (relative to integration/suites/concurrency/)
   , csSubcommands :: [String] -- exported functions to run
   }
 
@@ -24,7 +24,7 @@ concurrencyTest env name spec =
 
 runSubcmd :: TestEnv -> ConcSpec -> String -> IO ()
 runSubcmd env spec subcmd = do
-  let srcDir = teSuiteDir env </> "concurrency-tests"
+  let srcDir = teSuiteDir env </> "integration" </> "suites" </> "concurrency"
   withTestDir $ \workDir -> do
     -- Copy .loc file and helpers
     copyLocAndHelpers srcDir (csLocFile spec) workDir

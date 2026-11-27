@@ -5,7 +5,7 @@
   2026-10-10 failed
   `process::tests::the_sweeper_waits_for_a_group_to_end_then_sweeps_its_dead_run`
   at the `.unwrap()` on `Spawn::run` in its helper `start_group`
-  (morloc-nexus/src/process.rs:2138); five isolated reruns and one workspace rerun passed. The
+  (morloc-nexus/src/process.rs:2235); five isolated reruns and one workspace rerun passed. The
   error value was not captured; cause unknown.
 - **Reader slot test fails under the gate.** [reproduced once] Against
   SLOT-9. The full gate on 2026-10-11 failed
@@ -16,11 +16,6 @@
   references held ...") is not kept by the gate's filter, so which of the
   three conditions failed is unknown; a rerun should keep the full test
   output.
-- **A wall-clock typecheck test times out under load.** [reproduced once
-  2026-10-14] `long non-tuple composition chain stays linear`
-  (morloc-test) has a 1 s timeout; under `-j 6` it hit TIMEOUT at 1.05 s,
-  while alone it takes 0.07 s (3 runs). A wall-clock bound in a parallel
-  suite measures the machine; counting steps would test linearity.
 - **The helper ceiling test fails on a loaded machine.** [reproduced
   2026-11-23, 4 of 4 runs at load average 18 on 12 cores; passed in a
   workspace run earlier that day] `par_pool::tests::the_helpers_stay_under_the_ceiling`
@@ -105,7 +100,7 @@
   memory")`. It passed alone and in the next full run. Likely another
   test's registry teardown or volume reset racing it; unconfirmed.
 - **A typechecker timing test times out under a parallel run.**
-  [reproduced once, 2026-11-20] The unit test "long non-tuple composition
+  [reproduced 2026-10-14 and 2026-11-20] The unit test "long non-tuple composition
   chain stays linear" hit its 1 s timeout in a full `-j 6` suite run
   (1.03 s); alone it takes 0.14 s, three runs of three. A wall-clock bound
   in a suite that runs beside builds measures load as much as growth; a

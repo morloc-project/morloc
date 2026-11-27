@@ -1,0 +1,140 @@
+# Python language descriptor for morloc compiler
+# Metadata fields (read by LangRegistry) + descriptor fields (read by generic translator)
+
+# Identity and metadata
+name: py
+extension: py
+aliases: ["python", "python3"]
+is_compiled: false
+run_command: ["python3"]
+serial_type: "str"
+# Python's str natively supports interior NUL bytes.
+allow_string_null: true
+fork_workers: true
+# Record kinds the compiler generates definitions for (GEN-2). A record with
+# no form of its own in this language takes the default kind.
+generated_types:
+  prefix: mlc_types
+  records:
+    default: dict
+    kinds:
+      dict: { form: dict, legacy: [dict, OrderedDict] }
+      dataclass: { form: dataclass, class: dataclass }
+      pydantic: { form: pydantic, class: pydantic }
+# Python reuses a pyc whose whole-second mtime and size match its source, so
+# a same-size edit in the same second would run the old code; the build
+# removes the bytecode of every file it sources (PY-3). The check compiles a
+# file without writing bytecode.
+build:
+  per_source:
+    - remove: "{{dir}}/__pycache__/{{stem}}.*.pyc"
+    - check: "python3 -I -c 'import sys; compile(open(sys.argv[1], \"rb\").read(), sys.argv[1], \"exec\")' {{path}}"
+preamble:
+  # The morloc-owned directories go on the front of sys.path before the runtime
+  # is imported, so `import pymorloc` cannot be answered by a user source file
+  # of that name. The program's own source root and the working directory are
+  # searched for sourced files through _mlc_source_roots, never through
+  # sys.path, and go on the END of sys.path only so that a sourced file can
+  # import a plain sibling by bare name. Ahead of the standard library they
+  # would answer any lazy `import ast` or `import json` made later in the
+  # process with a user file that happens to share the name.
+  - 'sys.path = [os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}"), os.path.expanduser("{{state}}/modules/python")] + sys.path'
+  - "import importlib"
+  - "import builtins as __morloc_builtins"
+  # SHIM-5: the binding is named for the interpreter it was built for, so
+  # another interpreter cannot import it; say what repairs that.
+  - "try:"
+  - "    import pymorloc as morloc"
+  - "except ImportError as _mlc_e:"
+  - '    raise ImportError("the morloc python binding (pymorloc) does not load in this python (" + sys.version.split()[0] + ", " + sys.executable + "): " + str(_mlc_e) + "; run `morloc init -f` (in a managed environment, `mim update --reinit`)") from _mlc_e'
+  - '_mlc_source_roots = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")), os.path.expanduser("."), os.path.expanduser("{{lib}}")]'
+  - 'sys.path = sys.path + _mlc_source_roots[:2]'
+
+# Literals
+ldBoolTrue: "True"
+ldBoolFalse: "False"
+ldNullLiteral: "None"
+ldNullCheckTemplate: "{{expr}} is not None"
+ldListLengthTemplate: "len({{expr}})"
+ldRealPosInf: "float('inf')"
+ldRealNegInf: "float('-inf')"
+ldRealNaN: "float('nan')"
+
+# Constructors
+ldListStyle: bracket
+ldTupleConstructor: ""
+ldRecordConstructor: "dict"
+
+# Access styles
+ldIndexStyle: zero_bracket
+ldKeyAccess: "bracket"
+ldFieldAccess: dot
+
+# Serialize/deserialize
+ldSerializeFn: "morloc.put_value"
+ldTableImportFn: "mlc_table_import"
+ldDeserializeFn: "morloc.get_value"
+ldReleasePacketFn: "morloc.release_packet_shm"
+ldOwnedArgFn: "_mlc_owned"
+ldIntrinsicPrefix: "morloc."
+ldHelperVarPrefix: "__morloc_"
+
+# Foreign call
+ldForeignCallFn: "morloc.foreign_call"
+ldForeignCallIntSuffix: ""
+
+# Remote call
+ldRemoteCallFn: "morloc.remote_call"
+
+# Record handling
+ldDictStyleRecords: true
+ldEnumLitByName: false
+
+# Import syntax
+ldQualifiedImports: true
+
+# Template fields
+# A sourced symbol is a Python identifier or operator, emitted verbatim.
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_.]*"
+ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
+ldAssignOp: "="
+ldAndOp: "and"
+ldOrOp: "or"
+ldNotOp: "not"
+ldLambdaTemplate: "lambda {{args}}: {{body}}"
+ldDoBlockExpr: "(lambda: {{expr}})"
+ldDoBlockBlock: ""
+ldPartialTemplate: "functools.partial({{fn_with_context}})"
+ldImportTemplate: "{{namespace}} = _mlc_import_source(\"{{module_path}}\")"
+ldSocketPathTemplate: "_mlc_socket_paths[{{socket}}]"
+ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
+ldReturnTemplate: "return({{expr}})"
+ldReservedPrefixes: ["__mm_", "__morloc"]
+ldManifoldPrefix: "__mm_"
+ldBuiltinQualifier: "__morloc_builtins."
+ldKeywords: ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]
+ldFuncDefHeader: "def {{name}}({{args}}):"
+ldBlockStyle: indent
+ldFrameLabelStmt: "mlc_frame_labels[id({{fname}}.__code__)] = \"{{label}}\""
+ldPatternStyle: fstring
+ldQuoteTerminator: '"""'
+ldQuoteTerminatorEsc: '\"\"\"'
+ldStrLiteralMap:
+  str: ""
+  bytes: "b"
+ldMapStyle: loop_append
+ldDispatchLocalHeader: "dispatch = {"
+ldDispatchLocalEntry: "    {{mid}}: {{name}},"
+ldDispatchLocalFooter: "}"
+ldDispatchRemoteHeader: "remote_dispatch = {"
+ldDispatchRemoteEntry: "    {{mid}}: {{name}}_remote,"
+ldDispatchRemoteFooter: "}"
+ldLogWrap: "__mlc_wrap_log"
+ldClosureRegisterEntry: "dispatch[{{mid}}] = mlc_make_closure_dispatch({{mid}}, {{args}}, {{res}})"
+ldClosureTableHeader: "mlc_closure_table = {}"
+ldClosureTableEntry: "mlc_closure_table[{{mid}}] = ({{caps}}, {{bnds}})"
+
+# Pool template (loaded from pool.py, left empty here)
+ldPoolTemplate: ""
+ldBreakMarker: "# <<<BREAK>>>"
+ldCommentMarker: "#"

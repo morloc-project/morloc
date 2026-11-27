@@ -171,8 +171,9 @@ and, on macOS, in the linker: a merged body carries one function's debug
 information for both, so a frame could name the other side's source. The
 switch is unstable, so pool builds enable it on a stable toolchain with
 RUSTC_BOOTSTRAP. The release-mode classifier tests reproduce a pool build
-only with the same flags (`RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zmerge-functions=disabled
-cargo test --release -p rustmorloc -- panic_classifier`); without them the
+only with the same flags (`test-suite/run rust` runs them so: `RUSTC_BOOTSTRAP=1
+RUSTFLAGS=-Zmerge-functions=disabled cargo test --release` on
+binders/rust/rustmorloc with line tables, `-- panic_classifier`); without them the
 test whose runtime code is identical to a user function fails. Paths are compared as written and absolute; the backtrace is read in
 std's full format, which names files absolutely whatever the working
 directory. The walk costs time in proportion to the stack's depth, paid

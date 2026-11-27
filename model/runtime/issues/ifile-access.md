@@ -60,7 +60,7 @@
   - Peak per holder: to be measured (plan step 0); mosm bench/slice.sh.
 - **`_mlc_ifile_walk` may leak its block when decoding throws.**
   [speculative, 2026-11-08] `_mlc_ifile_walk` and `_mlc_stream_layout`
-  (data/lang/cpp/pool.cpp:895-927, :960-969) call `shfree_cpp` only after
+  (binders/cpp/pool.cpp:895-927, :960-969) call `shfree_cpp` only after
   `from_voidstar` returns, so an exception skips the free. It is unknown
   whether the eval arena reclaims the block.
 

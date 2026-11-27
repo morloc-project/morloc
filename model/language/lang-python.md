@@ -10,7 +10,7 @@ interpreter's recursion limit).
 
 ### PY-1 A sourced Python function never changes an argument in place
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-11-25
 
 A morloc value read twice may be one shared Python object, so a sourced
 function never changes an object it is given: no `list.sort()`, `append`,

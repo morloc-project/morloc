@@ -456,7 +456,7 @@ printDispatch locals remotes closureMids =
 
 -- | Assemble the complete Rust pool file from an IProgram and the marshalling
 -- section (per-record impls; empty in v1). Splices five sections into the
--- embedded @data/lang/rust/pool.rs@ template at its @// <<<BREAK>>>@ markers.
+-- embedded @binders/rust/pool.rs@ template at its @// <<<BREAK>>>@ markers.
 printProgram :: [MDoc] -> [MDoc] -> [MDoc] -> IProgram -> MDoc
 printProgram serialization signatures _extra prog =
   format

@@ -2,17 +2,20 @@
 
 The specification of morloc, as three specs held to one standard:
 
-- `language/`: what morloc programs mean. Which programs the compiler
-  accepts, what type each term has, what each term computes, and what a
-  value looks like in each language it reaches.
-- `compiler/`: the compiler's internal contracts. What each pass may assume
-  of its input and must guarantee of its output. Derived from `language/`.
+- `language/`: what morloc programs mean. Which programs the compiler accepts,
+  what type each term has, what each term computes, and what a value looks like
+  in each language it reaches.
+
+- `compiler/`: the compiler's internal contracts. What each pass may assume of
+  its input and must guarantee of its output. Derived from `language/`.
+
 - `runtime/`: processes, threads, locks, shared memory, fork, the daemon,
   streams and panics in the built program. Its PlusCal models are in
   `runtime/tla/`.
-- `performance/`: what operations cost, as models with parameters fitted by
-  the benchmarks in `performance/benchmarks/`. Its own README gives the
-  item fields and measurement rules.
+
+- `performance/`: what operations cost, as models with parameters fitted by the
+  benchmarks in `performance/benchmarks/`. Its own README gives the item fields
+  and measurement rules.
 
 The spec states intent. The code is measured against it, not the reverse.
 
@@ -38,20 +41,24 @@ Every rule is one item with a stable ID:
     answers.
   - `retired <date>`: no longer a rule. The item stays so that its ID is
     never reused.
-- `Code` is `unaudited`, `conforms <date>`, or `deviates <ref>`, where
-  `<ref>` names an issue (`#160`) or a finding.
-- `Tests` lists the tests that are the item's examples. A `ruled` item
-  cites at least one; a `proposed` item may; an `open` or `retired` item
-  cites none. An item with no tests omits the line. `check.sh` holds the
-  chapters listed as complete in `language/README.md` to this, and to a
-  ruled item conforming; elsewhere it warns.
+
+- `Code` is `unaudited`, `conforms <date>`, or `deviates <ref>`, where `<ref>`
+  names an issue (`#160`) or a finding.
+
+- `Tests` lists the tests that are the item's examples. A `ruled` item cites at
+  least one; a `proposed` item may; an `open` or `retired` item cites none. An
+  item with no tests omits the line. `check.sh` holds the chapters listed as
+  complete in `language/README.md` to this, and to a ruled item conforming;
+  elsewhere it warns.
+
 - IDs are `<PREFIX>-<n>`, never reused or renumbered. Each prefix belongs
   to one file, and prefixes are unique across all three specs.
-- A rule on a boundary between specs lives in one of them, and the other
-  cites it by ID. Exit status 70 after a panic is `runtime/panic.md`'s, and
-  a language item that needs it says "PANIC".
+
+- A rule on a boundary between specs lives in one of them, and the other cites
+  it by ID. Exit status 70 after a panic is `runtime/panic.md`'s, and a language
+  item that needs it says "PANIC".
+
 - The spec has no inline examples. Every example is a test.
-- ASCII only.
 
 ## Prefixes
 
@@ -66,10 +73,11 @@ Every rule is one item with a stable ID:
 
 - A test is named `spec-<prefix>-<rule>-<n>`, prefix in lower case:
   `spec-mod-14-1` is the first example of MOD-14.
-- A unit test is the default: a case in `test-suite/SpecTests.hs`, or in
-  another `test-suite/` module for a compiler item, whose name is its ID.
+- A unit test is the default: a case in `test-suite/unit/Spec/` (one
+  module per chapter), or in another `test-suite/unit/` module for a
+  compiler item, whose name is its ID.
   It covers anything decided without building a program.
-- A golden test is `test-suite/golden-tests/spec-*/`, used only when the
+- A golden test is `test-suite/golden/spec/<prefix>/spec-*/`, used only when the
   rule needs a build, a run, or more than one language.
 - A rejection test has an accept twin that differs only in the rule's
   subject, since a rejection test passes on any error.

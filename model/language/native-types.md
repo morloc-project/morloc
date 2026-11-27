@@ -28,7 +28,7 @@ specialized furthest left)?
 
 ### NATIVE-2 A type without its own form in a language uses its expansion's
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-11-25
 
 An alias has the native forms of its expansion (ALIAS-1, ALIAS-6). A newtype
 with no form in `L` at its arguments has its representation's (NEWT-2).

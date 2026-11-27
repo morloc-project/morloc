@@ -17,8 +17,8 @@
   either.
 - [speculative, 2026-11-14] A release nexus started by a sourced function of
   a debug build inherits `MORLOC_CODE_CHECKS=1`. It clears the variable for
-  its pools (morloc-nexus/src/main.rs:476-480), but if its own runtime
-  config is loaded before that line (morloc-runtime/src/packet.rs:108-119,
+  its pools (morloc-nexus/src/main.rs:508-512), but if its own runtime
+  config is loaded before that line (morloc-runtime/src/packet.rs:119-132,
   read once), the nexus itself runs code-level checks. Cost only; nothing
   goes unchecked.
 - [speculative, 2026-10-31] An `@unpack` argument is built by the nexus as
@@ -96,7 +96,7 @@
   not checked.
 - [read] Cost of the DIM-3 entry check (cost ruled out of scope for now,
   2026-10-30): on a remote command the nexus decodes in full each argument
-  a relation reads (data/rust/morloc-nexus/src/dispatch.rs
+  a relation reads (runtime/morloc-nexus/src/dispatch.rs
   check_dims_of_packets), so a file argument is read twice and a streamed
   file is loaded whole into the nexus's shared memory, doubling its peak;
   the daemon parses each command's relations on every request

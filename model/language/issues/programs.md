@@ -24,6 +24,16 @@ Reproduced on 0.109.0 unless marked.
   argument; got wire schema `as`"). CLI-3 says an `@stdin` argument is a
   `Str`; open whether a list form is meant to be allowed. reports/0031 is
   fixed.
+- **Two `-` tokens for path arguments are not refused.** [read,
+  2026-11-25] Violates CLI-3 (a second `-` in one run is a run-time
+  error). morloc-nexus dispatch.rs `substitute_stdio_dash` turns a `-`
+  given to a `@check.path r` argument into `/dev/stdin`, and an omitted
+  `@stdin` positional becomes `/dev/stdin`; neither goes through the
+  runtime's `claim_stdin` (cli.rs), and parse_arg.rs counts stdin readers
+  only for `@parse` arguments. Two such arguments, or one beside a JSON
+  argument given `-`, are not refused, and the second reader sees an empty
+  stdin. The build-side half of CLI-3 conforms (Docstrings.hs
+  validateStdinArg, Nexus.hs checkStdinWire).
 - **`@default` messages for `data`.** [reproduced] CLI-4 open. `@default
   dot`, `Dot`, `"Dot"` and `{"Dot":[]}` all work. `@default bogus` and
   `@default circle` (a constructor with a field) both say "default value is
@@ -43,9 +53,7 @@ Reproduced on 0.109.0 unless marked.
 - **Module rules with no item.** [read, 2026-10-21] Gaps in module-names.md.
   No item covers namespaced imports (`import m as n`, `n.f`, the `f.g`
   composition ambiguity in Lexer.hs:476-498) though `namespace-*` goldens
-  exist. MOD-12 (open) rejects one name from two modules even with equal
-  signatures, so a user `|>` cannot be imported beside root-py's; the
-  ruling should cover the prelude case.
+  exist.
 - **Two commands with one name.** [2026-10-21] CMD-4 is open. The build
   now refuses two commands with one name, within or across groups, and an
   ungrouped command named after a group, since the daemon's `/call/<cmd>`,
@@ -66,7 +74,7 @@ Reproduced on 0.109.0 unless marked.
   `@arg` sets no `docArg`. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis3.loc, dirarg.loc.
 - **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Source
   file not found: ./nofile.py" (Grammars/Translator/Generic.hs:367-368,
-  Pools/CAbi/Members/Cpp.hs:2800); unknown-directive and `@literal` warnings;
+  Pools/CAbi/Members/Cpp.hs:2800); unknown-directive warnings;
   `morloc eval` allow-list refusal. `morloc eval -e 'import root-py;
   @write "x" 1'` is located at `<expr>:3:1-12`, a generated wrapper line.
 - **Program rules with no item.** [reproduced, 2026-10-21]

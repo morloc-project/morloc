@@ -21,13 +21,21 @@ symlink) carrying the marker.
 Status: draft
 
 ### ART-4 A launcher declares its manifest on a `# morloc-manifest: ` line
-Status: draft
+Status: implemented
+Checked by: resolves_absolute_wrapper_to_manifest_path, resolves_self_relative_wrapper_against_its_own_directory, resolves_a_launcher_through_file_links_against_the_launchers_directory, resolves_bare_manifest_to_itself, a_declared_absolute_path_ignores_the_launcher_directory, golden:launcher-location
 
 A relative path resolves against the launcher's directory. Every nexus mode
 that names a program accepts a launcher or a manifest path.
 
 ### ART-5 The nexus accepts only a manifest from its own Morloc version
-Status: draft
+Status: implemented
+Checked by: test_version_mismatch_rejected
 
 `build.morloc_version` must equal the nexus version exactly; otherwise the
-nexus refuses with a message to rebuild. Unknown keys are ignored.
+nexus refuses with a message to rebuild. This, not MORLOC_ABI_VERSION,
+decides whether a program runs on an installed runtime: a program carries
+its pool code and calls into the language bindings, the manifest shape and
+the schema and layout rules, none of which the ABI version covers. Unknown
+keys are ignored. The nexus accepts the morloc-manifest crate's version;
+`morloc-nexus --version` reports the morloc-nexus crate's. Init holds both
+to the compiler's (SHIM-7).

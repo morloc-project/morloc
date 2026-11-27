@@ -156,10 +156,14 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   2026-11-02] `f = (\h -> do h 2) pyLog` against `<IO> ()` fails "inferred
   <> (<IO> Unit)": the block is built as a nested suspension. Same class as
   the EFF-8 entry: an existential's shape is decided before it is solved.
-- **A record literal against a record alias fails.** [reproduced
-  2026-11-02] `f :: Int -> R; f n = {x = n}` fails: `instantiate`'s alias
-  arms recurse into `instantiate`, skipping the closed-row bridge only
-  `subtype` applies. ALIAS-11's "Code: conforms" is stale.
+- **A record literal against an anonymous record type fails with a
+  subtype error.** [reproduced 2026-11-25] ALIAS-11. With `type R = Rec`
+  over a declared record, `f :: Int -> R; f n = {x = n}` now typechecks.
+  The anonymous forms still fail: `f :: Int -> Record {x = Int}` fails
+  "{x=Int} <: Record {x=Int}", and `type R = {x = Int}` used as a term's
+  type fails "{x=Int} <: {x=Int}" where KIND-2's kind error is due.
+  Anonymous records are ruled unsupported (2026-10-07); the defect is the
+  diagnostic.
 - **A curried head under `@collect` loses a type.** [reproduced
   2026-11-02, Python only] `score x = @collect (prod inc x)` fails
   "cannot serialize unknown type variable: b"; the `\k ->` form builds.

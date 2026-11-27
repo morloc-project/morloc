@@ -4,7 +4,7 @@ Caching, logging, benchmark labels, unrolling: what instrumentation may change a
 
 ### ANN-1 Default behaviour is sound; only an opt-in fast mode may drop checks
 Intent: ruled 2026-10-06
-Code: unaudited
+Code: deviates (default-mode checks missing: WIRE-3, WIRE-10, CLI-3, DIM-3)
 
 Without options, a program performs every runtime check the spec requires.
 A mode that drops checks for speed must be explicitly requested and

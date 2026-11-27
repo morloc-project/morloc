@@ -28,6 +28,23 @@ module Morloc.CodeGenerator.SystemConfig
   , prefixFlags
   , prefixRustLinkArgs
   , rustPoolRustflags
+  , runtimeInstalled
+  , runtimeInstallScript
+  , cargoPackageVersion
+  , keptRuntimeLink
+  , findRuntimeDir
+  , nexusAgrees
+  , langMarkerText
+  , installedRuntimeMismatches
+  , Mismatch (..)
+  , BindingState (..)
+  , bindingState
+  , bindingsReportJson
+  , checkBindings
+  , effectiveInitFlags
+  , interpreterIdentity
+  , bindingLanguages
+  , installRustBinding
   ) where
 
 import qualified System.Info as SI
@@ -43,16 +60,29 @@ import qualified Data.List as DL
 import qualified Data.Text as T
 import Data.Char (isSpace, toUpper)
 import qualified Data.Text.IO as TIO
+import qualified Data.ByteString as BS
+import Data.Text.Encoding (decodeUtf8', decodeUtf8Lenient, encodeUtf8)
+import Morloc.Abi (abiVersion, headerAbiVersion)
+import Morloc.Version (versionStr)
+import Morloc.RustBinding (rustBindingDir, rustBindingFiles)
+import System.Posix.Process (getProcessID)
 
-import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
+import Control.Exception (IOException, SomeAsyncException, SomeException, bracket, catch, displayException, fromException, onException, throwIO, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, listDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameDirectory, renameFile)
 import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
-import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
+import System.IO (IOMode (ReadMode), hClose, hIsTerminalDevice, hPutStrLn, stderr, withFile)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
-import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readCreateProcessWithExitCode, readProcessWithExitCode, waitForProcess, withCreateProcess)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Text.Read (readMaybe)
+import Control.Applicative ((<|>))
+import System.Timeout (timeout)
+import Morloc.Data.PoolHash (hashText)
+import Morloc.Data.Json (jsonArr, jsonBool, jsonInt, jsonObj, jsonStr)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -90,8 +120,16 @@ withInitLock verbose homeDir act = do
       hLock h ExclusiveLock
     act
 
+-- | The SLURM and sanitize settings an init builds with: an incremental init
+-- (the on-demand language add) keeps what the home records and can only turn
+-- a setting on; a full init takes its flags as given.
+effectiveInitFlags :: Bool -> (Bool, Bool) -> (Maybe Bool, Maybe Bool) -> (Bool, Bool)
+effectiveInitFlags incremental (slurmFlag, sanitizeFlag) (slurmStored, sanitizeStored)
+  | incremental = (slurmFlag || slurmStored == Just True, sanitizeFlag || sanitizeStored == Just True)
+  | otherwise = (slurmFlag, sanitizeFlag)
+
 configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Bool -> Config -> IO ()
-configureAllSteps verbose force slurmSupport sanitize config = do
+configureAllSteps verbose force slurmFlag sanitizeFlag config = do
   let homeDir = configHome config
       srcLibrary = configLibrary config
       includeDir = homeDir </> "include"
@@ -109,6 +147,10 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- unset) rebuilds everything, so it can never silently keep an ABI-stale runtime
   -- after a compiler upgrade.
   incremental <- envFlag "MORLOC_INIT_INCREMENTAL"
+  existingBuildConfig <- Config.loadBuildConfig config
+  let (slurmSupport, sanitize) =
+        effectiveInitFlags incremental (slurmFlag, sanitizeFlag)
+          (buildConfigSlurmSupport existingBuildConfig, buildConfigSanitize existingBuildConfig)
 
   -- Admission control FIRST, before any destructive step: a failed coherence
   -- check must abort before the runtime build and the force-clean below,
@@ -137,7 +179,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   sayInfo verbose "Writing build config file"
   -- Read-modify-write: preserve any existing fields (e.g. `lang-params` set via
   -- `morloc config`) and only override the two flags `morloc init` owns.
-  existingBuildConfig <- Config.loadBuildConfig config
   Config.writeBuildConfig
     config
     existingBuildConfig
@@ -158,36 +199,39 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- compiler so the builds do not fall back to a bare `ar`/`strip` that conda
   -- does not provide.
   exportArchiveTools
-  -- Install morloc.h (the C ABI contract for language extensions and pool templates)
-  sayInfo verbose "Installing morloc.h"
-  TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  -- Build libmorloc.so + morloc-nexus (and rustmorloc + the language shims)
+  -- Build libmorloc.so + morloc-nexus (and the language shims)
   -- FROM SOURCE with the active toolchain. This is the single provisioning path:
   -- the runtime that pools link and load MUST be ABI-coherent with the toolchain
   -- that compiles those pools, so a prebuilt binary from a foreign libc/toolchain
   -- world is not an option. Only the morloc compiler and mim are
   -- shipped prebuilt (they never link into a pool).
   let soPath = libDir </> P.sharedLibName P.hostPlatform "morloc"
-  -- Primary install goes to $MORLOC_HOME/bin/
-  let nexusBinDir = homeDir </> "bin"
+      nexusBinDir = homeDir </> "bin"
       nexusBinPath = nexusBinDir </> "morloc-nexus"
   createDirectoryIfMissing True nexusBinDir
   -- Resolve the user's home for the legacy ~/.local/bin/ symlink fallback
   -- (see the MORLOC_BIN_LINK_DIR handling below).
   userHome <- getHomeDirectory
 
-  -- Build the Rust runtime (libmorloc.so + morloc-nexus + the rustmorloc pool
-  -- cache) only when it is missing, or when a full rebuild is forced. An
-  -- in-environment on-demand language add (see the language loop below) re-runs
-  -- `morloc init` WITHOUT force purely to build a newly provisioned language's
-  -- shim; the already-built runtime must not be relinked (and cargo must not be
-  -- required) on that path. The manager's provision always uses force, so a
-  -- compiler/version change still rebuilds the runtime.
-  runtimeBuilt <- (&&) <$> doesFileExist soPath <*> doesFileExist nexusBinPath
-  if force == ForceOverwrite || not runtimeBuilt || not incremental
-    then provisionRustRuntime verbose config homeDir soPath nexusBinPath
-    else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
+  -- Build the Rust runtime (libmorloc.so + morloc-nexus) when it is missing, when the installed one does not hold together
+  -- or does not match this compiler (see nexusAgrees), or when a full
+  -- rebuild is forced. An in-environment on-demand language add re-runs
+  -- `morloc init` WITHOUT force to build a newly provisioned language's shim;
+  -- an intact runtime is not relinked (and cargo is not required) on that
+  -- path. The manager's provision always uses force.
+  keptRuntimeLink homeDir >>= either (ioError . userError) return
+  runtimeBuilt <- runtimeInstalled homeDir
+  agrees <- if runtimeBuilt && force /= ForceOverwrite then nexusAgrees homeDir else return (Left "")
+  case agrees of
+    Left why | not (null why) -> sayWarning ("Rebuilding the runtime: " <> why)
+    _ -> return ()
+  let rebuildRuntime = force == ForceOverwrite || either (const True) (const False) agrees || not incremental
+  if rebuildRuntime
+    then do
+      provisionRustRuntime verbose config homeDir
+      nexusAgrees homeDir >>= either (ioError . userError) return
+    else sayInfo verbose "Runtime (libmorloc + morloc-nexus + morloc.h) already built; skipping"
 
   when (force == ForceOverwrite) $ do
     sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
@@ -272,27 +316,36 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- the error, rather than the best-effort warn that silently leaves a half-
   -- configured env whose failure only surfaces later as a runtime import error.
   --
-  -- A per-language marker records that a shim was built successfully. In
-  -- incremental mode (the on-demand agent path), an already-built language is
-  -- skipped: this makes an on-demand init (run to add one newly provisioned
-  -- language) build ONLY that language's shim and leave every other language's
-  -- working shim untouched -- crucial because rebuilding a shim against a moved
-  -- interpreter would break its ABI. A bare init (non-incremental) rebuilds every
-  -- available language. The markers live under opt/, which the force-clean above
-  -- wipes, so `-f` also rebuilds every available language.
+  -- SHIM-1: a per-language marker records what a shim was built from and
+  -- against. In incremental mode (the on-demand agent path) a language whose
+  -- binding is current is skipped and every other one is rebuilt. A bare init
+  -- (non-incremental) rebuilds every available language. The markers live
+  -- under opt/, which the force-clean above wipes, so `-f` also rebuilds every
+  -- available language.
   let langMarkerDir = optDir </> "lang-configured"
+  mBuildId <- installedBuildId homeDir
   createDirectoryIfMissing True langMarkerDir
   forM_ DF.langSetups $ \ls -> do
     let tools = DF.lsRequiredTools ls
         marker = langMarkerDir </> DF.lsName ls
     unavailable <- filterM (fmap not . toolAvailableInEnv mStrictPrefix) tools
-    alreadyBuilt <- doesFileExist marker
+    identity <- if null unavailable then resolveManagedIdentity ls else return (Left BindingAbsent)
+    alreadyBuilt <- (== BindingOk) <$> bindingState homeDir sanitize mBuildId ls (Just identity)
     if not (null unavailable)
       then
         let reason = case mStrictPrefix of
               Just _ -> "not provided by the conda environment"
               Nothing -> "missing"
         in sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> reason <> ": " <> unwords unavailable <> ")"
+      else if either (const True) (const False) identity
+        then
+          let why = case identity of
+                Left (BindingUnavailable w) -> w
+                Left (BindingOutsidePrefix w) -> w
+                _ -> "its interpreter cannot be used"
+          in case mStrictPrefix of
+               Just _ -> ioError (userError ("cannot set up " <> DF.lsName ls <> ": " <> why))
+               Nothing -> sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> why <> ")"
       else if alreadyBuilt && force /= ForceOverwrite && incremental
         then sayInfo verbose $ DF.lsName ls <> " extension already built; skipping"
         else do
@@ -304,7 +357,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
           -- Write and run init script
           let initPath = buildDir </> "init.sh"
           TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
-          let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
+          let sanitizeFlagsStr = sanitizeFlags sanitize
           -- Run the setup, and only on success record the marker + clean up.
           -- Grouping the marker write with the build inside `optionalStep` keeps
           -- a non-strict failure from marking the language as built.
@@ -313,170 +366,638 @@ configureAllSteps verbose force slurmSupport sanitize config = do
                 removeFileSafe initPath
                 forM_ (DF.lsFiles ls) $ \ef ->
                   removeFileSafe (buildDir </> DF.embededFileName ef)
-                TIO.writeFile marker ""
+                case (mBuildId, identity) of
+                  (Just bid, Right ident) -> writeMarker marker (langMarkerText bid ident sanitize ls)
+                  _ -> return ()
           case mStrictPrefix of
             Just _ -> buildShim
             Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") buildShim
+
+  -- SHIM-6: install this compiler's Rust binding (`-f` rewrites it), then
+  -- warm the pool build cache when the runtime under it is new or the cache
+  -- was never warmed for it. Rust is a capability, not a core install step:
+  -- a failed install leaves Rust unavailable with a warning, and `morloc
+  -- make` refuses Rust programs until it is repaired.
+  optionalStep "Rust binding install failed (Rust pools will not be available): " $
+    void (installRustBinding verbose (force == ForceOverwrite) homeDir)
+  warmed <- doesFileExist (rustBindingDir homeDir </> ".warmed")
+  when (rebuildRuntime || not warmed) $
+    optionalStep "Rust build cache not warmed (the first Rust pool build will compile its dependencies): " $ do
+      warmRustBinding verbose config homeDir
+      BS.writeFile (rustBindingDir homeDir </> ".warmed") BS.empty
 
   -- Generate shell completions
   sayInfo verbose "Generating shell completions"
   Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
 
--- | Build libmorloc.so + morloc-nexus from source with the active toolchain,
--- then persist the Rust workspace source and warm the rustmorloc pool cache.
--- 'configureAllSteps' calls this only when the runtime is missing or a rebuild is
--- forced, so an in-env, no-force, on-demand language add skips it. @soPath@ is the
--- installed libmorloc path; @nexusBinPath@ is the installed nexus path.
-provisionRustRuntime :: Bool -> Config -> FilePath -> FilePath -> FilePath -> IO ()
-provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
+-- | Whether a home holds a runtime this compiler can use as it is:
+-- libmorloc, the nexus, their recorded build id, and the header they were
+-- installed with, which must be the header this compiler was built with.
+runtimeInstalled :: FilePath -> IO Bool
+runtimeInstalled homeDir = do
+  let header = homeDir </> "include" </> "morloc.h"
+  present <- and <$> mapM doesFileExist
+    [ homeDir </> "lib" </> P.sharedLibName P.hostPlatform "morloc"
+    , homeDir </> "bin" </> "morloc-nexus"
+    , buildIdFile homeDir
+    , header
+    ]
+  if present
+    then (== encodeUtf8 DF.libmorlocHeader) <$> BS.readFile header
+    else return False
+
+-- | The install script of a runtime source directory, or why it cannot be
+-- used (SHIM-7). Init installs the source's morloc.h for the bindings and
+-- pools to compile against, so it must be the header this compiler was built
+-- with; and the nexus refuses manifests from another morloc version (ART-5),
+-- so the source's crates must carry this compiler's version.
+runtimeInstallScript :: FilePath -> IO (Either String FilePath)
+runtimeInstallScript runtimeDir =
+  either
+    (\why -> Left (why <> "; set MORLOC_RUNTIME_DIR to the runtime/ directory this compiler was built from and re-run `morloc init -f`"))
+    Right
+    <$> runtimeSource runtimeDir
+
+-- | 'runtimeInstallScript' without the remedy.
+runtimeSource :: FilePath -> IO (Either String FilePath)
+runtimeSource runtimeDir = do
+  let script = runtimeDir </> "install.sh"
+      header = runtimeDir </> "include" </> "morloc.h"
+      crateFile c = runtimeDir </> c </> "Cargo.toml"
+      crates = ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"]
+      refuse why = Left ("the runtime source at " <> runtimeDir <> " " <> why)
+  hasCargo <- doesFileExist (runtimeDir </> "Cargo.toml")
+  hasScript <- doesFileExist script
+  hasHeader <- doesFileExist header
+  missingCrates <- filterM (fmap not . doesFileExist . crateFile) crates
+  if not hasCargo
+    then return (refuse "is not a runtime source (it has no Cargo.toml)")
+    else if not hasScript
+      then return (refuse "predates this compiler (it has no install.sh)")
+      else if not hasHeader
+        then return (refuse ("has no " <> header))
+        else case missingCrates of
+          c : _ -> return (refuse ("has no " <> crateFile c))
+          [] -> do
+            bytes <- BS.readFile header
+            versions <- forM crates $ \c ->
+              (,) c . either (const Nothing) cargoPackageVersion . decodeUtf8' <$> BS.readFile (crateFile c)
+            let wrong = [(c, v) | (c, v) <- versions, v /= Just (T.pack versionStr)]
+            return $
+              if bytes /= encodeUtf8 DF.libmorlocHeader
+                then refuse $ case decodeUtf8' bytes of
+                  Right text | Just n <- headerAbiVersion text, n /= abiVersion ->
+                    "declares ABI " <> show n <> " in include/morloc.h, but this compiler emits code for ABI "
+                      <> show abiVersion
+                  _ -> "has an include/morloc.h that differs from the header this compiler was built with"
+                else case wrong of
+                  (c, v) : _ -> refuse $
+                    "has " <> c <> " " <> maybe "of an unreadable version" T.unpack v
+                      <> ", but this compiler is morloc " <> versionStr
+                  [] -> Right script
+
+-- | Whether a home's @runtime@, when it is a link, reaches a source this
+-- compiler accepts. Init never replaces the link, and Rust pools and the Rust
+-- binding build against it (SHIM-7).
+keptRuntimeLink :: FilePath -> IO (Either String ())
+keptRuntimeLink homeDir = do
+  let link = homeDir </> "runtime"
+  isLink <- pathIsSymbolicLink link `catch` \(_ :: IOException) -> return False
+  if not isLink
+    then return (Right ())
+    else do
+      target <- canonicalizePath link `catch` \(_ :: IOException) -> return link
+      either
+        (\why -> Left $
+          link <> " is a link, which init keeps and Rust pools build against, but " <> why
+            <> "; point it at the runtime/ directory this compiler was built from, or remove it, and re-run `morloc init -f`")
+        (const (Right ()))
+        <$> runtimeSource target
+
+-- | The version in a Cargo.toml's @[package]@ table: a quoted string, with
+-- any comment after it.
+cargoPackageVersion :: T.Text -> Maybe T.Text
+cargoPackageVersion text =
+  case [ v
+       | l <- takeWhile (not . isTable) (drop 1 (dropWhile (/= "[package]") (map uncomment (T.lines text))))
+       , Just rest <- [T.stripPrefix "version" l]
+       , Just v0 <- [T.stripPrefix "=" (T.strip rest)]
+       , Just v <- [quoted '"' (T.strip v0) <|> quoted '\'' (T.strip v0)]
+       ] of
+    [v] -> Just v
+    _ -> Nothing
+  where
+    isTable l = "[" `T.isPrefixOf` l
+    -- A version holds no '#', so everything from one on is a comment.
+    uncomment = T.strip . T.takeWhile (/= '#')
+    quoted q t = T.stripPrefix (T.singleton q) t >>= T.stripSuffix (T.singleton q)
+
+-- | Whether the installed nexus accepts the installed libmorloc (LIFE-6),
+-- reports the build id install.sh recorded for them, speaks the ABI this
+-- compiler emits code for and is this compiler's version (SHIM-7), or why
+-- not.
+nexusAgrees :: FilePath -> IO (Either String ())
+nexusAgrees homeDir = do
+  let nexus = homeDir </> "bin" </> "morloc-nexus"
+  -- The nexus must load the libmorloc beside it, found through its rpath.
+  env0 <- getEnvironment
+  let cleared = [kv | kv@(k, _) <- env0, k `notElem` ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]]
+      ask arg = try (readCreateProcessWithExitCode ((proc nexus [arg]) {env = Just cleared}) "")
+        :: IO (Either SomeException (ExitCode, String, String))
+  built <- ask "--build-id"
+  case built of
+    Left e -> return (Left ("the installed " <> nexus <> " cannot run: " <> displayException e))
+    Right (ExitFailure code, _, err) -> return . Left $
+      "the installed " <> nexus <> " fails its build check (exit " <> show code
+        <> "; it refuses a libmorloc from another build, or cannot load one): " <> trimEnd err
+    Right (ExitSuccess, out, _) -> do
+      recorded <- installedBuildId homeDir
+      reported <- ask "--abi-version"
+      version <- ask "--version"
+      let expectedVersion = "morloc-nexus " <> versionStr
+      return $ case (reported, version) of
+        _ | recorded /= Just (T.strip (T.pack out)) -> Left $
+          "the build id recorded at " <> buildIdFile homeDir <> " is not the installed nexus's ("
+            <> trimEnd out <> "); the last runtime install did not finish"
+        (Right (ExitSuccess, abi, _), _) | readMaybe (trimEnd abi) /= Just abiVersion -> Left $
+          "the installed " <> nexus <> " speaks ABI " <> trimEnd abi
+            <> ", but this compiler emits code for ABI " <> show abiVersion
+        (Right (ExitSuccess, _, _), Right (ExitSuccess, v, _))
+          | trimEnd v == expectedVersion -> Right ()
+          | otherwise -> Left $
+              "the installed " <> nexus <> " is " <> trimEnd v <> ", but this compiler is morloc " <> versionStr
+        (Right (ExitFailure _, _, err), _) -> Left ("the installed " <> nexus <> " cannot report its ABI: " <> trimEnd err)
+        (Left e, _) -> Left ("the installed " <> nexus <> " cannot run: " <> displayException e)
+        (_, Right (ExitFailure _, _, err)) -> Left ("the installed " <> nexus <> " cannot report its version: " <> trimEnd err)
+        (_, Left e) -> Left ("the installed " <> nexus <> " cannot run: " <> displayException e)
+
+-- | The build id install.sh recorded for the installed runtime.
+buildIdFile :: FilePath -> FilePath
+buildIdFile homeDir = homeDir </> "lib" </> "morloc.build-id"
+
+installedBuildId :: FilePath -> IO (Maybe T.Text)
+installedBuildId homeDir = do
+  let f = buildIdFile homeDir
+  exists <- doesFileExist f
+  if exists
+    then either (const Nothing) (Just . T.strip) . decodeUtf8' <$> BS.readFile f
+    else return Nothing
+
+-- | The compiler flags a binding is built with under the sanitize setting.
+sanitizeFlags :: Bool -> String
+sanitizeFlags sanitize = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
+
+-- | SHIM-1: what a binding was built from and against, as its marker
+-- records it: the runtime build id, the interpreter's identity, the sanitize
+-- setting, and a hash of the binding's sources (the header, its init script
+-- and files).
+data BindingRecord = BindingRecord
+  { brBuildId :: T.Text
+  , brIdentity :: T.Text
+  , brSanitize :: Bool
+  , brSources :: T.Text
+  }
+  deriving (Eq, Show)
+
+bindingSources :: DF.LangSetup -> T.Text
+bindingSources ls =
+  hashText . T.concat $
+    DF.libmorlocHeader
+      : concat [[T.pack (DF.embededFileName ef), "\0", DF.embededFileText ef, "\0"] | ef <- DF.lsInitScript ls : DF.lsFiles ls]
+
+renderRecord :: BindingRecord -> String
+renderRecord r =
+  T.unpack . T.unlines $
+    [ "morloc-binding 1"
+    , "build-id " <> brBuildId r
+    , "identity " <> brIdentity r
+    , "sanitize " <> (if brSanitize r then "1" else "0")
+    , "sources " <> brSources r
+    ]
+
+parseRecord :: BS.ByteString -> Maybe BindingRecord
+parseRecord bytes = do
+  text <- either (const Nothing) Just (decodeUtf8' bytes)
+  let fields = [(k, T.drop 1 v) | l <- T.lines text, let (k, v) = T.breakOn " " l]
+  version <- lookup "morloc-binding" fields
+  if version /= "1" then Nothing else do
+    sanitize <- lookup "sanitize" fields
+    BindingRecord
+      <$> lookup "build-id" fields
+      <*> lookup "identity" fields
+      <*> pure (sanitize == "1")
+      <*> lookup "sources" fields
+
+-- | The marker text for a binding built now with the given inputs.
+langMarkerText :: T.Text -> T.Text -> Bool -> DF.LangSetup -> String
+langMarkerText buildId identity sanitize ls = renderRecord (BindingRecord buildId identity sanitize (bindingSources ls))
+
+-- | Write a marker beside its destination and rename it into place.
+writeMarker :: FilePath -> String -> IO ()
+writeMarker marker text = do
+  let tmp = marker <> ".tmp"
+  writeFile tmp text
+  renameFile tmp marker
+
+-- | Whether a language's installed binding is the one this compiler would
+-- build now. Ok, absent (never built), stale (built by another compiler,
+-- against another runtime or interpreter, with other settings, or its
+-- artifact is gone), unavailable (its interpreter cannot be found or run, so
+-- building it is pointless), or outside-prefix (in a managed environment, the
+-- interpreter on PATH is not the environment's).
+data BindingState
+  = BindingOk
+  | BindingAbsent
+  | BindingStale String
+  | BindingUnavailable String
+  | BindingOutsidePrefix String
+  deriving (Eq, Show)
+
+-- | The canonical names of the languages that have a binding.
+bindingLanguages :: [T.Text]
+bindingLanguages = map DF.lsLang DF.langSetups ++ ["rust"]
+
+-- | SHIM-6: whether this compiler's Rust binding is installed in the home.
+rustBindingState :: FilePath -> IO BindingState
+rustBindingState homeDir = do
+  done <- doesFileExist (rustBindingDir homeDir </> ".complete")
+  return (if done then BindingOk else BindingAbsent)
+
+-- | The interpreter a language's binding is built against and loaded by, if
+-- it has one.
+langInterpreter :: DF.LangSetup -> Maybe String
+langInterpreter ls = case T.unpack (DF.lsLang ls) of
+  "py" -> Just "python3"
+  "r" -> Just "R"
+  _ -> Nothing
+
+-- | The file a configured binding must have, relative to the home, given the
+-- identity it was built for (Python's module is named by its extension
+-- suffix, the identity's first word).
+langArtifact :: DF.LangSetup -> T.Text -> Maybe FilePath
+langArtifact ls identity = case T.unpack (DF.lsLang ls) of
+  "py" -> Just ("opt" </> ("pymorloc" <> T.unpack (T.takeWhile (not . isSpace) identity)))
+  "r" -> Just ("lib" </> "librmorloc.so")
+  "cpp" -> Just ("lib" </> "libcppmorloc.a")
+  _ -> Nothing
+
+-- | The identity of an interpreter as a binding depends on it: for Python its
+-- extension suffix (version and ABI flags, which also name the built module)
+-- and numpy's major version (the binding is built against numpy's C API);
+-- for R its major and minor version.
+interpreterIdentity :: DF.LangSetup -> FilePath -> IO (Either String T.Text)
+interpreterIdentity ls exe = case T.unpack (DF.lsLang ls) of
+  "py" ->
+    fmap firstLine <$> probe ["-I", "-c", "import sysconfig, numpy; print(sysconfig.get_config_var('EXT_SUFFIX'), 'numpy', numpy.__version__.split('.')[0])"]
+  "r" -> (>>= rMinor) <$> probe ["--version"]
+  other -> return (Left ("no interpreter identity is defined for " <> other))
+  where
+    firstLine out = T.strip (T.takeWhile (/= '\n') out)
+    -- R's front end can print a warning about R_HOME before the version.
+    rMinor out = case [ws | l <- T.lines out, ws@("R" : "version" : _) <- [T.words l]] of
+      ((_ : _ : v : _) : _) | (major : minor : _) <- T.splitOn "." v -> Right ("R " <> major <> "." <> minor)
+      _ -> Left (exe <> " --version printed no R version line")
+    probe args = do
+      result <- try (timeout 30000000 (runBytes exe args))
+                  :: IO (Either IOException (Maybe (ExitCode, BS.ByteString, BS.ByteString)))
+      return $ case result of
+        Left e -> Left (exe <> " cannot run: " <> displayException e)
+        Right Nothing -> Left (exe <> " " <> unwords args <> " did not finish within 30 seconds")
+        Right (Just (ExitSuccess, out, _))
+          | T.all isSpace (decodeUtf8Lenient out) -> Left (exe <> " " <> unwords args <> " printed nothing")
+          | otherwise -> Right (decodeUtf8Lenient out)
+        Right (Just (ExitFailure code, _, err)) ->
+          Left (exe <> " " <> unwords args <> " failed (exit " <> show code <> "): " <> trimEnd (T.unpack (decodeUtf8Lenient err)))
+
+-- | Run a program with no input and R_HOME unset, and read its output as
+-- bytes, whatever the locale.
+runBytes :: FilePath -> [String] -> IO (ExitCode, BS.ByteString, BS.ByteString)
+runBytes exe args = do
+  env0 <- getEnvironment
+  withFile "/dev/null" ReadMode $ \devNull ->
+    withCreateProcess
+      (proc exe args)
+        { std_in = UseHandle devNull
+        , std_out = CreatePipe
+        , std_err = CreatePipe
+        , env = Just [kv | kv@(k, _) <- env0, k /= "R_HOME"]
+        }
+      $ \_ mOut mErr ph ->
+        case (mOut, mErr) of
+          (Just hOut, Just hErr) -> do
+            errVar <- newEmptyMVar
+            _ <- forkIO ((try (BS.hGetContents hErr) :: IO (Either IOException BS.ByteString)) >>= putMVar errVar)
+            out <- BS.hGetContents hOut
+            err <- either (const BS.empty) id <$> takeMVar errVar
+            code <- waitForProcess ph
+            return (code, out, err)
+          _ -> ioError (userError ("could not read the output of " <> exe))
+
+-- | Find a language's interpreter on PATH and take its identity, under the
+-- managed environment's prefix rule ('managedPrefix'): an interpreter outside
+-- the prefix is reported rather than used, and a managed environment that
+-- cannot be resolved makes every binding with an interpreter unavailable.
+resolveManagedIdentity :: DF.LangSetup -> IO (Either BindingState T.Text)
+resolveManagedIdentity ls = case langInterpreter ls of
+  Nothing -> return (Right T.empty)
+  Just _ -> do
+    prefix <- managedPrefix
+    case prefix of
+      Left err -> return (Left (BindingUnavailable err))
+      Right mPrefix -> resolveIdentity mPrefix ls
+
+-- | Find a language's interpreter on PATH and take its identity. With a
+-- prefix, an interpreter outside it is reported rather than used.
+resolveIdentity :: Maybe FilePath -> DF.LangSetup -> IO (Either BindingState T.Text)
+resolveIdentity mPrefix ls = case langInterpreter ls of
+  Nothing -> return (Right T.empty)
+  Just tool -> do
+    loc <- resolveToolLocation tool
+    case loc of
+      Nothing -> return (Left (BindingUnavailable (tool <> " is not on PATH")))
+      Just (exe, dirAbs)
+        | Just prefix <- mPrefix, not (pathIsWithin prefix dirAbs) ->
+            return . Left . BindingOutsidePrefix $
+              "the " <> tool <> " on PATH (" <> exe <> ") is not the environment's (" <> prefix </> "bin" <> ")"
+        | otherwise -> either (Left . BindingUnavailable) Right <$> interpreterIdentity ls exe
+
+-- | The state of a language's installed binding. With a probe (init and
+-- @init --check@, SHIM-2) the interpreter found now is compared with the one
+-- the binding was built for; without one (@morloc make@, SHIM-3) only the
+-- recorded facts are checked, and the binding checks its interpreter when it
+-- loads (SHIM-5).
+bindingState :: FilePath -> Bool -> Maybe T.Text -> DF.LangSetup -> Maybe (Either BindingState T.Text) -> IO BindingState
+bindingState homeDir sanitize mBuildId ls probe = do
+  let marker = homeDir </> "opt" </> "lang-configured" </> DF.lsName ls
+  configured <- doesFileExist marker
+  if not configured
+    then return BindingAbsent
+    else do
+      record <- parseRecord <$> BS.readFile marker
+      case (record, mBuildId, probe) of
+        (Nothing, _, _) -> return (BindingStale "its marker was written by another compiler")
+        (_, Nothing, _) -> return (BindingStale ("no runtime build is recorded at " <> buildIdFile homeDir))
+        (_, _, Just (Left st)) -> return st
+        (Just r, Just buildId, _)
+          | brBuildId r /= buildId ->
+              return . BindingStale $
+                "it was built against runtime build " <> T.unpack (brBuildId r)
+                  <> ", and the installed runtime is build " <> T.unpack buildId
+          | brSources r /= bindingSources ls ->
+              return (BindingStale "it was built from another compiler's binding sources")
+          | brSanitize r /= sanitize ->
+              return . BindingStale $
+                "it was built with sanitizing " <> onOff (brSanitize r) <> ", and this home builds with it " <> onOff sanitize
+          | Just (Right identity) <- probe, identity /= brIdentity r ->
+              return . BindingStale $
+                "it was built for " <> T.unpack (brIdentity r) <> ", and the interpreter found now is " <> T.unpack identity
+          | otherwise -> do
+              let artifact = maybe (homeDir </> "unknown binding artifact") (homeDir </>) (langArtifact ls (brIdentity r))
+              present <- doesFileExist artifact
+              return (if present then BindingOk else BindingStale (artifact <> " is missing"))
+  where
+    onOff b = if b then "on" else "off"
+
+-- | How the runtime and bindings installed in a home differ from what this
+-- compiler, under the given sanitize setting, emits code for (SHIM-3): the
+-- header, the runtime's recorded build id, and each of the given languages
+-- (canonical names) whose recorded binding is not current. Reads files
+-- only; runs no interpreter. Empty when they agree.
+installedRuntimeMismatches :: Bool -> [T.Text] -> FilePath -> IO [Mismatch]
+installedRuntimeMismatches sanitize langNames homeDir = do
+  mBuildId <- installedBuildId homeDir
+  headerOk <- installedHeaderOk homeDir
+  langs <- case mBuildId of
+    Nothing -> return []
+    Just _ -> fmap concat . forM [ls | ls <- DF.langSetups, DF.lsLang ls `elem` langNames] $ \ls -> do
+      st <- bindingState homeDir sanitize mBuildId ls Nothing
+      return [Mismatch True (describeBinding ls st <> " (in " <> homeDir <> ")") | st /= BindingOk]
+  rust <- if "rust" `elem` langNames then rustBindingState homeDir else return BindingOk
+  return $
+    [Mismatch True (homeDir </> "include" </> "morloc.h" <> " is not the header this compiler was built with") | not headerOk]
+      ++ [Mismatch True ("no runtime build is recorded at " <> buildIdFile homeDir) | isNothing mBuildId]
+      ++ langs
+      ++ [Mismatch True ("the Rust binding (rustmorloc) is not installed at " <> rustBindingDir homeDir) | rust /= BindingOk]
+
+-- | One way an installed home does not suit this compiler, and whether an
+-- init repairs it (or the interpreters or environment must be fixed first).
+data Mismatch = Mismatch {mismatchInitRepairs :: Bool, mismatchText :: String}
+  deriving (Eq, Show)
+
+installedHeaderOk :: FilePath -> IO Bool
+installedHeaderOk homeDir = do
+  let header = homeDir </> "include" </> "morloc.h"
+  exists <- doesFileExist header
+  if exists then (== encodeUtf8 DF.libmorlocHeader) <$> BS.readFile header else return False
+
+describeBinding :: DF.LangSetup -> BindingState -> String
+describeBinding ls st = "the " <> DF.lsName ls <> " binding " <> case st of
+  BindingOk -> "is current"
+  BindingAbsent -> "is not built"
+  BindingStale why -> "is out of date: " <> why
+  BindingUnavailable why -> "cannot be built: " <> why <> maybe "" (const " (put the interpreter on PATH, or fix the environment)") (langInterpreter ls)
+  BindingOutsidePrefix why -> "cannot be checked: " <> why <> " (run in the environment, with its bin first on PATH)"
+
+-- | What @morloc init --check@ prints: whether the runtime holds together
+-- and matches this compiler, and each language's binding state. Exits 0;
+-- reads only, so it runs in a read-only home.
+checkBindings :: Config -> [T.Text] -> IO T.Text
+checkBindings config langNames =
+  checkBindingsUnguarded config langNames `catch` \(e :: SomeException) ->
+    case fromException e :: Maybe SomeAsyncException of
+      Just a -> throwIO a
+      Nothing -> return (bindingsReportJson (Left ("the check could not run: " <> displayException e)) [])
+
+checkBindingsUnguarded :: Config -> [T.Text] -> IO T.Text
+checkBindingsUnguarded config langNames = do
+  let homeDir = configHome config
+  buildConfig <- Config.loadBuildConfig config
+  let sanitize = buildConfigSanitize buildConfig == Just True
+      chosen = [ls | ls <- DF.langSetups, null langNames || DF.lsLang ls `elem` langNames]
+      wantRust = null langNames || "rust" `elem` langNames
+  mBuildId <- installedBuildId homeDir
+  headerOk <- installedHeaderOk homeDir
+  runtime <-
+    if not headerOk
+      then return (Left (homeDir </> "include" </> "morloc.h" <> " is not the header this compiler was built with"))
+      else do
+        present <- runtimeInstalled homeDir
+        if present
+          then nexusAgrees homeDir
+          else do
+            missing <- filterM (fmap not . doesFileExist)
+              [ homeDir </> "lib" </> P.sharedLibName P.hostPlatform "morloc"
+              , homeDir </> "bin" </> "morloc-nexus"
+              , buildIdFile homeDir
+              ]
+            return (Left ("the runtime is not installed: missing " <> DL.intercalate ", " missing))
+  states <- forM chosen $ \ls -> do
+    probe <- resolveManagedIdentity ls
+    st <- bindingState homeDir sanitize mBuildId ls (Just probe)
+    return (DF.lsLang ls, st)
+  rust <- if wantRust then (\st -> [("rust", st)]) <$> rustBindingState homeDir else return []
+  return (bindingsReportJson runtime (states ++ rust))
+
+bindingsReportJson :: Either String () -> [(T.Text, BindingState)] -> T.Text
+bindingsReportJson runtime states =
+  jsonObj
+    [ ("bindings_check", jsonInt 1)
+    , ("runtime", jsonObj (("ok", jsonBool (either (const False) (const True) runtime)) : [("reason", jsonStr (T.pack r)) | Left r <- [runtime]]))
+    , ("languages", jsonArr [jsonObj [("lang", jsonStr l), ("state", jsonStr (bindingStateName st)), ("reason", jsonStr (T.pack (bindingStateReason st)))] | (l, st) <- states])
+    ]
+  where
+    bindingStateName BindingOk = "ok"
+    bindingStateName BindingAbsent = "absent"
+    bindingStateName (BindingStale _) = "stale"
+    bindingStateName (BindingUnavailable _) = "unavailable"
+    bindingStateName (BindingOutsidePrefix _) = "outside-prefix"
+    bindingStateReason (BindingStale r) = r
+    bindingStateReason (BindingUnavailable r) = r
+    bindingStateReason (BindingOutsidePrefix r) = r
+    bindingStateReason _ = ""
+
+-- | Build and install libmorloc, morloc-nexus and morloc.h from the runtime
+-- source with the active toolchain (through the runtime's own install.sh),
+-- then persist the source.
+-- 'configureAllSteps' calls this when the runtime is missing or does not hold
+-- together ('nexusAgrees'), or a rebuild is forced; an on-demand language add
+-- over an intact runtime skips it.
+provisionRustRuntime :: Bool -> Config -> FilePath -> IO ()
+provisionRustRuntime verbose config homeDir = do
   -- Resolve the Rust workspace source + cargo up front. Search order:
-  -- MORLOC_RUST_DIR (set by mim / dev); the persisted copy at
-  -- $MORLOC_HOME/rust; then next to the morloc binary.
-  rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
-  rustDir <- case rustDirEnv of
+  -- MORLOC_RUNTIME_DIR (set by mim / dev); the persisted copy at
+  -- $MORLOC_HOME/runtime; then next to the morloc binary.
+  runtimeDirEnv <- lookupEnv "MORLOC_RUNTIME_DIR"
+  runtimeDir <- case runtimeDirEnv of
     Just d -> return d
     Nothing -> do
       morlocBin <- findExecutable "morloc"
           -- The persisted copy is kept AHEAD of the binary-relative candidates
           -- so a custom $MORLOC_HOME is not shadowed by a stale default-home
-          -- ($HOME/.local/share/morloc/rust) workspace. Staleness is surfaced by
-          -- a warning below (set MORLOC_RUST_DIR to rebuild from fresh source).
-      let homeCandidate = [homeDir </> "rust"]
+          -- ($HOME/.local/share/morloc/runtime) workspace. Staleness is surfaced by
+          -- a warning below (set MORLOC_RUNTIME_DIR to rebuild from fresh source).
+      let homeCandidate = [homeDir </> "runtime"]
           binCandidates = case morlocBin of
             Just binPath ->
-              [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "rust"
-              , takeDirectory (takeDirectory binPath) </> "data" </> "rust"
+              [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "runtime"
+              , takeDirectory (takeDirectory binPath) </> "runtime"
               ]
             Nothing -> []
-      findRustDir (homeCandidate ++ binCandidates)
+      findRuntimeDir (homeCandidate ++ binCandidates)
   hasCargo <- findExecutable "cargo"
   -- Build libmorloc.so + morloc-nexus from source (needs cargo + the Rust
   -- workspace). mim is NOT built here: it is the downloaded static
   -- bootstrap binary, ABI-isolated from the runtime. This guard aborts init
   -- unless the source + cargo are present, so the Rust steps below all run.
-  when (null rustDir || hasCargo == Nothing) $
+  when (null runtimeDir || hasCargo == Nothing) $
     ioError . userError $ unlines
       [ "morloc init builds the runtime (libmorloc.so + morloc-nexus) from"
       , "source and requires cargo plus the Rust workspace."
       , ""
-      , "Provision via mim, or for development set MORLOC_RUST_DIR"
-      , "to the data/rust/ directory and put cargo on PATH:"
-      , "  export MORLOC_RUST_DIR=/path/to/morloc/data/rust"
+      , "Provision via mim, or for development set MORLOC_RUNTIME_DIR"
+      , "to the runtime/ directory and put cargo on PATH:"
+      , "  export MORLOC_RUNTIME_DIR=/path/to/morloc/runtime"
       , "  morloc init -f"
       ]
 
-  -- Build into a WRITABLE target dir (the shared rust-build cache under
-  -- MORLOC_STATE), NOT the default `<source>/target`: in a container the Rust
-  -- source is a read-only image layer, so cargo cannot write a target beside it.
-  let rustBuildDir = Config.rustBuildDir config
-  sayInfo verbose "Building libmorloc (Rust runtime)"
-  run verbose "cargo"
-    [ "build", "--release"
-    , "--manifest-path", rustDir </> "Cargo.toml"
-    , "-p", "morloc-runtime"
-    , "--target-dir", rustBuildDir
-    ]
-  -- Produce libmorloc from the Rust build. The recipe differs by platform:
-  --
-  --   * ELF/Linux: link the *staticlib* with `--whole-archive` so ALL symbols
-  --     (including the runtime's internal SHM/allocator state) are exported to
-  --     the language extensions (pymorloc, rmorloc, cppmorloc). The cdylib
-  --     can't be used directly here because forcing full-symbol export needs a
-  --     version script, which conflicts with Rust's own version script on
-  --     ARM/aarch64 -- an ELF/GNU-ld concern.
-  --
-  --   * Mach-O/macOS: version scripts don't exist, and the plain cdylib
-  --     already exports the full C ABI, so use it directly (its install_name
-  --     is set to @rpath/libmorloc.dylib by morloc-runtime/build.rs). Do NOT
-  --     `strip` it: a bare strip on a Mach-O dylib can drop exported symbols
-  --     the shims resolve at load time.
-  -- Resolved once and reused for the nexus binary below.
-  hasStrip <- resolveTool "strip"
-  case P.hostPlatform of
-    P.Linux -> do
-      let rustStaticLib = rustBuildDir </> "release" </> "libmorloc_runtime.a"
-      -- Link with $CC when set (conda toolchain) so the runtime and the shims
-      -- that link it share one compiler/libc world; fall back to gcc.
-      cc <- resolveToolName "gcc"
-      stageInstall verbose hasStrip soPath $ \tmp ->
-        run verbose cc
-          [ "-shared", "-o", tmp
-          , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
-          , "-lpthread", "-lrt", "-ldl", "-lm"
-          ]
-    P.Darwin -> do
-      let rustCdylib = rustBuildDir </> "release" </> "libmorloc_runtime.dylib"
-      stageInstall verbose Nothing soPath $ \tmp -> copyFile rustCdylib tmp
+  -- Everything init builds, installs and persists comes from one snapshot of
+  -- the source, taken here: libmorloc, the nexus, the installed morloc.h, and
+  -- the copy at $MORLOC_HOME/runtime that Rust pools later build against. The
+  -- resolved source may change while init runs; the snapshot does not.
+  let persistedRuntimeDir = homeDir </> "runtime"
+      snapshot = homeDir </> "runtime.staging"
+  srcAbs <- canonicalizePath runtimeDir
+  persistedExists <- doesDirectoryExist persistedRuntimeDir
+  persistedIsLink <- if persistedExists then pathIsSymbolicLink persistedRuntimeDir else return False
+  persistedAbs <- if persistedExists then canonicalizePath persistedRuntimeDir else return persistedRuntimeDir
+  -- The source itself (no fresher workspace found, or a read-only image
+  -- layer provisioned there) and a link to a development tree are left as
+  -- they are.
+  let replacePersisted = srcAbs /= persistedAbs && not persistedIsLink
+  -- Checked here too, so a refusal names the source rather than the snapshot.
+  runtimeInstallScript srcAbs >>= either (ioError . userError) (const (return ()))
+  when (srcAbs == persistedAbs) $
+    sayWarning $
+      "Using the persisted runtime source at $MORLOC_HOME/runtime (no fresher "
+        <> "workspace found). If you changed the compiler's runtime/, set "
+        <> "MORLOC_RUNTIME_DIR to it and re-run `morloc init -f`."
+  removePathIfExists snapshot
+  flip onException (removePathIfExists snapshot) $ do
+    sayInfo verbose $ "Snapshotting the runtime source " <> srcAbs <> " to " <> snapshot
+    copyTree verbose srcAbs snapshot
+    installFromSnapshot snapshot
+  if replacePersisted
+    then do
+      sayInfo verbose "Persisting the runtime source to $MORLOC_HOME/runtime"
+      let previous = homeDir </> "rust.old"
+      removePathIfExists previous
+      when persistedExists $ renameDirectory persistedRuntimeDir previous
+      renameDirectory snapshot persistedRuntimeDir
+      removePathIfExists previous
+    else removePathIfExists snapshot
 
-  sayInfo verbose "Compiling morloc-nexus (Rust)"
-  run verbose "cargo"
-    [ "build", "--release"
-    , "--manifest-path", rustDir </> "Cargo.toml"
-    , "-p", "morloc-nexus"
-    , "--target-dir", rustBuildDir
-    ]
-  let rustNexus = rustBuildDir </> "release" </> "morloc-nexus"
-      -- On Apple Silicon every executable must carry a valid signature, and a
-      -- strip that does not re-sign (GNU strip, some conda cctools builds)
-      -- leaves one the kernel kills at every launch. Unstripped is only larger.
-      nexusStrip = case P.hostPlatform of
-        P.Darwin -> Nothing
-        _ -> hasStrip
-  stageInstall verbose nexusStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
-  -- LIFE-6: the nexus and libmorloc come from two cargo builds, so a change
-  -- to the runtime source between them leaves a nexus that refuses every run.
-  -- The nexus's own check, run here, fails init instead.
-  (idCode, _, idErr) <- readProcessWithExitCode nexusBinPath ["--build-id"] ""
-  case idCode of
-    ExitSuccess -> return ()
-    ExitFailure _ -> ioError . userError $
-      "the installed morloc-nexus and libmorloc were built from different runtime sources"
-        <> " (the Rust source changed during init); run `morloc init -f` again: " <> idErr
+  where
+    installFromSnapshot snapshot = do
+      script <- runtimeInstallScript snapshot >>= either (ioError . userError) return
+      -- Build into a WRITABLE target dir (the shared rust-build cache under
+      -- MORLOC_STATE), NOT the default `<source>/target`: in a container the
+      -- Rust source is a read-only image layer, so cargo cannot write a
+      -- target beside it.
+      sayInfo verbose "Building and installing the runtime (libmorloc, morloc-nexus, morloc.h)"
+      run verbose "env" (["MORLOC_INIT_VERBOSE=1" | verbose] ++ ["bash", script, homeDir, Config.rustBuildDir config])
+        `catch` \(e :: IOError) -> ioError . userError $
+          "building the runtime from " <> snapshot <> " failed (see the output above): " <> ioeGetErrorString e
 
-  -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
-  -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)
-  -- that path-depends on rustmorloc, so its source (and its sibling
-  -- morloc-runtime-types + the workspace Cargo.toml/Cargo.lock) must be present
-  -- at `morloc make` time -- unlike the C-ABI libmorloc.so, rustmorloc is
-  -- locked to the LOCAL rustc and is compiled per-pool by cargo. We pre-build
-  -- rustmorloc into the shared pool target-dir so the first `morloc make`
-  -- doesn't pay that compile.
-  -- Persisting the Rust workspace and warming the rustmorloc cache are Rust
-  -- capabilities, not core install steps: a failure (e.g. a cargo build error)
-  -- must leave Rust unavailable with a warning, not abort the whole init. The
-  -- per-pool build at `morloc make` still enforces cargo via makeTheMaker, so a
-  -- broken warm-up cannot silently ship a bad pool.
-  optionalStep "Rust configuration failed (Rust pools will not be available): " $ do
-    let persistedRustDir = homeDir </> "rust"
-        poolTargetDir = Config.rustBuildDir config
-    -- If the resolved source IS the persisted copy (no fresher workspace
-    -- found), warn instead of silently reusing possibly-stale source; a dev
-    -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise
-    -- refresh the persisted copy from the resolved source.
-    srcAbs <- canonicalizePath rustDir
-    destExists <- doesDirectoryExist persistedRustDir
-    destAbs <- if destExists then canonicalizePath persistedRustDir else return persistedRustDir
-    if srcAbs == destAbs
-      then sayWarning $
-        "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
-          <> "workspace found). If you changed the compiler's data/rust, set "
-          <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
-      else do
-        sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
-        persistRustSource verbose srcAbs persistedRustDir destExists
-    sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-    -- The warm-up builds with the pool profile so that pool builds reuse
-    -- these artifacts: its rustc flags (PANIC-9) and, on macOS, its packed
-    -- debug information (PANIC-12).
-    run verbose "env" $
-      [ "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
-      , "build", "--release"
-      , "--manifest-path", persistedRustDir </> "Cargo.toml"
-      , "-p", "rustmorloc"
-      , "--target-dir", poolTargetDir
-      , "--config", "profile.release.rustflags=" <> show rustPoolRustflags
-      ]
-      ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
+-- | SHIM-6: write this compiler's rustmorloc into the home, beside the
+-- other bindings, in a directory named for its contents; a complete one is
+-- left as it is, and other compilers' copies are not touched. True when it
+-- was written now.
+installRustBinding :: Bool -> Bool -> FilePath -> IO Bool
+installRustBinding verbose rewrite homeDir = do
+  let dir = rustBindingDir homeDir
+      parent = takeDirectory dir
+      stamp = dir </> ".complete"
+  done <- (&& not rewrite) <$> doesFileExist stamp
+  unless done $ do
+    sayInfo verbose ("Installing the Rust binding (rustmorloc) at " <> dir)
+    pid <- getProcessID
+    let staging = parent </> ("." <> takeFileName dir <> ".staging." <> show pid)
+    createDirectoryIfMissing True parent
+    removePathIfExists staging
+    forM_ rustBindingFiles $ \(name, bytes) -> do
+      createDirectoryIfMissing True (takeDirectory (staging </> name))
+      BS.writeFile (staging </> name) bytes
+    BS.writeFile (staging </> ".complete") BS.empty
+    removePathIfExists dir
+    renameDirectory staging dir
+  return (not done)
+
+-- | Build the installed rustmorloc into the shared pool target dir with the
+-- default pool release profile, so that a first Rust pool build finds its
+-- dependencies (Arrow and the rest) built and compiles only rustmorloc and
+-- itself.
+warmRustBinding :: Bool -> Config -> FilePath -> IO ()
+warmRustBinding verbose config homeDir = do
+  sayInfo verbose "Warming the Rust pool build cache (rustmorloc's dependencies)"
+  run verbose "env" $
+    [ "MORLOC_HOME=" <> homeDir, "RUSTC_BOOTSTRAP=1", "cargo", "-Zprofile-rustflags"
+    , "build", "--release", "--locked"
+    , "--manifest-path", rustBindingDir homeDir </> "Cargo.toml"
+    , "--target-dir", Config.rustBuildDir config
+    ]
+      ++ concatMap (\c -> ["--config", c]) (rustPoolProfileConfig "2" "\"thin\"")
+
+-- | The pool release profile (Members/Rust.hs makeCargoDocs) as cargo
+-- @--config@ settings, for an opt-level and lto given as TOML literals.
+rustPoolProfileConfig :: String -> String -> [String]
+rustPoolProfileConfig optLevel lto =
+  [ "profile.release.opt-level=" <> optLevel
+  , "profile.release.lto=" <> lto
+  , "profile.release.panic=\"unwind\""
+  , "profile.release.debug=\"line-tables-only\""
+  , "profile.release.rustflags=" <> show rustPoolRustflags
+  ]
+    ++ ["profile.release.split-debuginfo=\"packed\"" | SI.os == "darwin"]
 
 -- | PANIC-9: the rustc flags a Rust pool crate and its dependencies build
 -- with. The panic hook tells a user panic from a runtime one by the debug
@@ -487,12 +1008,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
 rustPoolRustflags :: [String]
 rustPoolRustflags = "-Zmerge-functions=disabled" : ["-Clink-arg=-Wl,-no_deduplicate" | SI.os == "darwin"]
 
--- | Search for a Rust workspace directory containing Cargo.toml
-findRustDir :: [FilePath] -> IO FilePath
-findRustDir [] = return ""
-findRustDir (d:ds) = do
-  exists <- doesFileExist (d </> "Cargo.toml")
-  if exists then return d else findRustDir ds
+-- | The first candidate runtime source that 'runtimeInstallScript' accepts;
+-- else the first with a Cargo.toml, which it then refuses by name; else "".
+findRuntimeDir :: [FilePath] -> IO FilePath
+findRuntimeDir ds = do
+  workspaces <- filterM (\d -> doesFileExist (d </> "Cargo.toml")) ds
+  usable <- filterM (fmap (either (const False) (const True)) . runtimeInstallScript) workspaces
+  return $ case usable ++ workspaces of
+    d : _ -> d
+    [] -> ""
 
 -- ANSI color wrapping, disabled when stderr is not a terminal
 withColor :: String -> String -> IO String
@@ -526,29 +1050,6 @@ optionalStep :: String -> IO () -> IO ()
 optionalStep prefix act =
   act `catch` \(e :: IOError) -> sayWarning (prefix <> displayException e)
 
--- | Build an artifact at a unique temporary path beside @dst@, optionally
--- strip it there, then rename it onto @dst@. @rename(2)@ is atomic within a
--- directory, so a concurrent @morloc init@ -- or any process loading the
--- artifact -- sees either the previous file or the complete new one, never a
--- half-written or half-stripped binary. Stripping in place is what makes the
--- naive sequence unsafe: the window between copy and strip is long enough for
--- a second builder to strip a file the first is still writing.
-stageInstall :: Bool -> Maybe FilePath -> FilePath -> (FilePath -> IO ()) -> IO ()
-stageInstall verbose mstrip dst produce = do
-  (tmp, h) <- openTempFile (takeDirectory dst) (takeFileName dst <> ".tmp")
-  hClose h
-  -- Reserve the name but let the producer create the file itself, so the
-  -- artifact lands with the mode the linker or copy would normally give it
-  -- rather than openTempFile's 0600.
-  removeFile tmp
-  let cleanup = removeFile tmp `catch` \(_ :: IOError) -> return ()
-  flip onException cleanup $ do
-    produce tmp
-    case mstrip of
-      Just stripPath -> run verbose stripPath [tmp]
-      Nothing -> return ()
-    renameFile tmp dst
-
 run :: Bool -> String -> [String] -> IO ()
 run verbose cmd args = do
   when verbose $ do
@@ -561,19 +1062,15 @@ run verbose cmd args = do
     ExitSuccess -> return ()
     ExitFailure code -> ioError . userError $ cmd <> " exited with code " <> show code
 
--- | Copy a Rust workspace source tree (already resolved to an absolute path) to
--- a stable location under $MORLOC_HOME so generated pool Cargo projects can
--- path-depend on rustmorloc at make time. Build artifacts (any @target@ dir)
--- are excluded. The caller decides whether to persist (it owns the
--- source-vs-destination comparison), so there is no guard here.
-persistRustSource :: Bool -> FilePath -> FilePath -> Bool -> IO ()
-persistRustSource verbose srcAbs destDir destExists = do
-  when destExists $ removeDirectoryRecursive destDir
-  createDirectoryIfMissing True destDir
-  -- tar-pipe excluding build/VCS dirs; portable across dev machines with cargo.
+-- | Copy a source tree to a new directory, leaving out build output and
+-- version control (any @target@ or @.git@).
+copyTree :: Bool -> FilePath -> FilePath -> IO ()
+copyTree verbose src dest = do
+  createDirectoryIfMissing True dest
   run verbose "sh"
     [ "-c"
-    , "tar cf - -C '" <> srcAbs <> "' --exclude=target --exclude=.git . | tar xf - -C '" <> destDir <> "'"
+    , "tar cf - -C \"$1\" --exclude=target --exclude=.git . | tar xf - -C \"$2\""
+    , "sh", src, dest
     ]
 
 ensureDirectory :: Bool -> String -> FilePath -> IO ()
@@ -613,7 +1110,7 @@ removePathIfExists path = do
 
 -- | Names (relative to $MORLOC_HOME/lib/) written by morloc init itself.
 -- Must stay in sync with the per-language init.sh scripts under
--- data/lang/*/init.sh and with the libmorloc.so install above. Anything
+-- binders/*/init.sh and with runtime/install.sh (libmorloc). Anything
 -- not in this list (notably lib/python/<modName>/ and lib/R/<modName>/
 -- populated by `morloc install` via Module.runExpose) is preserved across
 -- `morloc init -f`.
@@ -625,7 +1122,8 @@ initOwnedLibPaths =
   ]
 
 -- | Names (relative to $MORLOC_HOME/include/) written by morloc init itself.
--- Must stay in sync with data/lang/cpp/init.sh. `mlccpptypes/` is omitted
+-- Must stay in sync with binders/cpp/init.sh and runtime/install.sh
+-- (morloc.h). `mlccpptypes/` is omitted
 -- because cpp/init.sh git-clones it on demand and reuses it if present.
 -- Anything not in this list (notably include/<modName>/ populated by
 -- `morloc install`) is preserved across `morloc init -f`.
@@ -658,15 +1156,6 @@ resolveToolName :: String -> IO String
 resolveToolName tool = do
   mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
   return (fromMaybe tool mEnv)
-
--- | Resolve a build tool to an available executable: the environment override
--- if set, else the tool found on PATH; Nothing when neither exists.
-resolveTool :: String -> IO (Maybe FilePath)
-resolveTool tool = do
-  mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
-  case mEnv of
-    Just v | not (null v) -> return (Just v)
-    _                     -> findExecutable tool
 
 -- | Ask the C compiler for the absolute path of a companion tool
 -- (e.g. @cc -print-prog-name=ar@). Returns Nothing when the compiler cannot

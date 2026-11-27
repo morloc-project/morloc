@@ -9,7 +9,7 @@ import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker, installedManifest
 import Morloc.Test.Common
 
 data InstallSpec = InstallSpec
-  { isSourceDir :: String -- relative to test-suite/, e.g. "install-tests/testpy1"
+  { isSourceDir :: String -- relative to test-suite/, e.g. "integration/suites/install/testpy1"
   , isExtraArgs :: [String] -- extra morloc make args
   , isSubcommand :: String -- exported function to call
   , isArgs :: [String] -- arguments to pass
@@ -84,7 +84,7 @@ installTests env =
         "Python"
         [ installTest env "testpy1" $
             InstallSpec
-              { isSourceDir = "install-tests/testpy1"
+              { isSourceDir = "integration/suites/install/testpy1"
               , isExtraArgs = []
               , isSubcommand = "pygreet"
               , isArgs = ["world"]
@@ -94,7 +94,7 @@ installTests env =
               }
         , installTest env "testpy2" $
             InstallSpec
-              { isSourceDir = "install-tests/testpy2"
+              { isSourceDir = "integration/suites/install/testpy2"
               , isExtraArgs = []
               , isSubcommand = "pyadd"
               , isArgs = ["3", "4"]
@@ -104,7 +104,7 @@ installTests env =
               }
         , installTest env "testpy3" $
             InstallSpec
-              { isSourceDir = "install-tests/testpy3"
+              { isSourceDir = "integration/suites/install/testpy3"
               , isExtraArgs = ["--include", "formatter.py", "--include", "fmtlib.py"]
               , isSubcommand = "pyformat"
               , isArgs = ["x", "5"]
@@ -117,7 +117,7 @@ installTests env =
         "Cpp"
         [ installTest env "testcpp1" $
             InstallSpec
-              { isSourceDir = "install-tests/testcpp1"
+              { isSourceDir = "integration/suites/install/testcpp1"
               , isExtraArgs = []
               , isSubcommand = "cppsquare"
               , isArgs = ["7"]
@@ -127,7 +127,7 @@ installTests env =
               }
         , installTest env "testcpp2" $
             InstallSpec
-              { isSourceDir = "install-tests/testcpp2"
+              { isSourceDir = "integration/suites/install/testcpp2"
               , isExtraArgs = []
               , isSubcommand = "cppdouble"
               , isArgs = ["6"]
@@ -137,7 +137,7 @@ installTests env =
               }
         , installTest env "testcpp3" $
             InstallSpec
-              { isSourceDir = "install-tests/testcpp3"
+              { isSourceDir = "integration/suites/install/testcpp3"
               , isExtraArgs = ["--include", "inc.hpp", "--include", "offset.hpp"]
               , isSubcommand = "cppinc"
               , isArgs = ["10"]
@@ -150,7 +150,7 @@ installTests env =
         "R"
         [ installTest env "testr1" $
             InstallSpec
-              { isSourceDir = "install-tests/testr1"
+              { isSourceDir = "integration/suites/install/testr1"
               , isExtraArgs = []
               , isSubcommand = "rnegate"
               , isArgs = ["5.0"]
@@ -160,7 +160,7 @@ installTests env =
               }
         , installTest env "testr2" $
             InstallSpec
-              { isSourceDir = "install-tests/testr2"
+              { isSourceDir = "integration/suites/install/testr2"
               , isExtraArgs = []
               , isSubcommand = "rtriple"
               , isArgs = ["4"]
@@ -170,7 +170,7 @@ installTests env =
               }
         , installTest env "testr3" $
             InstallSpec
-              { isSourceDir = "install-tests/testr3"
+              { isSourceDir = "integration/suites/install/testr3"
               , isExtraArgs = ["--include", "glue.R", "--include", "rutil.R"]
               , isSubcommand = "rpaste"
               , isArgs = ["foo", "bar"]
@@ -183,7 +183,7 @@ installTests env =
         "Datafile"
         [ installTest env "testdatafile1" $
             InstallSpec
-              { isSourceDir = "install-tests/testdatafile1"
+              { isSourceDir = "integration/suites/install/testdatafile1"
               , isExtraArgs = []
               , isSubcommand = "readData"
               , isArgs = []

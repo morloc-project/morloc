@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # Portable build of the prebuilt morloc release assets: the morloc compiler and
-# the Rust workspace SOURCE.
+# the runtime workspace SOURCE.
 #
 # libmorloc.so and morloc-nexus are NOT prebuilt here. `morloc init` builds them
-# from the bundled Rust source with the env's own toolchain, so the runtime is
+# from the bundled runtime source with the env's own toolchain, so the runtime is
 # ABI-coherent with the pools it links. Only the GHC-compiled compiler, which
 # cannot be built from source at init time, ships prebuilt. The mim environment
 # manager is built and released from its own repository
@@ -11,15 +11,15 @@
 #
 # Strategy:
 #   - morloc : Haskell compiler, Ubuntu 20.04 (glibc >= 2.31)
-#   - rust/  : the Rust workspace source (platform-independent)
+#   - runtime/ : the runtime workspace source (platform-independent)
 #
 # Build:
-#   DOCKER_BUILDKIT=1 docker build -t morloc-rust-build -f container/static-build/Dockerfile .
-#   docker run --rm -v $(pwd)/out:/out morloc-rust-build
+#   DOCKER_BUILDKIT=1 docker build -t morloc-static-build -f container/static-build/Dockerfile .
+#   docker run --rm -v $(pwd)/out:/out morloc-static-build
 #
 # Output:
 #   ./out/morloc  (compiler, glibc >= 2.31)
-#   ./out/rust/   (Rust workspace source)
+#   ./out/runtime/ (runtime workspace source)
 
 # ===========================================================================
 # Stage 1: Build the morloc compiler (Haskell/stack) on Ubuntu 20.04
@@ -68,10 +68,10 @@ FROM docker.io/library/ubuntu:20.04
 
 COPY --from=compiler-builder /artifacts/morloc /out-staging/morloc
 
-# The Rust workspace source (minus build artifacts). `morloc init` compiles
-# libmorloc.so, morloc-nexus, and the rustmorloc rlib locally from these
-# sources (resolved as $MORLOC_RUST_DIR).
-COPY data/rust /out-staging/rust
-RUN rm -rf /out-staging/rust/target
+# The runtime workspace source (minus build artifacts). `morloc init` compiles
+# libmorloc.so and morloc-nexus locally from these sources (resolved as
+# $MORLOC_RUNTIME_DIR); the compiler carries the Rust binding (rustmorloc).
+COPY runtime /out-staging/runtime
+RUN rm -rf /out-staging/runtime/target
 
-CMD ["sh", "-c", "cp /out-staging/morloc /out/ && cp -r /out-staging/rust /out/rust && echo 'Wrote morloc, rust/' && ls -lh /out/morloc"]
+CMD ["sh", "-c", "cp /out-staging/morloc /out/ && cp -r /out-staging/runtime /out/runtime && echo 'Wrote morloc, runtime/' && ls -lh /out/morloc"]

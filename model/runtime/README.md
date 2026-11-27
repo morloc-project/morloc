@@ -36,7 +36,7 @@ to an item, optionally followed by how the line applies it:
 ## Enforcement
 
 `source_rule_tests::model_items_are_checked` in
-`data/rust/morloc-runtime/src/lib.rs` fails when an ID is defined twice, an
+`runtime/morloc-runtime/src/lib.rs` fails when an ID is defined twice, an
 implemented item names no test or a test that does not exist, a deviation
 names a test, or a comment in the Rust crates cites an ID that no item
 defines.

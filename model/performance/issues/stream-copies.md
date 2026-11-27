@@ -29,8 +29,8 @@ one array. In lib/biolib rnaseq, decoding FASTQ pairs from a stream file
 (1.96 s) costs more than parsing the FASTQ text (1.45 s).
 
 Each row is one run; start-up varies by 0.1-0.15 s, as large as some of
-the effects below. Paths: `R` = data/rust/morloc-runtime/src, `C` =
-data/lang/cpp/cppmorloc.hpp, `M` = data/morloc/morloc.h; generated pool = runtime-bench/bench-cpp-build/
+the effects below. Paths: `R` = runtime/morloc-runtime/src, `C` =
+binders/cpp/cppmorloc.hpp, `M` = runtime/include/morloc.h; generated pool = runtime-bench/bench-cpp-build/
 pools/cpp/pool.cpp. Line numbers at HEAD afc848b5 (the stream code is
 unchanged since the benchmarked a2e21e97).
 

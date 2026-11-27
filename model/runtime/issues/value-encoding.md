@@ -51,8 +51,8 @@
   54585374). `summarize :: Table n {state = Str, pop = Int} -> Int;
   summarize t = fold (+) 0 (getCol "pop" t)` with root-py, table-py and
   vector-py fails for every input, JSON included: "Expected int for
-  MORLOC_INT, but got numpy.int64" (pymorloc.c:961 py_size_step and
-  :1408 in the writer, the `PyLong_Check` in the MORLOC_INT arm). Cause
+  MORLOC_INT, but got numpy.int64" (pymorloc.c:1281 py_size_step and
+  :1721 in the writer, the `PyLong_Check` in the MORLOC_INT arm). Cause
   unknown: what changed is that the fold now yields a numpy scalar.
 - **Multi-limb `Int` overflow messages omit the value.** [reproduced,
   2026-10-21] Violates WIRE-3. Python `x * 2**70` into Rust `Int`:
@@ -61,7 +61,7 @@
   in 32-bit type". Single-limb messages name the value. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/wire/w3.loc.
 - **Python reads a `Bool` byte through `*(bool*)`.** [read, 2026-10-21]
-  Violates WIRE-8. data/lang/py/pymorloc.c:1910 `PyBool_FromLong(*(bool*)
+  Violates WIRE-8. binders/py/pymorloc.c:2261 `PyBool_FromLong(*(bool*)
   data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:2148), C++
   and Rust compare a `uint8_t`.
 - **Packet landing is checked by convention, not by type.** [read,
