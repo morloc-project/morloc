@@ -30,6 +30,8 @@ module Morloc.CodeGenerator.SystemConfig
   , rustPoolRustflags
   , runtimeInstalled
   , runtimeInstallScript
+  , cargoPackageVersion
+  , keptRuntimeLink
   , findRustDir
   , nexusAgrees
   , langMarkerText
@@ -61,6 +63,7 @@ import qualified Data.Text.IO as TIO
 import qualified Data.ByteString as BS
 import Data.Text.Encoding (decodeUtf8', decodeUtf8Lenient, encodeUtf8)
 import Morloc.Abi (abiVersion, headerAbiVersion)
+import Morloc.Version (versionStr)
 import Morloc.RustBinding (rustBindingDir, rustBindingFiles)
 import System.Posix.Process (getProcessID)
 
@@ -76,6 +79,7 @@ import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, re
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Text.Read (readMaybe)
+import Control.Applicative ((<|>))
 import System.Timeout (timeout)
 import Morloc.Data.PoolHash (hashText)
 import Morloc.Data.Json (jsonArr, jsonBool, jsonInt, jsonObj, jsonStr)
@@ -216,6 +220,7 @@ configureAllSteps verbose force slurmFlag sanitizeFlag config = do
   -- `morloc init` WITHOUT force to build a newly provisioned language's shim;
   -- an intact runtime is not relinked (and cargo is not required) on that
   -- path. The manager's provision always uses force.
+  keptRuntimeLink homeDir >>= either (ioError . userError) return
   runtimeBuilt <- runtimeInstalled homeDir
   agrees <- if runtimeBuilt && force /= ForceOverwrite then nexusAgrees homeDir else return (Left "")
   case agrees of
@@ -402,38 +407,95 @@ runtimeInstalled homeDir = do
     else return False
 
 -- | The install script of a runtime source directory, or why it cannot be
--- used. Init installs the source's morloc.h for the bindings and pools to
--- compile against, so it must be the header this compiler was built with.
+-- used (SHIM-7). Init installs the source's morloc.h for the bindings and
+-- pools to compile against, so it must be the header this compiler was built
+-- with; and the nexus refuses manifests from another morloc version (ART-5),
+-- so the source's crates must carry this compiler's version.
 runtimeInstallScript :: FilePath -> IO (Either String FilePath)
-runtimeInstallScript rustDir = do
+runtimeInstallScript rustDir =
+  either
+    (\why -> Left (why <> "; set MORLOC_RUST_DIR to the data/rust this compiler was built from and re-run `morloc init -f`"))
+    Right
+    <$> runtimeSource rustDir
+
+-- | 'runtimeInstallScript' without the remedy.
+runtimeSource :: FilePath -> IO (Either String FilePath)
+runtimeSource rustDir = do
   let script = rustDir </> "install.sh"
       header = rustDir </> "include" </> "morloc.h"
-      refuse why = Left $
-        "the runtime source at " <> rustDir <> " " <> why
-          <> "; set MORLOC_RUST_DIR to the data/rust this compiler was built from and re-run `morloc init -f`"
+      crateFile c = rustDir </> c </> "Cargo.toml"
+      crates = ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"]
+      refuse why = Left ("the runtime source at " <> rustDir <> " " <> why)
   hasCargo <- doesFileExist (rustDir </> "Cargo.toml")
   hasScript <- doesFileExist script
   hasHeader <- doesFileExist header
+  missingCrates <- filterM (fmap not . doesFileExist . crateFile) crates
   if not hasCargo
     then return (refuse "is not a runtime source (it has no Cargo.toml)")
     else if not hasScript
       then return (refuse "predates this compiler (it has no install.sh)")
       else if not hasHeader
         then return (refuse ("has no " <> header))
-        else do
-          bytes <- BS.readFile header
-          return $
-            if bytes == encodeUtf8 DF.libmorlocHeader
-              then Right script
-              else refuse $ case decodeUtf8' bytes of
-                Right text | Just n <- headerAbiVersion text, n /= abiVersion ->
-                  "declares ABI " <> show n <> " in include/morloc.h, but this compiler emits code for ABI "
-                    <> show abiVersion
-                _ -> "has an include/morloc.h that differs from the header this compiler was built with"
+        else case missingCrates of
+          c : _ -> return (refuse ("has no " <> crateFile c))
+          [] -> do
+            bytes <- BS.readFile header
+            versions <- forM crates $ \c ->
+              (,) c . either (const Nothing) cargoPackageVersion . decodeUtf8' <$> BS.readFile (crateFile c)
+            let wrong = [(c, v) | (c, v) <- versions, v /= Just (T.pack versionStr)]
+            return $
+              if bytes /= encodeUtf8 DF.libmorlocHeader
+                then refuse $ case decodeUtf8' bytes of
+                  Right text | Just n <- headerAbiVersion text, n /= abiVersion ->
+                    "declares ABI " <> show n <> " in include/morloc.h, but this compiler emits code for ABI "
+                      <> show abiVersion
+                  _ -> "has an include/morloc.h that differs from the header this compiler was built with"
+                else case wrong of
+                  (c, v) : _ -> refuse $
+                    "has " <> c <> " " <> maybe "of an unreadable version" T.unpack v
+                      <> ", but this compiler is morloc " <> versionStr
+                  [] -> Right script
+
+-- | Whether a home's @rust@, when it is a link, reaches a source this
+-- compiler accepts. Init never replaces the link, and Rust pools and the Rust
+-- binding build against it (SHIM-7).
+keptRuntimeLink :: FilePath -> IO (Either String ())
+keptRuntimeLink homeDir = do
+  let link = homeDir </> "rust"
+  isLink <- pathIsSymbolicLink link `catch` \(_ :: IOException) -> return False
+  if not isLink
+    then return (Right ())
+    else do
+      target <- canonicalizePath link `catch` \(_ :: IOException) -> return link
+      either
+        (\why -> Left $
+          link <> " is a link, which init keeps and Rust pools build against, but " <> why
+            <> "; point it at the data/rust this compiler was built from, or remove it, and re-run `morloc init -f`")
+        (const (Right ()))
+        <$> runtimeSource target
+
+-- | The version in a Cargo.toml's @[package]@ table: a quoted string, with
+-- any comment after it.
+cargoPackageVersion :: T.Text -> Maybe T.Text
+cargoPackageVersion text =
+  case [ v
+       | l <- takeWhile (not . isTable) (drop 1 (dropWhile (/= "[package]") (map uncomment (T.lines text))))
+       , Just rest <- [T.stripPrefix "version" l]
+       , Just v0 <- [T.stripPrefix "=" (T.strip rest)]
+       , Just v <- [quoted '"' (T.strip v0) <|> quoted '\'' (T.strip v0)]
+       ] of
+    [v] -> Just v
+    _ -> Nothing
+  where
+    isTable l = "[" `T.isPrefixOf` l
+    -- A version holds no '#', so everything from one on is a comment.
+    uncomment = T.strip . T.takeWhile (/= '#')
+    quoted q t = T.stripPrefix (T.singleton q) t >>= T.stripSuffix (T.singleton q)
 
 -- | Whether the installed nexus accepts the installed libmorloc (LIFE-6),
--- reports the build id install.sh recorded for them, and speaks the ABI this
--- compiler emits code for, or why not.
+-- reports the build id install.sh recorded for them, speaks the ABI this
+-- compiler emits code for and is this compiler's version (SHIM-7), or why
+-- not.
 nexusAgrees :: FilePath -> IO (Either String ())
 nexusAgrees homeDir = do
   let nexus = homeDir </> "bin" </> "morloc-nexus"
@@ -451,16 +513,23 @@ nexusAgrees homeDir = do
     Right (ExitSuccess, out, _) -> do
       recorded <- installedBuildId homeDir
       reported <- ask "--abi-version"
-      return $ case reported of
+      version <- ask "--version"
+      let expectedVersion = "morloc-nexus " <> versionStr
+      return $ case (reported, version) of
         _ | recorded /= Just (T.strip (T.pack out)) -> Left $
           "the build id recorded at " <> buildIdFile homeDir <> " is not the installed nexus's ("
             <> trimEnd out <> "); the last runtime install did not finish"
-        Right (ExitSuccess, abi, _) | Just n <- readMaybe (trimEnd abi), n == abiVersion -> Right ()
-        Right (ExitSuccess, abi, _) -> Left $
+        (Right (ExitSuccess, abi, _), _) | readMaybe (trimEnd abi) /= Just abiVersion -> Left $
           "the installed " <> nexus <> " speaks ABI " <> trimEnd abi
             <> ", but this compiler emits code for ABI " <> show abiVersion
-        Right (ExitFailure _, _, err) -> Left ("the installed " <> nexus <> " cannot report its ABI: " <> trimEnd err)
-        Left e -> Left ("the installed " <> nexus <> " cannot run: " <> displayException e)
+        (Right (ExitSuccess, _, _), Right (ExitSuccess, v, _))
+          | trimEnd v == expectedVersion -> Right ()
+          | otherwise -> Left $
+              "the installed " <> nexus <> " is " <> trimEnd v <> ", but this compiler is morloc " <> versionStr
+        (Right (ExitFailure _, _, err), _) -> Left ("the installed " <> nexus <> " cannot report its ABI: " <> trimEnd err)
+        (Left e, _) -> Left ("the installed " <> nexus <> " cannot run: " <> displayException e)
+        (_, Right (ExitFailure _, _, err)) -> Left ("the installed " <> nexus <> " cannot report its version: " <> trimEnd err)
+        (_, Left e) -> Left ("the installed " <> nexus <> " cannot run: " <> displayException e)
 
 -- | The build id install.sh recorded for the installed runtime.
 buildIdFile :: FilePath -> FilePath
@@ -845,6 +914,8 @@ provisionRustRuntime verbose config homeDir = do
   -- layer provisioned there) and a link to a development tree are left as
   -- they are.
   let replacePersisted = srcAbs /= persistedAbs && not persistedIsLink
+  -- Checked here too, so a refusal names the source rather than the snapshot.
+  runtimeInstallScript srcAbs >>= either (ioError . userError) (const (return ()))
   when (srcAbs == persistedAbs) $
     sayWarning $
       "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "

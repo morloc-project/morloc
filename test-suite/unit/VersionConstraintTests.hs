@@ -5,7 +5,7 @@
 -- Description : Unit tests for the morloc-version compiler-compatibility gate.
 --
 -- Mirrored contract: these vectors track
--- @data/rust/morloc-deps/src/constraint.rs@ on version ordering and range
+-- @morloc-deps/src/constraint.rs@ in the morloc-manager (mim) repository on version ordering and range
 -- admission; the two implement the SAME conda match-spec grammar, so a bare
 -- version / @==v@ / @X.Y.*@ all denote the prefix range @[v, next(v))@.
 module VersionConstraintTests

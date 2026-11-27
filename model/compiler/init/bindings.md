@@ -100,3 +100,18 @@ installed header must be this compiler's (SHIM-3), so the binding and the
 installed libmorloc share one C ABI; a mismatch in the Rust interface of
 `morloc-runtime-types` fails the pool's compile.
 
+### SHIM-7 Init builds and keeps only a runtime of this compiler's version
+Intent: proposed
+Tests: spec-shim-7-1, spec-shim-7-2, spec-shim-7-3, spec-shim-7-4
+Code: conforms 2026-11-27
+
+Init builds the runtime from `MORLOC_RUST_DIR` or the home's persisted copy,
+not from the compiler. It refuses a source whose `include/morloc.h` is not
+the header the compiler was built with, or whose runtime crates are not at
+the compiler's version. Every init refuses a `$MORLOC_HOME/rust` that is a
+link to such a source (init keeps a link, and Rust pools build against it),
+and rebuilds an installed runtime whose nexus reports another version: the nexus refuses every manifest from another
+morloc version (ART-5), so such a runtime would run no program. Every
+runtime crate and the Rust binding carry the compiler's version, in their
+Cargo.toml and in their own entries in the two Cargo.lock files;
+`scripts/bump-version.sh` sets them all.

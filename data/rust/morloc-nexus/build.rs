@@ -36,10 +36,4 @@ fn main() {
     if std::env::var("PROFILE").as_deref() == Ok("debug") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", morloc_lib);
     }
-
-    // The morloc compiler version is sourced from CARGO_PKG_VERSION
-    // (this crate's Cargo.toml), which is intentionally kept in
-    // lockstep with the morloc Haskell package.yaml. No build-time
-    // extraction needed -- Cargo guarantees CARGO_PKG_VERSION is set
-    // and rebuilds when Cargo.toml changes.
 }

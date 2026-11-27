@@ -68,10 +68,6 @@
   provisioning always re-runs init. A fix pins the compiler to the runtime
   source it was built from (a build id embedded at compile time), which
   would make every runtime edit need `stack install`; needs a ruling.
-- **Crate versions claim a lockstep they lack.** [read]
-  morloc-runtime-types (0.87.0) says "Version locked with morloc-runtime"
-  (0.113.0); scripts/bump-version.sh:36 bumps only nexus, manifest and
-  runtime.
 - **Rust crates are resolved per pool, outside the environment's solve.**
   [read] Rust pools resolve rust-deps one pool at a time against an
   environment lock the compiler maintains (Build/CargoLock.hs), while
@@ -244,16 +240,6 @@
   2026-10-01 to now, though Subcommands.hs:557 removes the dir in a
   `bracket`. A SIGKILL (the MCP eval wall-clock kill, memguard) skips a
   bracket; unconfirmed.
-- **The release workflow never runs the Rust suite.** [read 2026-11-26]
-  release.yml's `test` job runs `lint typecheck-bench concurrency daemon
-  packet-io expose`, `haskell` and `integration` (:258-274), never
-  `test-suite/run rust`, so a tag can publish a runtime whose cargo tests
-  were last run only by ci.yml on another commit.
-- **Stale data/rust paths.** [read 2026-11-26]
-  test-suite/integration/suites/manager/run-tests.sh:69 and its README.md:47
-  look for mim under data/rust/target, where mim has not been built since it
-  moved to morloc-manager. test-suite/unit/VersionConstraintTests.hs:8 cites
-  data/rust/morloc-deps/src/constraint.rs, which no longer exists.
 - **Inits of two homes sharing one state relink each other's nexus.**
   [read 2026-11-26] Gap beside LIFE-6. The cargo target dir
   (Config.rustBuildDir) belongs to the state, but the nexus build script

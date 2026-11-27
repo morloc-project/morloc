@@ -15,11 +15,8 @@
 //! recorded in the [`Build`] sub-object serves as the staleness
 //! indicator. The check happens in [`parse_manifest`].
 //!
-//! Version coupling: this crate's `CARGO_PKG_VERSION` is intentionally
-//! kept in lockstep with the morloc Haskell compiler version (see
-//! `package.yaml`). The same is true of `morloc-nexus` and
-//! `morloc-runtime` -- bumping the morloc compiler requires bumping
-//! all three Rust crates in the same commit.
+//! This crate's `CARGO_PKG_VERSION` is the compiler's version (ART-5,
+//! SHIM-7).
 //!
 //! ## Extension slots
 //!
@@ -176,8 +173,7 @@ pub struct Build {
     pub time: i64,
     /// Version of the morloc compiler that produced this manifest. The
     /// nexus compares this against its own compile-time
-    /// `CARGO_PKG_VERSION` (which is intentionally synchronized with
-    /// the morloc compiler version) in [`parse_manifest`]; a mismatch
+    /// `CARGO_PKG_VERSION` in [`parse_manifest`] (ART-5); a mismatch
     /// produces an actionable "rebuild with the current compiler"
     /// error.
     pub morloc_version: String,
@@ -1187,8 +1183,7 @@ pub fn read_manifest_payload(path: &str) -> Result<String, String> {
 
 /// Parse a manifest JSON payload into a [`Manifest`]. Performs a
 /// staleness check on `build.morloc_version` against this crate's own
-/// `CARGO_PKG_VERSION` (which is intentionally pinned to match the
-/// morloc compiler version). Mismatched versions return a clean
+/// `CARGO_PKG_VERSION` (ART-5). Mismatched versions return a clean
 /// "rebuild with the current compiler" error rather than silently
 /// misinterpreting the manifest.
 pub fn parse_manifest(payload: &str) -> Result<Manifest, String> {

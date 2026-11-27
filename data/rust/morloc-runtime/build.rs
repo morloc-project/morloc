@@ -14,7 +14,4 @@ fn main() {
         // (not the crate's test binaries).
         println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libmorloc.dylib");
     }
-    // The morloc compiler version is sourced from CARGO_PKG_VERSION
-    // (this crate's Cargo.toml), which is intentionally kept in
-    // lockstep with the morloc Haskell package.yaml.
 }

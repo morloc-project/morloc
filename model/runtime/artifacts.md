@@ -36,4 +36,6 @@ nexus refuses with a message to rebuild. This, not MORLOC_ABI_VERSION,
 decides whether a program runs on an installed runtime: a program carries
 its pool code and calls into the language bindings, the manifest shape and
 the schema and layout rules, none of which the ABI version covers. Unknown
-keys are ignored.
+keys are ignored. The nexus accepts the morloc-manifest crate's version;
+`morloc-nexus --version` reports the morloc-nexus crate's. Init holds both
+to the compiler's (SHIM-7).

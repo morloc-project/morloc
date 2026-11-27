@@ -32,6 +32,8 @@ import Morloc.CodeGenerator.SystemConfig
   , BindingState (..)
   , bindingState
   , bindingsReportJson
+  , cargoPackageVersion
+  , keptRuntimeLink
   , effectiveInitFlags
   , findRustDir
   , installedRuntimeMismatches
@@ -47,6 +49,7 @@ import Morloc.CodeGenerator.SystemConfig
   )
 import Control.Exception (bracket)
 import Morloc.Abi (abiVersion)
+import Morloc.Version (versionStr)
 import Morloc.RustBinding (rustBindingDir, rustBindingFiles)
 import Control.Monad (forM, forM_)
 import Data.List (sort)
@@ -223,10 +226,12 @@ runtimeInstallTests =
     , testCase "a runtime source with install.sh and this compiler's header is used through it" $
         withHome "script" ["Cargo.toml", "install.sh"] $ \src -> do
           writeEmbeddedHeader src
+          writeCrates src versionStr
           runtimeInstallScript src >>= (@?= Right (src </> "install.sh"))
     , testCase "a runtime source whose header differs at the same ABI is refused" $
         withHome "samabi" ["Cargo.toml", "install.sh"] $ \src -> do
           writeHeader src abiVersion
+          writeCrates src versionStr
           r <- runtimeInstallScript src
           case r of
             Left msg -> assertBool msg ("differs" `isInfixOf` msg)
@@ -240,6 +245,7 @@ runtimeInstallTests =
     , testCase "a runtime source whose header declares another ABI is refused, naming both" $
         withHome "otherabi" ["Cargo.toml", "install.sh"] $ \src -> do
           writeHeader src (abiVersion + 1)
+          writeCrates src versionStr
           r <- runtimeInstallScript src
           case r of
             Left msg -> assertBool msg (show abiVersion `isInfixOf` msg && show (abiVersion + 1) `isInfixOf` msg)
@@ -253,11 +259,14 @@ runtimeInstallTests =
     , testCase "the source search skips a candidate without install.sh" $
         withHome "search" ["old/Cargo.toml", "new/Cargo.toml", "new/install.sh"] $ \root -> do
           writeEmbeddedHeader (root </> "new")
+          writeCrates (root </> "new") versionStr
           findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
     , testCase "the source search skips a candidate whose header differs" $
         withHome "searchheader" ["old/Cargo.toml", "old/install.sh", "new/Cargo.toml", "new/install.sh"] $ \root -> do
           writeHeader (root </> "old") abiVersion
+          writeCrates (root </> "old") versionStr
           writeEmbeddedHeader (root </> "new")
+          writeCrates (root </> "new") versionStr
           findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
     , testCase "an installed nexus that accepts its libmorloc at this ABI agrees" $
         withHome "nexusok" [] $ \home -> do
@@ -361,6 +370,74 @@ runtimeInstallTests =
     , testCase "the source search falls back to a candidate without install.sh" $
         withHome "searchold" ["old/Cargo.toml"] $ \root ->
           findRustDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
+    , testCase "spec-shim-7-1" $
+        withHome "otherversion" ["Cargo.toml", "install.sh"] $ \src -> do
+          writeEmbeddedHeader src
+          writeCrates src "0.0.1"
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg ("0.0.1" `isInfixOf` msg && versionStr `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "a runtime source without the manifest crate is refused" $
+        withHome "nomanifest" ["Cargo.toml", "install.sh"] $ \src -> do
+          writeEmbeddedHeader src
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg ("morloc-manifest" `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "a runtime source with one crate of another version is refused, naming it" $
+        withHome "onecrate" ["Cargo.toml", "install.sh"] $ \src -> do
+          writeEmbeddedHeader src
+          writeCrates src versionStr
+          writeCrate src "morloc-runtime-types" "0.0.1"
+          r <- runtimeInstallScript src
+          case r of
+            Left msg -> assertBool msg ("morloc-runtime-types 0.0.1" `isInfixOf` msg)
+            Right p -> assertFailure ("accepted " <> p)
+    , testCase "spec-shim-7-4" $
+        withHome "keptlink" ["old/Cargo.toml", "old/install.sh", "new/Cargo.toml", "new/install.sh"] $ \root -> do
+          forM_ ["old", "new"] $ \d -> writeEmbeddedHeader (root </> d)
+          writeCrates (root </> "old") "0.0.1"
+          writeCrates (root </> "new") versionStr
+          let home = root </> "home"
+              relink target = do
+                removePathForcibly (home </> "rust")
+                createFileLink target (home </> "rust")
+              refused what = do
+                r <- keptRuntimeLink home
+                case r of
+                  Left msg -> assertBool msg (what `isInfixOf` msg && "point it at" `isInfixOf` msg)
+                  Right () -> assertFailure ("kept a link to " <> what)
+          createDirectoryIfMissing True home
+          keptRuntimeLink home >>= (@?= Right ())
+          relink (root </> "new")
+          keptRuntimeLink home >>= (@?= Right ())
+          relink (root </> "old")
+          refused "0.0.1"
+          relink (root </> "gone")
+          refused "Cargo.toml"
+    , testCase "spec-shim-7-3" $
+        withHome "nexusversion" [] $ \home -> do
+          fakeNexusOf home 0 (show abiVersion) "0.0.1"
+          writeBuildId home fakeBuildId
+          r <- nexusAgrees home
+          case r of
+            Left msg -> assertBool msg ("0.0.1" `isInfixOf` msg && versionStr `isInfixOf` msg)
+            Right () -> assertFailure "a nexus of another version agreed"
+    , testCase "spec-shim-7-2" $ do
+        let crates = [ "data/rust/" <> c <> "/Cargo.toml" | c <- ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"] ]
+              ++ ["data/lang/rust/rustmorloc/Cargo.toml"]
+        found <- forM crates $ \f -> (,) f . cargoPackageVersion <$> TIO.readFile f
+        [(f, v) | (f, v) <- found, v /= Just (T.pack versionStr)] @?= []
+        let locked = [ ("data/rust/Cargo.lock", ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"])
+                     , ("data/lang/rust/rustmorloc/Cargo.lock", ["morloc-runtime-types", "rustmorloc"]) ]
+        forM_ locked $ \(f, names) -> do
+          entries <- lockVersions <$> TIO.readFile f
+          [(n, v) | n <- names, let v = lookup (T.pack n) entries, v /= Just (T.pack versionStr)] @?= []
+    , testCase "the Cargo.toml version is read from the package table" $ do
+        cargoPackageVersion (T.pack "[package]\nname = \"a\"\nversion = \"1.2.3\"\n[dependencies]\nversion = \"9\"\n") @?= Just (T.pack "1.2.3")
+        cargoPackageVersion (T.pack "[dependencies]\nversion = \"9\"\n") @?= Nothing
+        cargoPackageVersion (T.pack "[package] # crate\nversion = '1.2.3'  # note\n") @?= Just (T.pack "1.2.3")
     , testCase "a runtime source without install.sh is refused, naming the source" $
         withHome "noscript" ["Cargo.toml"] $ \src -> do
           r <- runtimeInstallScript src
@@ -390,7 +467,8 @@ runtimeInstallTests =
       createDirectoryIfMissing True (home </> "lib")
       mapM_ (\f -> writeFile (home </> f) "") ["opt/pymorloc", "lib/librmorloc.so", "lib/libcppmorloc.a"]
       mapM_ (\ls -> let (name, text) = edit (DF.lsName ls, langMarkerText (T.pack bid) T.empty sanitize ls) in writeFile (dir </> name) text) DF.langSetups
-    fakeNexus home code abi = do
+    fakeNexus home code abi = fakeNexusOf home code abi versionStr
+    fakeNexusOf home code abi version = do
       createDirectoryIfMissing True (home </> "bin")
       let f = home </> "bin" </> "morloc-nexus"
           body = unlines
@@ -398,9 +476,28 @@ runtimeInstallTests =
             , "case \"$1\" in"
             , "  --build-id) echo 0123456789abcdef; exit " <> show (code :: Int) <> " ;;"
             , "  --abi-version) echo " <> abi <> " ;;"
+            , "  --version) echo 'morloc-nexus " <> version <> "' ;;"
             , "esac"
             ]
       callProcess "sh" ["-c", "printf '%s' \"$2\" > \"$1\" && chmod +x \"$1\"", "sh", f, body]
+    writeCrates src v = forM_ ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"] $ \c ->
+      writeCrate src c v
+    writeCrate src c v = do
+      createDirectoryIfMissing True (src </> c)
+      writeFile (src </> c </> "Cargo.toml") ("[package]\nname = \"" <> c <> "\"\nversion = \"" <> v <> "\"\n")
+    -- Path crates only: a table with a source line is a registry crate.
+    lockVersions text =
+      [ (n, v)
+      | block <- T.splitOn (T.pack "[[package]]") text
+      , let ls = map T.strip (T.lines block)
+      , not (any (T.isPrefixOf (T.pack "source = ")) ls)
+      , Just n <- [field "name" ls]
+      , Just v <- [field "version" ls]
+      ]
+    field key ls =
+      case [ v | l <- ls, Just v <- [T.stripPrefix (T.pack (key <> " = \"")) l >>= T.stripSuffix (T.pack "\"")] ] of
+        (v : _) -> Just v
+        [] -> Nothing
     writeEmbeddedHeader src = do
       createDirectoryIfMissing True (src </> "include")
       BS.writeFile (src </> "include" </> "morloc.h") (TE.encodeUtf8 DF.libmorlocHeader)

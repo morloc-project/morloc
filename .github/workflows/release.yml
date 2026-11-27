@@ -258,6 +258,18 @@ jobs:
         run: ./test-suite/run lint typecheck-bench concurrency daemon packet-io expose
         timeout-minutes: 30
 
+      # The runtime's cargo tests, as in the push workflow, so the runtime a
+      # tag publishes was tested at that tag. The fork-ownership tests need
+      # unprivileged user namespaces, which Ubuntu's AppArmor forbids by
+      # default; on Linux a skipped test fails the run.
+      - name: Allow unprivileged user namespaces (Linux)
+        if: matrix.shard == 1 && runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Test rust runtime and nexus
+        if: matrix.shard == 1
+        run: ./test-suite/run --ci rust
+        timeout-minutes: 20
+
       # And morloc-integration-test alongside the unit and golden suites. That
       # covers the daemon, MCP, shared memory, install and stress integration
       # tests, none of which a push runs -- a release is the right place to pay

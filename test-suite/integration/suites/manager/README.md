@@ -43,8 +43,7 @@ safe to run anywhere.
 ## Prerequisites
 
 - `help`/`expose`: just the `mim` binary. It is resolved from
-  `$MORLOC_MANAGER`, then `PATH`, then the local cargo build under
-  `data/rust/target/{debug,release}/mim`.
+  `$MORLOC_MANAGER`, then `PATH`.
 - `serve`/`auth`: additionally a container engine (docker/podman/apptainer), a
   **default** morloc environment (the first `mim new` sets it, or
   `mim update --env <env> --set-default`), `curl`, and

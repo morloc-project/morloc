@@ -66,10 +66,6 @@ resolve_manager() {
     if command -v mim >/dev/null 2>&1; then
         command -v mim; return 0
     fi
-    local root="$SCRIPT_DIR/../../../../data/rust/target"
-    for cand in "$root/debug/mim" "$root/release/mim"; do
-        [[ -x "$cand" ]] && { echo "$cand"; return 0; }
-    done
     return 1
 }
 
