@@ -121,11 +121,3 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   again: `_PyLong_AsByteArray`, `_PyLong_FromByteArray`, `_PyLong_NumBits`,
   `_PyObject_GetDictPtr`; public replacements exist since 3.13
   (`PyLong_AsNativeBytes`, `PyLong_FromNativeBytes`).
-
-- **A package.yaml parse failure other than LoadSettingsException is
-  unhandled.** [read, 2026-11-27] readPackageYamlIO
-  (library/Morloc/Module.hs) catches ParseException with a lambda that
-  matches only the LoadSettingsException constructor (GHC warns
-  -Wincomplete-uni-patterns); any other ParseException reaching it dies
-  as a PatternMatchFail instead of a refusal naming the file. Whether
-  loadYamlSettings can throw another constructor is unverified.
