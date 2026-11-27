@@ -4,10 +4,11 @@ on one branch, crossed with the ways a caller can hold its argument.
 
   python3 gen.py LANG OUTDIR [GROUP]
 
-Writes OUTDIR/main.loc, OUTDIR/cases.tsv (name, shape, predicted copies
-under the two-form rule) and OUTDIR/Makefile. Each case prints
-`[value, copies]`; the Makefile runs every case built normally and built
-with MORLOC_NO_MOVES=1 (the oracle) and check.py compares them.
+Writes OUTDIR/main.loc, OUTDIR/cases.tsv (run, shape, j, predicted copies
+under the two-form rule) and OUTDIR/Makefile. A shape is one function, run
+once per j it is selected with; each run prints `[value, copies]`. `make`
+runs every case and check.py compares the runs with oracle.txt, the runs of
+a build with MORLOC_NO_MOVES=1, which `make oracle` regenerates.
 """
 
 import itertools
@@ -133,11 +134,21 @@ def fmt(s, **kw):
     return s.replace("{{", "{").replace("}}", "}")
 
 
-def render(selected):
+def shapes(selected):
+    """Group the selected cases by shape: a shape's code does not depend on
+    j, which is passed at run time."""
+    out = {}
+    for (k, mode, br, caller, j) in selected:
+        out.setdefault((k, mode, br, caller), []).append(j)
+    return list(out.items())
+
+
+def render(grouped):
     lines = []
     tsv = []
     names = []
-    for i, (k, mode, br, caller, j) in enumerate(selected):
+    runs = []
+    for i, ((k, mode, br, caller), js) in enumerate(grouped):
         name = "c%03d" % i
         names.append(name)
         t, mk, rd, dflt, part = KINDS[k]
@@ -148,7 +159,7 @@ def render(selected):
         body = body.replace("{keep}", keepx).replace("{keepy}", keepy).replace("{dflt}", mdflt).replace("{self}", name + "f")
         body = fmt(body)
         f = name + "f"
-        lines.append("-- %s: %s kept by %s under %s, caller %s, j=%d" % (name, k, mode, br, caller, j))
+        lines.append("-- %s: %s kept by %s under %s, caller %s" % (name, k, mode, br, caller))
         lines.append("%s :: Int -> %s -> %s" % (f, t, rtype))
         lines.append("%s j x = %s" % (f, body))
         read = "(\\r -> " + fmt(rread, r="r") + ")"
@@ -188,8 +199,11 @@ def render(selected):
         lines.append("%s :: Int -> Int -> (Int, Int)" % name)
         lines.append("%s n j = census (%s)" % (name, call))
         lines.append("")
-        tsv.append("%s\t%s\t%s\t%s\t%s\t%d\t%d" % (name, k, mode, br, caller, j, predict(k, mode, caller, j)))
-    return lines, tsv, names
+        for j in js:
+            label = "%s-j%d" % (name, j)
+            runs.append((label, name, j))
+            tsv.append("%s\t%s\t%s\t%s\t%s\t%d\t%d" % (label, k, mode, br, caller, j, predict(k, mode, caller, j)))
+    return lines, tsv, names, runs
 
 
 def header(names):
@@ -252,22 +266,26 @@ lhead xs = match xs
 """ % (LANG, ", ".join(names), imp, tl, tl, src, tl, src, holders, wraps)
 
 
-def write_makefile(out, names, js):
-    """The Makefile: every case built normally, built with MORLOC_NO_MOVES=1
-    (the oracle) and, for C++, under sanitizers, compared by check.py."""
+def write_makefile(out, runs):
+    """The Makefile. `all` runs every (label, function, j) of RUNS built
+    normally and, for C++, under sanitizers, and check.py compares them with
+    the checked-in oracle.txt; `oracle` rebuilds oracle.txt from a build with
+    MORLOC_NO_MOVES=1."""
     env = "MORLOC_LANG_PARAMS=rust:lto=off " if LANG == "rust" else ""
-    mk = ["all:", "\trm -f *.err obs.txt run.txt oracle.txt asan.txt",
-          "\t%smorloc make -o nexus main.loc 2> build.err" % env,
-          "\t%sMORLOC_NO_MOVES=1 morloc make -o oracle main.loc 2> oracle-build.err" % env]
+    mk = ["all:", "\trm -f *.err obs.txt run.txt asan.txt",
+          "\t%smorloc make -o nexus main.loc 2> build.err" % env]
     if LANG == "cpp":
         mk.append("\tCXX=\"$${CXX:-g++} -fsanitize=address,undefined -fno-sanitize-recover=all\" morloc make -o asan main.loc 2> asan-build.err")
-    for n in names:
-        mk.append("\techo \"%s $$(./nexus %s 7 %d 2>> obs.err || echo failed)\" >> run.txt" % (n, n, js[n]))
-        mk.append("\techo \"%s $$(./oracle %s 7 %d 2>> obs.err || echo failed)\" >> oracle.txt" % (n, n, js[n]))
+    for (label, f, j) in runs:
+        mk.append("\techo \"%s $$(./nexus %s 7 %d 2>> obs.err || echo failed)\" >> run.txt" % (label, f, j))
         if LANG == "cpp":
-            mk.append("\techo \"%s $$(ASAN_OPTIONS=detect_leaks=0 ./asan %s 7 %d 2>> obs.err || echo failed)\" >> asan.txt" % (n, n, js[n]))
+            mk.append("\techo \"%s $$(ASAN_OPTIONS=detect_leaks=0 ./asan %s 7 %d 2>> obs.err || echo failed)\" >> asan.txt" % (label, f, j))
     mk.append("\tpython3 check.py run.txt oracle.txt %s> obs.txt" % ("asan.txt " if LANG == "cpp" else ""))
-    mk += ["", "clean:", "\trm -rf nexus oracle asan pools __pycache__ *-build *build.tmp*", "\trm -f *.err run.txt oracle.txt asan.txt"]
+    mk += ["", "oracle:", "\trm -f oracle.txt oracle-build.err oracle.err",
+           "\t%sMORLOC_NO_MOVES=1 morloc make -o oracle main.loc 2> oracle-build.err" % env]
+    for (label, f, j) in runs:
+        mk.append("\techo \"%s $$(./oracle %s 7 %d 2>> oracle.err || echo failed)\" >> oracle.txt" % (label, f, j))
+    mk += ["", "clean:", "\trm -rf nexus oracle asan pools __pycache__ *-build *build.tmp*", "\trm -f *.err run.txt asan.txt"]
     open(out + "/Makefile", "w").write("\n".join(mk) + "\n")
 
 
@@ -277,15 +295,15 @@ def main():
     out = sys.argv[2]
     group = sys.argv[3] if len(sys.argv) > 3 else "all"
     sel = select(cases())
+    grouped = shapes(sel)
     if group != "all":
         a, b = map(int, group.split(":"))
-        sel = sel[a:b]
-    lines, tsv, names = render(sel)
-    js = {"c%03d" % i: c[4] for i, c in enumerate(sel)}
+        grouped = grouped[a:b]
+    lines, tsv, names, runs = render(grouped)
     open(out + "/main.loc", "w").write(header(names) + "\n".join(lines))
     open(out + "/cases.tsv", "w").write("\n".join(tsv) + "\n")
-    write_makefile(out, names, js)
-    print(len(names), "cases")
+    write_makefile(out, runs)
+    print(len(names), "shapes,", len(runs), "runs")
 
 
 if __name__ == "__main__":

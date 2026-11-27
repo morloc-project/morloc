@@ -22,16 +22,20 @@ The cells whose forcing side is pool code (rootResult, closureResult,
 nestedSusp) leave the placement of that code to the realizer, which may run
 the whole cell in the home pool; the host-forced cells always cross.
 
+Pairs with a Python side, and pairs whose two sides share a language, are
+covered by closure-conformance, which runs these cells (and more) with
+Python on one side of every other language and each language on both.
+This matrix holds the pairs it cannot: two different non-Python pools.
+
 Run `python3 gen.py` to regenerate; the outputs are checked in.
 """
 
 import os
 
-LANGS = ["py", "cpp", "r", "rust"]
-LANG_NAME = {"py": "Py", "cpp": "Cpp", "r": "R", "rust": "Rust"}
-HOST_FILE = {"py": "host.py", "cpp": "host.hpp", "r": "host.R", "rust": "host.rs"}
+LANGS = ["cpp", "r", "rust"]
+LANG_NAME = {"cpp": "Cpp", "r": "R", "rust": "Rust"}
+HOST_FILE = {"cpp": "host.hpp", "r": "host.R", "rust": "host.rs"}
 RECORD_FORM = {
-    "py": {"Holder": "dict", "Caller": "dict"},
     "r": {"Holder": "list", "Caller": "list"},
     "cpp": {"Holder": "Holder", "Caller": "Caller"},
     "rust": {"Holder": "Holder", "Caller": "Caller"},
@@ -41,45 +45,6 @@ CELLS = ["rootResult", "rootArg", "recordField", "listElem", "callback", "pinned
 NESTED = ["closureResult", "nestedSusp"]
 EXPECT = {c: 3 for c in CELLS + NESTED}
 EXPECT["nestedSusp"] = 4
-
-HOST_PY = '''import os
-
-def tick(path):
-    with open(path, "ab") as f:
-        f.write(b"x")
-    return os.path.getsize(path)
-
-def mark(s):
-    return s
-
-def ident(x):
-    return x
-
-def take_thunk(t):
-    t()
-    t()
-    return t()
-
-def use_record(h):
-    h["run"]()
-    h["run"]()
-    return h["run"]()
-
-def use_list(xs):
-    xs[0]()
-    xs[0]()
-    return xs[0]()
-
-def use_callback(f, x):
-    f(x)
-    f(x)
-    return f(x)
-
-def use_pinned(c, x):
-    c["inc"](x)
-    c["inc"](x)
-    return c["inc"](x)
-'''
 
 HOST_R = '''tick <- function(path) {
   cat("x", file = path, append = TRUE)
@@ -241,7 +206,7 @@ pub fn use_pinned(c: &Caller, x: i64) -> i64 {
 }
 '''
 
-HOSTS = {"py": HOST_PY, "r": HOST_R, "cpp": HOST_CPP, "rust": HOST_RS}
+HOSTS = {"r": HOST_R, "cpp": HOST_CPP, "rust": HOST_RS}
 
 
 def header(home, away, cells):
@@ -266,7 +231,9 @@ def decls(home, away):
     out.append("record Caller where\n  inc :: Int -> <IO> Int\n\n")
     for l in sorted({home, away}):
         for rec in ("Holder", "Caller"):
-            out.append(f'record {LANG_NAME[l]} => {rec} = "{RECORD_FORM[l][rec]}"\n')
+            form = RECORD_FORM[l][rec]
+            form = form if l == "r" else f'"{form}"'
+            out.append(f'record {LANG_NAME[l]} => {rec} = {form}\n')
     out.append("\n")
     out.append(f'source {H} from "{HOST_FILE[home]}"\n'
                f'  ( "tick" as tickH\n  , "mark" as markH\n  , "ident" as identH\n  , "take_thunk" as takeThunkH\n  )\n')
@@ -368,14 +335,8 @@ def main():
     programs = []  # (name, cells)
     for home in LANGS:
         for away in LANGS:
-            base = f"{home}-{away}"
-            # The nested cells get their own program where Rust is involved,
-            # so a build failure there cannot take the other cells down.
-            if "rust" in (home, away):
-                programs.append((f"pair-{base}", CELLS))
-                programs.append((f"nested-{base}", NESTED))
-            else:
-                programs.append((f"pair-{base}", CELLS + NESTED))
+            if home != away:
+                programs.append((f"pair-{home}-{away}", CELLS + NESTED))
     for name, cells in programs:
         home, away = name.split("-")[1:]
         with open(os.path.join(here, name + ".loc"), "w") as f:

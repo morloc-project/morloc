@@ -6,7 +6,8 @@ directory:
   python3 ../own7-matrix-cpp/fuzz.py LANG SEED COUNT
 
 Each program prints [value, payloads copied]; the Makefile and check.py
-are the matrix's (gen.py), comparing a run with the no-move oracle.
+are the matrix's (gen.py), comparing a run with the checked-in no-move
+oracle (oracle.txt, rebuilt by `make oracle`).
 """
 
 import random
@@ -94,7 +95,7 @@ def main():
         out += lines
     text = gen.header(names).replace("the OWN-7 move/copy matrix", "random OWN-7 move/copy programs (seed %d)" % SEED)
     open("main.loc", "w").write(text + "\n".join(out))
-    gen.write_makefile(".", names, js)
+    gen.write_makefile(".", [(n, n, js[n]) for n in names])
     print(len(names), "programs")
 
 
