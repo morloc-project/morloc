@@ -3938,7 +3938,7 @@ pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
 // ---- File / stream / IO intrinsics ----------------------------------------
 //
 // Thin bridges over the libmorloc `mlc_*` C ABI, mirroring the C++ pool's
-// `_mlc_*` helpers (data/lang/cpp/pool.cpp). The runtime owns all IO state; a
+// `_mlc_*` helpers (binders/cpp/pool.cpp). The runtime owns all IO state; a
 // shim only marshals values and propagates errors. Value-in ops stage the
 // value through `with_voidstar`; value-out ops reconstruct a runtime-returned
 // SHM voidstar via `FromVoidstar` then `shfree` it (the `@load`/`@read`

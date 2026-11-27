@@ -173,7 +173,7 @@ switch is unstable, so pool builds enable it on a stable toolchain with
 RUSTC_BOOTSTRAP. The release-mode classifier tests reproduce a pool build
 only with the same flags (`test-suite/run rust` runs them so: `RUSTC_BOOTSTRAP=1
 RUSTFLAGS=-Zmerge-functions=disabled cargo test --release` on
-data/lang/rust/rustmorloc with line tables, `-- panic_classifier`); without them the
+binders/rust/rustmorloc with line tables, `-- panic_classifier`); without them the
 test whose runtime code is identical to a user function fails. Paths are compared as written and absolute; the backtrace is read in
 std's full format, which names files absolutely whatever the working
 directory. The walk costs time in proportion to the stack's depth, paid

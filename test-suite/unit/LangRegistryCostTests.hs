@@ -20,7 +20,7 @@ langRegistryCostTests =
     , testCase "the order is required" $
         assertBool "parsed" (isLeft (LR.parseLanguagesYaml "other: 1"))
     , testCase "the shipped py and r pools fork their workers, cpp and rust do not" $ do
-        files <- mapM (\l -> (,) l <$> TIO.readFile ("data/lang/" <> l <> "/lang.yaml")) ["py", "r", "cpp", "rust"]
+        files <- mapM (\l -> (,) l <$> TIO.readFile ("binders/" <> l <> "/lang.yaml")) ["py", "r", "cpp", "rust"]
         case LR.buildDefaultRegistry files "language_order: [cpp, py, r, rust]" of
           Left e -> assertFailure e
           Right reg -> map (LR.registryForkWorkers reg . T.pack) ["py", "r", "cpp", "rust"] @?= [True, True, False, False]

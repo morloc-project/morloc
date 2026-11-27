@@ -103,14 +103,14 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   interface-install.asc:214.
 
 - **The Python binding build discards the environment's CFLAGS.**
-  [read, 2026-11-19] data/lang/py/init.sh exports
+  [read, 2026-11-19] binders/py/init.sh exports
   `CFLAGS="$SANITIZE_FLAGS"`, empty unless sanitizing, so the activation's
   CFLAGS (`-isystem $CONDA_PREFIX/include`, ...) never reach setuptools.
   Impact unknown: setup.py names its include dirs itself.
 
 - **The python version window is never checked against the binding.**
   [reproduced, 2026-11-19] Gap: no spec item says how the runtime window in
-  data/lang/py/requirements.yaml is verified. LangSupportTests asserts only
+  binders/py/requirements.yaml is verified. LangSupportTests asserts only
   the ceiling string; nothing builds pymorloc.c at the window's ends. The
   window was wrong when written: `<3.14` admitted 3.13, which also failed
   (`_PyLong_AsByteArray` gained an argument in 3.13; compile 627b58b74's

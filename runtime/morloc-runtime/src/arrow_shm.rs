@@ -693,7 +693,7 @@ impl BlockView {
         if h.version != ARROW_SHM_VERSION {
             return Err(err(format!(
                 "Arrow SHM block has wire version {}, this runtime speaks {}; rebuild with \
-                 'MORLOC_RUST_DIR=$PWD/data/rust morloc init -f'",
+                 'MORLOC_RUNTIME_DIR=$PWD/runtime morloc init -f'",
                 h.version, ARROW_SHM_VERSION
             )));
         }

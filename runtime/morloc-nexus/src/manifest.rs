@@ -5,7 +5,7 @@
 //! its consumers) can keep saying `crate::manifest::Manifest` without
 //! caring whether the types live here or in a sibling crate. The
 //! actual schema, with full doc comments and parsing logic, lives in
-//! `data/rust/morloc-manifest/src/lib.rs`.
+//! `runtime/morloc-manifest/src/lib.rs`.
 
 pub use morloc_manifest::{
     parse_manifest, read_manifest_payload, Arg, ArgParse, Check, Command,

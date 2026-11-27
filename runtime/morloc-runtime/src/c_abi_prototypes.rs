@@ -333,7 +333,7 @@ mod tests {
         let definitions = abi_signatures(&prototypes);
         let mut checked = 0;
         let mut disagreements = Vec::new();
-        for krate in ["../morloc-nexus/src", "../../lang/rust/rustmorloc/src"] {
+        for krate in ["../morloc-nexus/src", "../../binders/rust/rustmorloc/src"] {
             let (decls, skipped) = foreign_prototypes(&crate_dir.join(krate), &rename);
             for (name, proto) in decls {
                 let Some(def) = definitions.get(&name) else { continue };

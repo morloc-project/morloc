@@ -1,4 +1,4 @@
-//! Guard that `data/rust/include/morloc.h` describes the same memory layout as the
+//! Guard that `runtime/include/morloc.h` describes the same memory layout as the
 //! `#[repr(C)]` mirrors in this crate.
 //!
 //! `libmorloc.so` hands out pointers to the structs defined in

@@ -96,7 +96,7 @@
   not checked.
 - [read] Cost of the DIM-3 entry check (cost ruled out of scope for now,
   2026-10-30): on a remote command the nexus decodes in full each argument
-  a relation reads (data/rust/morloc-nexus/src/dispatch.rs
+  a relation reads (runtime/morloc-nexus/src/dispatch.rs
   check_dims_of_packets), so a file argument is read twice and a streamed
   file is loaded whole into the nexus's shared memory, doubling its peak;
   the daemon parses each command's relations on every request

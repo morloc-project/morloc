@@ -72,7 +72,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ matrix.os }}-${{ hashFiles('data/rust/Cargo.lock', 'data/lang/rust/rustmorloc/Cargo.lock') }}
+          key: cargo-${{ matrix.os }}-${{ hashFiles('runtime/Cargo.lock', 'binders/rust/rustmorloc/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.os }}-
 
@@ -95,7 +95,7 @@ jobs:
             !~/.local/share/morloc/cache/rust-build/release/deps/pool_*
             !~/.local/share/morloc/cache/rust-build/release/.fingerprint/pool_*
             !~/.local/share/morloc/cache/rust-build/release/build/pool_*
-          key: rust-build-${{ matrix.os }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('data/rust/Cargo.lock', 'data/lang/rust/rustmorloc/Cargo.lock') }}
+          key: rust-build-${{ matrix.os }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('runtime/Cargo.lock', 'binders/rust/rustmorloc/Cargo.lock') }}
           restore-keys: |
             rust-build-${{ matrix.os }}-${{ steps.rust.outputs.cachekey }}-
 
@@ -186,7 +186,7 @@ jobs:
 
       - name: Initialize morloc and install modules
         run: |
-          MORLOC_RUST_DIR=$(pwd)/data/rust morloc init -f
+          MORLOC_RUNTIME_DIR=$(pwd)/runtime morloc init -f
           morloc install stdlib
 
       # The runner's kernel, memory, limits and toolchain, for diagnosing

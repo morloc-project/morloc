@@ -166,7 +166,7 @@ on 0.109.0 unless marked.
   - Map pair order: py and r keep insertion order, cpp sorts by key. Is
     order part of a map's value (COLL-5 covers repeated keys only)?
 - **R overflow message names the wrong R type for `Int`.** [reproduced,
-  2026-10-21] data/lang/r/rmorloc.c:2069-2074 (array) and :2232-2235
+  2026-10-21] binders/r/rmorloc.c:2069-2074 (array) and :2232-2235
   (scalar): a multi-limb `Int` arriving in R fails "does not fit in R's
   numeric type (max 2^53 ...)"; `[[Int]]_R` is R integer, as the
   single-limb branches (:2076-2081, :2225-2227) say.

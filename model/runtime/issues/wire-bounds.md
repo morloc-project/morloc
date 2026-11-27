@@ -2,7 +2,7 @@
 
 Gap in FMT-1: nothing states that every length and offset read from a peer
 or a file is checked before use. Fix each with a test that feeds a
-malformed packet or file. Paths under data/rust; RT =
+malformed packet or file. Paths under runtime; RT =
 morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
 
 - [read] Readers that take a packet pointer without its length

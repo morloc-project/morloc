@@ -32,7 +32,7 @@ module Morloc.CodeGenerator.SystemConfig
   , runtimeInstallScript
   , cargoPackageVersion
   , keptRuntimeLink
-  , findRustDir
+  , findRuntimeDir
   , nexusAgrees
   , langMarkerText
   , installedRuntimeMismatches
@@ -412,21 +412,21 @@ runtimeInstalled homeDir = do
 -- with; and the nexus refuses manifests from another morloc version (ART-5),
 -- so the source's crates must carry this compiler's version.
 runtimeInstallScript :: FilePath -> IO (Either String FilePath)
-runtimeInstallScript rustDir =
+runtimeInstallScript runtimeDir =
   either
-    (\why -> Left (why <> "; set MORLOC_RUST_DIR to the data/rust this compiler was built from and re-run `morloc init -f`"))
+    (\why -> Left (why <> "; set MORLOC_RUNTIME_DIR to the runtime/ directory this compiler was built from and re-run `morloc init -f`"))
     Right
-    <$> runtimeSource rustDir
+    <$> runtimeSource runtimeDir
 
 -- | 'runtimeInstallScript' without the remedy.
 runtimeSource :: FilePath -> IO (Either String FilePath)
-runtimeSource rustDir = do
-  let script = rustDir </> "install.sh"
-      header = rustDir </> "include" </> "morloc.h"
-      crateFile c = rustDir </> c </> "Cargo.toml"
+runtimeSource runtimeDir = do
+  let script = runtimeDir </> "install.sh"
+      header = runtimeDir </> "include" </> "morloc.h"
+      crateFile c = runtimeDir </> c </> "Cargo.toml"
       crates = ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"]
-      refuse why = Left ("the runtime source at " <> rustDir <> " " <> why)
-  hasCargo <- doesFileExist (rustDir </> "Cargo.toml")
+      refuse why = Left ("the runtime source at " <> runtimeDir <> " " <> why)
+  hasCargo <- doesFileExist (runtimeDir </> "Cargo.toml")
   hasScript <- doesFileExist script
   hasHeader <- doesFileExist header
   missingCrates <- filterM (fmap not . doesFileExist . crateFile) crates
@@ -456,12 +456,12 @@ runtimeSource rustDir = do
                       <> ", but this compiler is morloc " <> versionStr
                   [] -> Right script
 
--- | Whether a home's @rust@, when it is a link, reaches a source this
+-- | Whether a home's @runtime@, when it is a link, reaches a source this
 -- compiler accepts. Init never replaces the link, and Rust pools and the Rust
 -- binding build against it (SHIM-7).
 keptRuntimeLink :: FilePath -> IO (Either String ())
 keptRuntimeLink homeDir = do
-  let link = homeDir </> "rust"
+  let link = homeDir </> "runtime"
   isLink <- pathIsSymbolicLink link `catch` \(_ :: IOException) -> return False
   if not isLink
     then return (Right ())
@@ -470,7 +470,7 @@ keptRuntimeLink homeDir = do
       either
         (\why -> Left $
           link <> " is a link, which init keeps and Rust pools build against, but " <> why
-            <> "; point it at the data/rust this compiler was built from, or remove it, and re-run `morloc init -f`")
+            <> "; point it at the runtime/ directory this compiler was built from, or remove it, and re-run `morloc init -f`")
         (const (Right ()))
         <$> runtimeSource target
 
@@ -865,51 +865,51 @@ bindingsReportJson runtime states =
 provisionRustRuntime :: Bool -> Config -> FilePath -> IO ()
 provisionRustRuntime verbose config homeDir = do
   -- Resolve the Rust workspace source + cargo up front. Search order:
-  -- MORLOC_RUST_DIR (set by mim / dev); the persisted copy at
-  -- $MORLOC_HOME/rust; then next to the morloc binary.
-  rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
-  rustDir <- case rustDirEnv of
+  -- MORLOC_RUNTIME_DIR (set by mim / dev); the persisted copy at
+  -- $MORLOC_HOME/runtime; then next to the morloc binary.
+  runtimeDirEnv <- lookupEnv "MORLOC_RUNTIME_DIR"
+  runtimeDir <- case runtimeDirEnv of
     Just d -> return d
     Nothing -> do
       morlocBin <- findExecutable "morloc"
           -- The persisted copy is kept AHEAD of the binary-relative candidates
           -- so a custom $MORLOC_HOME is not shadowed by a stale default-home
-          -- ($HOME/.local/share/morloc/rust) workspace. Staleness is surfaced by
-          -- a warning below (set MORLOC_RUST_DIR to rebuild from fresh source).
-      let homeCandidate = [homeDir </> "rust"]
+          -- ($HOME/.local/share/morloc/runtime) workspace. Staleness is surfaced by
+          -- a warning below (set MORLOC_RUNTIME_DIR to rebuild from fresh source).
+      let homeCandidate = [homeDir </> "runtime"]
           binCandidates = case morlocBin of
             Just binPath ->
-              [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "rust"
-              , takeDirectory (takeDirectory binPath) </> "data" </> "rust"
+              [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "runtime"
+              , takeDirectory (takeDirectory binPath) </> "runtime"
               ]
             Nothing -> []
-      findRustDir (homeCandidate ++ binCandidates)
+      findRuntimeDir (homeCandidate ++ binCandidates)
   hasCargo <- findExecutable "cargo"
   -- Build libmorloc.so + morloc-nexus from source (needs cargo + the Rust
   -- workspace). mim is NOT built here: it is the downloaded static
   -- bootstrap binary, ABI-isolated from the runtime. This guard aborts init
   -- unless the source + cargo are present, so the Rust steps below all run.
-  when (null rustDir || hasCargo == Nothing) $
+  when (null runtimeDir || hasCargo == Nothing) $
     ioError . userError $ unlines
       [ "morloc init builds the runtime (libmorloc.so + morloc-nexus) from"
       , "source and requires cargo plus the Rust workspace."
       , ""
-      , "Provision via mim, or for development set MORLOC_RUST_DIR"
-      , "to the data/rust/ directory and put cargo on PATH:"
-      , "  export MORLOC_RUST_DIR=/path/to/morloc/data/rust"
+      , "Provision via mim, or for development set MORLOC_RUNTIME_DIR"
+      , "to the runtime/ directory and put cargo on PATH:"
+      , "  export MORLOC_RUNTIME_DIR=/path/to/morloc/runtime"
       , "  morloc init -f"
       ]
 
   -- Everything init builds, installs and persists comes from one snapshot of
   -- the source, taken here: libmorloc, the nexus, the installed morloc.h, and
-  -- the copy at $MORLOC_HOME/rust that Rust pools later build against. The
+  -- the copy at $MORLOC_HOME/runtime that Rust pools later build against. The
   -- resolved source may change while init runs; the snapshot does not.
-  let persistedRustDir = homeDir </> "rust"
-      snapshot = homeDir </> "rust.staging"
-  srcAbs <- canonicalizePath rustDir
-  persistedExists <- doesDirectoryExist persistedRustDir
-  persistedIsLink <- if persistedExists then pathIsSymbolicLink persistedRustDir else return False
-  persistedAbs <- if persistedExists then canonicalizePath persistedRustDir else return persistedRustDir
+  let persistedRuntimeDir = homeDir </> "runtime"
+      snapshot = homeDir </> "runtime.staging"
+  srcAbs <- canonicalizePath runtimeDir
+  persistedExists <- doesDirectoryExist persistedRuntimeDir
+  persistedIsLink <- if persistedExists then pathIsSymbolicLink persistedRuntimeDir else return False
+  persistedAbs <- if persistedExists then canonicalizePath persistedRuntimeDir else return persistedRuntimeDir
   -- The source itself (no fresher workspace found, or a read-only image
   -- layer provisioned there) and a link to a development tree are left as
   -- they are.
@@ -918,9 +918,9 @@ provisionRustRuntime verbose config homeDir = do
   runtimeInstallScript srcAbs >>= either (ioError . userError) (const (return ()))
   when (srcAbs == persistedAbs) $
     sayWarning $
-      "Using the persisted Rust source at $MORLOC_HOME/rust (no fresher "
-        <> "workspace found). If you changed the compiler's data/rust, set "
-        <> "MORLOC_RUST_DIR to it and re-run `morloc init -f`."
+      "Using the persisted runtime source at $MORLOC_HOME/runtime (no fresher "
+        <> "workspace found). If you changed the compiler's runtime/, set "
+        <> "MORLOC_RUNTIME_DIR to it and re-run `morloc init -f`."
   removePathIfExists snapshot
   flip onException (removePathIfExists snapshot) $ do
     sayInfo verbose $ "Snapshotting the runtime source " <> srcAbs <> " to " <> snapshot
@@ -928,11 +928,11 @@ provisionRustRuntime verbose config homeDir = do
     installFromSnapshot snapshot
   if replacePersisted
     then do
-      sayInfo verbose "Persisting the runtime source to $MORLOC_HOME/rust"
+      sayInfo verbose "Persisting the runtime source to $MORLOC_HOME/runtime"
       let previous = homeDir </> "rust.old"
       removePathIfExists previous
-      when persistedExists $ renameDirectory persistedRustDir previous
-      renameDirectory snapshot persistedRustDir
+      when persistedExists $ renameDirectory persistedRuntimeDir previous
+      renameDirectory snapshot persistedRuntimeDir
       removePathIfExists previous
     else removePathIfExists snapshot
 
@@ -1010,8 +1010,8 @@ rustPoolRustflags = "-Zmerge-functions=disabled" : ["-Clink-arg=-Wl,-no_deduplic
 
 -- | The first candidate runtime source that 'runtimeInstallScript' accepts;
 -- else the first with a Cargo.toml, which it then refuses by name; else "".
-findRustDir :: [FilePath] -> IO FilePath
-findRustDir ds = do
+findRuntimeDir :: [FilePath] -> IO FilePath
+findRuntimeDir ds = do
   workspaces <- filterM (\d -> doesFileExist (d </> "Cargo.toml")) ds
   usable <- filterM (fmap (either (const False) (const True)) . runtimeInstallScript) workspaces
   return $ case usable ++ workspaces of
@@ -1110,7 +1110,7 @@ removePathIfExists path = do
 
 -- | Names (relative to $MORLOC_HOME/lib/) written by morloc init itself.
 -- Must stay in sync with the per-language init.sh scripts under
--- data/lang/*/init.sh and with data/rust/install.sh (libmorloc). Anything
+-- binders/*/init.sh and with runtime/install.sh (libmorloc). Anything
 -- not in this list (notably lib/python/<modName>/ and lib/R/<modName>/
 -- populated by `morloc install` via Module.runExpose) is preserved across
 -- `morloc init -f`.
@@ -1122,7 +1122,7 @@ initOwnedLibPaths =
   ]
 
 -- | Names (relative to $MORLOC_HOME/include/) written by morloc init itself.
--- Must stay in sync with data/lang/cpp/init.sh and data/rust/install.sh
+-- Must stay in sync with binders/cpp/init.sh and runtime/install.sh
 -- (morloc.h). `mlccpptypes/` is omitted
 -- because cpp/init.sh git-clones it on demand and reuses it if present.
 -- Anything not in this list (notably include/<modName>/ populated by

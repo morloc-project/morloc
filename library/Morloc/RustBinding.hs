@@ -31,13 +31,13 @@ import System.FilePath ((</>))
 -- checks that this list is the crate's directory listing.
 rustBindingFiles :: [(FilePath, BS.ByteString)]
 rustBindingFiles =
-  [ ("Cargo.toml", $(embedFileRelative "data/lang/rust/rustmorloc/Cargo.toml"))
-  , ("Cargo.lock", $(embedFileRelative "data/lang/rust/rustmorloc/Cargo.lock"))
-  , ("build.rs", $(embedFileRelative "data/lang/rust/rustmorloc/build.rs"))
-  , ("src/lib.rs", $(embedFileRelative "data/lang/rust/rustmorloc/src/lib.rs"))
-  , ("src/fv.rs", $(embedFileRelative "data/lang/rust/rustmorloc/src/fv.rs"))
-  , ("src/panic_probe_pool.rs", $(embedFileRelative "data/lang/rust/rustmorloc/src/panic_probe_pool.rs"))
-  , ("src/panic_probe_user.rs", $(embedFileRelative "data/lang/rust/rustmorloc/src/panic_probe_user.rs"))
+  [ ("Cargo.toml", $(embedFileRelative "binders/rust/rustmorloc/Cargo.toml"))
+  , ("Cargo.lock", $(embedFileRelative "binders/rust/rustmorloc/Cargo.lock"))
+  , ("build.rs", $(embedFileRelative "binders/rust/rustmorloc/build.rs"))
+  , ("src/lib.rs", $(embedFileRelative "binders/rust/rustmorloc/src/lib.rs"))
+  , ("src/fv.rs", $(embedFileRelative "binders/rust/rustmorloc/src/fv.rs"))
+  , ("src/panic_probe_pool.rs", $(embedFileRelative "binders/rust/rustmorloc/src/panic_probe_pool.rs"))
+  , ("src/panic_probe_user.rs", $(embedFileRelative "binders/rust/rustmorloc/src/panic_probe_user.rs"))
   ]
 
 -- | A hash of the crate's names and contents, which names its installed
@@ -48,7 +48,7 @@ rustBindingHash =
     concat [[T.pack name, "\0", TE.decodeUtf8Lenient bytes, "\0"] | (name, bytes) <- rustBindingFiles]
 
 -- | Where a home holds this compiler's copy of the crate. Its relative path
--- dependency on the runtime types (@../../../rust/morloc-runtime-types@)
+-- dependency on the runtime types (@../../../runtime/morloc-runtime-types@)
 -- reaches the home's persisted runtime source from here.
 rustBindingDir :: FilePath -> FilePath
 rustBindingDir homeDir = homeDir </> "lang" </> "rust" </> ("rustmorloc-" <> T.unpack rustBindingHash)

@@ -24,7 +24,7 @@ module = Extension(
     # Resolve libmorloc relative to this extension's own location at load time
     # (origin = .../morloc/opt, so origin/../lib = .../morloc/lib), so the
     # binding is not tied to the MORLOC_HOME used at build time. This mirrors
-    # the nexus rpath (data/rust/morloc-nexus/build.rs). The loader's origin
+    # the nexus rpath (runtime/morloc-nexus/build.rs). The loader's origin
     # token is platform-specific: ELF expands $ORIGIN, Mach-O (macOS) expands
     # @loader_path. The absolute runtime dir (runtime_library_dirs) is kept as
     # a fallback for non-standard layouts.

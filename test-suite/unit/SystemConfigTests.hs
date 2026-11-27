@@ -35,7 +35,7 @@ import Morloc.CodeGenerator.SystemConfig
   , cargoPackageVersion
   , keptRuntimeLink
   , effectiveInitFlags
-  , findRustDir
+  , findRuntimeDir
   , installedRuntimeMismatches
   , Mismatch (..)
   , installRustBinding
@@ -135,14 +135,14 @@ bindingTests =
           r <- bindingState home False (Just bid) pySetup Nothing
           assertBool (show r) (case r of BindingStale w -> "aaaa" `isInfixOf` w && T.unpack bid `isInfixOf` w; _ -> False)
     , testCase "spec-shim-5-1" $
-        loadCheck "data/lang/r/lang.yaml" "morloc_built_r_version" $ \line -> do
+        loadCheck "binders/r/lang.yaml" "morloc_built_r_version" $ \line -> do
           let expr built = T.unpack (T.replace (T.pack ".Call(\"morloc_built_r_version\")") (T.pack built) line)
           (bad, _, err) <- readProcessWithExitCode "Rscript" ["-e", expr "\"1.0.0\""] ""
           assertBool err (bad /= ExitSuccess && "built for R 1.0" `isInfixOf` err)
           (good, _, err') <- readProcessWithExitCode "Rscript" ["-e", expr "paste(R.version$major, R.version$minor, sep = \".\")"] ""
           assertEqual err' ExitSuccess good
     , testCase "spec-shim-5-2" $ do
-        text <- TIO.readFile "data/lang/py/lang.yaml"
+        text <- TIO.readFile "binders/py/lang.yaml"
         let ls' = [unquote l | l <- T.lines text, any (`T.isInfixOf` l) [T.pack "\"try:\"", T.pack "import pymorloc as morloc", T.pack "except ImportError as _mlc_e", T.pack "_mlc_e)"]]
             script = T.unlines (T.pack "import sys" : map (T.replace (T.pack "import pymorloc as morloc") (T.pack "import pymorloc_absent_for_this_test as morloc")) ls')
         (code, _, err) <- readProcessWithExitCode "python3" ["-I", "-c", T.unpack script] ""
@@ -260,14 +260,14 @@ runtimeInstallTests =
         withHome "search" ["old/Cargo.toml", "new/Cargo.toml", "new/install.sh"] $ \root -> do
           writeEmbeddedHeader (root </> "new")
           writeCrates (root </> "new") versionStr
-          findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
+          findRuntimeDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
     , testCase "the source search skips a candidate whose header differs" $
         withHome "searchheader" ["old/Cargo.toml", "old/install.sh", "new/Cargo.toml", "new/install.sh"] $ \root -> do
           writeHeader (root </> "old") abiVersion
           writeCrates (root </> "old") versionStr
           writeEmbeddedHeader (root </> "new")
           writeCrates (root </> "new") versionStr
-          findRustDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
+          findRuntimeDir [root </> "old", root </> "new"] >>= (@?= (root </> "new"))
     , testCase "an installed nexus that accepts its libmorloc at this ABI agrees" $
         withHome "nexusok" [] $ \home -> do
           fakeNexus home 0 (show abiVersion)
@@ -348,7 +348,7 @@ runtimeInstallTests =
           writeMarkers home "aaaa" False (\(name, text) -> (name, if name == "R" then "other" else text))
           mismatches False (map T.pack ["py", "cpp"]) home >>= (@?= [])
     , testCase "spec-shim-6-1" $ do
-        listed <- relativeFiles "data/lang/rust/rustmorloc"
+        listed <- relativeFiles "binders/rust/rustmorloc"
         sort (map fst rustBindingFiles) @?= sort listed
     , testCase "spec-shim-6-2" $ do
         let embedded =
@@ -369,7 +369,7 @@ runtimeInstallTests =
           mismatches False [T.pack "rust"] home >>= (@?= [])
     , testCase "the source search falls back to a candidate without install.sh" $
         withHome "searchold" ["old/Cargo.toml"] $ \root ->
-          findRustDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
+          findRuntimeDir [root </> "missing", root </> "old"] >>= (@?= (root </> "old"))
     , testCase "spec-shim-7-1" $
         withHome "otherversion" ["Cargo.toml", "install.sh"] $ \src -> do
           writeEmbeddedHeader src
@@ -401,8 +401,8 @@ runtimeInstallTests =
           writeCrates (root </> "new") versionStr
           let home = root </> "home"
               relink target = do
-                removePathForcibly (home </> "rust")
-                createFileLink target (home </> "rust")
+                removePathForcibly (home </> "runtime")
+                createFileLink target (home </> "runtime")
               refused what = do
                 r <- keptRuntimeLink home
                 case r of
@@ -425,12 +425,12 @@ runtimeInstallTests =
             Left msg -> assertBool msg ("0.0.1" `isInfixOf` msg && versionStr `isInfixOf` msg)
             Right () -> assertFailure "a nexus of another version agreed"
     , testCase "spec-shim-7-2" $ do
-        let crates = [ "data/rust/" <> c <> "/Cargo.toml" | c <- ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"] ]
-              ++ ["data/lang/rust/rustmorloc/Cargo.toml"]
+        let crates = [ "runtime/" <> c <> "/Cargo.toml" | c <- ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"] ]
+              ++ ["binders/rust/rustmorloc/Cargo.toml"]
         found <- forM crates $ \f -> (,) f . cargoPackageVersion <$> TIO.readFile f
         [(f, v) | (f, v) <- found, v /= Just (T.pack versionStr)] @?= []
-        let locked = [ ("data/rust/Cargo.lock", ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"])
-                     , ("data/lang/rust/rustmorloc/Cargo.lock", ["morloc-runtime-types", "rustmorloc"]) ]
+        let locked = [ ("runtime/Cargo.lock", ["morloc-manifest", "morloc-nexus", "morloc-runtime", "morloc-runtime-types"])
+                     , ("binders/rust/rustmorloc/Cargo.lock", ["morloc-runtime-types", "rustmorloc"]) ]
         forM_ locked $ \(f, names) -> do
           entries <- lockVersions <$> TIO.readFile f
           [(n, v) | n <- names, let v = lookup (T.pack n) entries, v /= Just (T.pack versionStr)] @?= []

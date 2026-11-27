@@ -3,7 +3,7 @@
 # languages a program uses. Cross-cutting, so it lives here beside languages.yaml
 # rather than under a single language.
 #
-# Per-language requirements live in data/lang/<lang>/requirements.yaml.
+# Per-language requirements live in binders/<lang>/requirements.yaml.
 toolchain:
   - { package: rust,         version: "*", phase: build }
   # c-compiler and cxx-compiler are both core: the runtime and every pool build

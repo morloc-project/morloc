@@ -77,7 +77,7 @@ here touch locks and ownership: model first.
   already formats as "@next: {}". The C++, Python and R wrappers are
   unchecked.
 - **The daemon's remote path sets no call id and runs no sweep.** [read]
-  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2545-2546 and
+  Against SLOT-19. runtime/morloc-runtime/src/daemon_ffi.rs:2545-2546 and
   2638-2639 set and sweep a call id on the pure path only; the remote
   branch (2640 on) does neither, and stream.rs:2500-2502 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.

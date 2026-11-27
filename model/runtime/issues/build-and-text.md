@@ -19,7 +19,7 @@
 - [read, 2026-11-15] Dead code: the `IAccess` printers are never reached,
   nothing builds an `IAccess` (Grammars/Translator/Generic.hs:1254-1259,
   CppPrinter.hs:86-88, RustPrinter.hs:99-101). The comment at
-  data/lang/py/pymorloc.c:2191-2196 cites a code-generator note that does
+  binders/py/pymorloc.c:2191-2196 cites a code-generator note that does
   not exist and calls the variant pair form interim.
 - [read] morloc-runtime/src/ipc.rs is dead code: `send_and_receive` (:25)
   and `read_packet` are public and uncalled (callers use ipc_ffi.rs), and
@@ -56,8 +56,8 @@
   pool fails every call with `could not find function ".mlc_entry"`, which
   the new librmorloc dispatch calls.
 - **The compiler cannot tell an uninitialized runtime source edit.** [read
-  2026-11-26] The compiler embeds only morloc.h from data/rust. After an
-  edit to the runtime source without `morloc init -f` (with MORLOC_RUST_DIR
+  2026-11-26] The compiler embeds only morloc.h from runtime. After an
+  edit to the runtime source without `morloc init -f` (with MORLOC_RUNTIME_DIR
   at the edited tree), `morloc make` passes and Rust and C++ pools build
   against the previous runtime and its persisted copy. The same holds the
   other way since the compiler carries the Rust binding (SHIM-6): an init
@@ -153,7 +153,7 @@
   The crate's own lint denials (json.rs casts) go unchecked while this
   stops the run. About 60 safe `pub fn`s in morloc-runtime take raw
   pointers (heuristic).
-- [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
+- [reproduced] `morloc init -f` exits 0 when binders/cpp/cppmorloc.cpp
   fails to compile, leaving the previous libcppmorloc.a installed. Strict
   conda mode now aborts; outside it the shim build is an `optionalStep`
   that only warns (SystemConfig.hs:320).
@@ -273,7 +273,7 @@
   front-end script prints `WARNING: ignoring environment value of R_HOME`
   to stdout when `$R_HOME` is set to another home, before handling its
   arguments (`R_HOME=/x R RHOME` prints the warning, then the home).
-  data/lang/r/init.sh's `R_HOME=$(R RHOME)` then captures two lines and
+  binders/r/init.sh's `R_HOME=$(R RHOME)` then captures two lines and
   links against `-L"<warning>\n<home>/lib"`.
 - **Old copies of the Rust binding are never removed.** [read 2026-11-26]
   Init writes `$MORLOC_HOME/lang/rust/rustmorloc-<hash>` for its compiler

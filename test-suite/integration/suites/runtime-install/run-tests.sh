@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-tests.sh -- install the runtime with data/rust/install.sh into scratch
+# run-tests.sh -- install the runtime with runtime/install.sh into scratch
 # prefixes and check what it leaves behind: libmorloc, the nexus and the
 # header from the same source, each renamed into place, and nothing changed
 # when the build fails.
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-SRC="$(cd "$SCRIPT_DIR/../../../../data/rust" && pwd -P)"
+SRC="$(cd "$SCRIPT_DIR/../../../../runtime" && pwd -P)"
 INSTALL="$SRC/install.sh"
 
 if ! command -v cargo > /dev/null 2>&1; then

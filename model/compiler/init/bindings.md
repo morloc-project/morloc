@@ -86,7 +86,7 @@ Tests: spec-shim-6-1, spec-shim-6-2, spec-shim-6-3
 Code: conforms 2026-11-26
 
 Generated Rust code calls rustmorloc, so the crate is the compiler's: its
-source is `data/lang/rust/rustmorloc`, embedded file by file (all ASCII).
+source is `binders/rust/rustmorloc`, embedded file by file (all ASCII).
 Every init writes it, if absent, to
 `$MORLOC_HOME/lang/rust/rustmorloc-<hash of its files>` (staged, then renamed
 into place with a `.complete` stamp), leaving other compilers' copies;
@@ -105,10 +105,10 @@ Intent: proposed
 Tests: spec-shim-7-1, spec-shim-7-2, spec-shim-7-3, spec-shim-7-4
 Code: conforms 2026-11-27
 
-Init builds the runtime from `MORLOC_RUST_DIR` or the home's persisted copy,
+Init builds the runtime from `MORLOC_RUNTIME_DIR` or the home's persisted copy,
 not from the compiler. It refuses a source whose `include/morloc.h` is not
 the header the compiler was built with, or whose runtime crates are not at
-the compiler's version. Every init refuses a `$MORLOC_HOME/rust` that is a
+the compiler's version. Every init refuses a `$MORLOC_HOME/runtime` that is a
 link to such a source (init keeps a link, and Rust pools build against it),
 and rebuilds an installed runtime whose nexus reports another version: the nexus refuses every manifest from another
 morloc version (ART-5), so such a runtime would run no program. Every

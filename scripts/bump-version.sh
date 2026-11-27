@@ -48,7 +48,7 @@ echo "  updated morloc.cabal"
 # runtime source of another version (SHIM-7), and a unit test (spec-shim-7-2)
 # checks the files below.
 CRATES="morloc-manifest morloc-nexus morloc-runtime morloc-runtime-types rustmorloc"
-for f in data/rust/morloc-{manifest,nexus,runtime,runtime-types}/Cargo.toml data/lang/rust/rustmorloc/Cargo.toml; do
+for f in runtime/morloc-{manifest,nexus,runtime,runtime-types}/Cargo.toml binders/rust/rustmorloc/Cargo.toml; do
   awk -v version="$VERSION" '
     !done && /^version = "/ { print "version = \"" version "\""; done = 1; next }
     { print }
@@ -59,7 +59,7 @@ for f in data/rust/morloc-{manifest,nexus,runtime,runtime-types}/Cargo.toml data
 done
 
 # The path crates' own entries in the locks (tables without a source line).
-for f in data/rust/Cargo.lock data/lang/rust/rustmorloc/Cargo.lock; do
+for f in runtime/Cargo.lock binders/rust/rustmorloc/Cargo.lock; do
   awk -v version="$VERSION" -v crates="$CRATES" '
     BEGIN { n = split(crates, list, " "); for (i = 1; i <= n; i++) ours[list[i]] = 1 }
     function flush() {

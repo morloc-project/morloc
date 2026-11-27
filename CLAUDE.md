@@ -35,23 +35,23 @@ To run the full golden suite (EXPENSIVE; only at the very end of a session):
 
 $ test-suite/run haskell -j 6
 
-If you make any change to the non-haskell code in data/, then you MUST run
+If you make any change to the non-haskell code in binders/ or runtime/, then you MUST run
 
-$ MORLOC_RUST_DIR=$PWD/data/rust morloc init -f   # what `test-suite/run setup` does
+$ MORLOC_RUNTIME_DIR=$PWD/runtime morloc init -f   # what `test-suite/run setup` does
 
 from the repo root. This rebuilds shared libraries, the nexus executable, and
-language bindings. `MORLOC_RUST_DIR` is required: a bare `morloc init -f`
+language bindings. `MORLOC_RUNTIME_DIR` is required: a bare `morloc init -f`
 rebuilds from the installed copy of the runtime sources, not your working tree,
 so your edit is silently absent from the library under test and the change
 appears to have no effect.
 
-The Rust language binding (`data/lang/rust/rustmorloc`) is embedded in the
+The Rust language binding (`binders/rust/rustmorloc`) is embedded in the
 compiler like the other bindings, so an edit to it needs `test-suite/run
 setup` (stack install, then init) before it reaches a Rust pool.
 
-After changing anything under `data/rust/` or the Rust binding, run:
+After changing anything under `runtime/` or the Rust binding, run:
 
-$ test-suite/run rust            # cargo test over data/rust and the Rust binding
+$ test-suite/run rust            # cargo test over runtime and the Rust binding
 
 - `test-suite/run haskell` runs unit tests and golden tests
 - Golden tests are full morloc programs

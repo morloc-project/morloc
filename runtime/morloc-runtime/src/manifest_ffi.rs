@@ -4,7 +4,7 @@
 //! structs that the daemon and slurm subsystems read via FFI from C
 //! code. It is **not** the canonical Rust deserializer of the manifest
 //! schema -- that lives in
-//! `data/rust/morloc-nexus/src/manifest.rs`, which has full doc
+//! `runtime/morloc-nexus/src/manifest.rs`, which has full doc
 //! comments describing the v2 manifest schema, every field's purpose,
 //! and which slots are reserved for future expansion.
 //!
@@ -142,7 +142,7 @@ pub struct MorlocPattern {
 
 // Length-aware string literal payload. The `data` buffer is NOT
 // NUL-terminated and may contain interior NULs. Mirrors C
-// `morloc_string_t` in data/rust/include/morloc.h.
+// `morloc_string_t` in runtime/include/morloc.h.
 #[repr(C)]
 pub struct MorlocString {
     pub data: *mut c_char,

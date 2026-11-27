@@ -1,5 +1,5 @@
 # The C compiler that builds pymorloc.c comes from the core toolchain
-# (data/lang/requirements.yaml), so it is not repeated here.
+# (binders/requirements.yaml), so it is not repeated here.
 runtime:
   package: python
   # The ceiling excludes pythons pymorloc.c has not been built against; it uses

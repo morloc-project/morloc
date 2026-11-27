@@ -566,7 +566,7 @@ patTests =
 -- one morloc writes for the type.
 patternConformanceTests :: TestTree
 patternConformanceTests = testCase "spec-pat-9-1" $ do
-  table <- MT.pack <$> readFile "data/rust/morloc-runtime-types/tests/pattern-conformance.tsv"
+  table <- MT.pack <$> readFile "runtime/morloc-runtime-types/tests/pattern-conformance.tsv"
   let rows = [MT.splitOn "\t" l | l <- MT.lines table, not (MT.null l), not ("#" `MT.isPrefixOf` l)]
       prelude ty = "module main (h)\n  record R = R { x :: Int, y :: Str }\n  const :: a -> b -> a\n  h :: " <> ty <> " -> " <> ty <> "\n"
   problems <- forM rows $ \case

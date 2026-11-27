@@ -119,7 +119,7 @@ import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
 import Morloc.CodeGenerator.GenDefs (DataDef (..), Disagreement (..), Extras (..), GenDef (..), extraDefs, noExtras, typeNamesIn, carriedTemplateArgs, armDataParams, dataDefs, dataNamesIn, nativeDataParams, RecordUse, disagreements, inPoolSerialASTs, placeTypes, genDefs, nativeParam, nativeParams, paramOf, placeholders, recordUses, depNamespaces, nameRoot)
 
--- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
+-- | Duplicated here (as in Cpp.hs) to match binders/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
 -- so pool naming (@pool.rs@) and the registry's Lang agree.
 rustLang :: ML.Lang

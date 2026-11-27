@@ -74,7 +74,7 @@ keyTests = testGroup "keys"
 -- Schemas the printer emits, each beside its hint-free form. The runtime's
 -- tests parse every line (morloc-runtime-types/tests/schema_corpus.rs).
 corpusPath :: FilePath
-corpusPath = "data/rust/morloc-runtime-types/tests/schema-corpus.txt"
+corpusPath = "runtime/morloc-runtime-types/tests/schema-corpus.txt"
 
 corpusTest :: TestTree
 corpusTest = testCase "the printed corpus matches the one the runtime parses" $ do

@@ -44,7 +44,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket",
     "morloc-runtime/utility.rs::create_beside",
 ];
-const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1)];
+const BINDER_PID_READS: &[(&str, usize)] = &[("binders/r/rmorloc.c", 1)];
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
     "instance", "paired", "test-only",
@@ -55,14 +55,14 @@ fn rust_root() -> PathBuf {
 }
 
 fn repo_root() -> PathBuf {
-    rust_root().parent().unwrap().parent().unwrap().to_path_buf()
+    rust_root().parent().unwrap().to_path_buf()
 }
 
 /// Where each crate the rules scan lives: the runtime workspace's members in
-/// data/rust, and the Rust language binding with the other bindings.
+/// runtime, and the Rust language binding with the other bindings.
 fn crate_dir(krate: &str) -> PathBuf {
     match krate {
-        "rustmorloc" => repo_root().join("data/lang/rust/rustmorloc"),
+        "rustmorloc" => repo_root().join("binders/rust/rustmorloc"),
         k => rust_root().join(k),
     }
 }
@@ -597,7 +597,7 @@ fn other_found(file: &Path, scope: &str, name: String, kind: Kind) -> Found {
 }
 
 fn scan_c(out: &mut Vec<Found>) {
-    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow"]) {
+    for f in walk(&repo_root().join("binders"), &["c", "cpp", "hpp", "h"], &["nanoarrow"]) {
         for (scope, name, kind) in scan_c_text(&std::fs::read_to_string(&f).unwrap()) {
             out.push(other_found(&f, &scope, name, kind));
         }
@@ -714,7 +714,7 @@ fn scan_py(out: &mut Vec<Found>) {
         "threading.Lock(", "threading.RLock(", "threading.Condition(", "threading.Event(",
         "threading.Semaphore(", "threading.BoundedSemaphore(", "queue.Queue(", "queue.SimpleQueue(",
     ];
-    for f in walk(&repo_root().join("data/lang"), &["py"], &[]) {
+    for f in walk(&repo_root().join("binders"), &["py"], &[]) {
         for line in std::fs::read_to_string(&f).unwrap().lines() {
             if let Some((lhs, rhs)) = line.split_once('=') {
                 if ctors.iter().any(|k| rhs.trim_start().starts_with(k)) {
@@ -1304,7 +1304,7 @@ fn every_process_id_read_is_reviewed() {
     let scan = scan_rust();
     let reads: HashSet<&str> = scan.pid_reads.iter().map(|s| s.as_str()).collect();
     let mut binder_counts: HashMap<String, usize> = HashMap::new();
-    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["nanoarrow"]) {
+    for f in walk(&repo_root().join("binders"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["nanoarrow"]) {
         let text = std::fs::read_to_string(&f).unwrap();
         let n = text.lines().filter(|l| l.contains("getpid(") || l.contains("os.getpid") || l.contains("Sys.getpid")).count();
         if n > 0 {
@@ -1327,10 +1327,10 @@ fn every_process_id_read_is_reviewed() {
 fn every_host_installs_the_panic_hook() {
     let repo = repo_root();
     let hosts = [
-        ("data/rust/morloc-nexus/src/main.rs", "fn main(", "morloc_install_panic_hook(Some("),
-        ("data/rust/morloc-runtime/src/pool_ffi.rs", "fn pool_main(", "panic_ffi::install(None)"),
-        ("data/lang/py/pymorloc.c", "PyInit_pymorloc(void) {", "morloc_install_panic_hook(NULL)"),
-        ("data/lang/r/rmorloc.c", "static void _r_init_impl(DllInfo *info) {", "morloc_install_panic_hook(NULL)"),
+        ("runtime/morloc-nexus/src/main.rs", "fn main(", "morloc_install_panic_hook(Some("),
+        ("runtime/morloc-runtime/src/pool_ffi.rs", "fn pool_main(", "panic_ffi::install(None)"),
+        ("binders/py/pymorloc.c", "PyInit_pymorloc(void) {", "morloc_install_panic_hook(NULL)"),
+        ("binders/r/rmorloc.c", "static void _r_init_impl(DllInfo *info) {", "morloc_install_panic_hook(NULL)"),
     ];
     for (path, entry, call) in hosts {
         let text = std::fs::read_to_string(repo.join(path)).unwrap();
@@ -1370,10 +1370,10 @@ fn only_catch_scopes_catch_a_panic() {
 fn every_crate_refuses_to_build_without_unwinding() {
     let repo = repo_root();
     for path in [
-        "data/rust/morloc-runtime/src/lib.rs",
-        "data/lang/rust/rustmorloc/src/lib.rs",
-        "data/rust/morloc-nexus/src/main.rs",
-        "data/lang/rust/pool.rs",
+        "runtime/morloc-runtime/src/lib.rs",
+        "binders/rust/rustmorloc/src/lib.rs",
+        "runtime/morloc-nexus/src/main.rs",
+        "binders/rust/pool.rs",
     ] {
         let text = std::fs::read_to_string(repo.join(path)).unwrap();
         assert!(
@@ -1458,19 +1458,19 @@ fn rust_code_calls_the_rust_function_behind_a_c_entry_point() {
 // nested inside a value or a block the binding made itself. A change here
 // is reviewed against that rule before the count is updated.
 const BINDING_REL2ABS: &[(&str, usize)] = &[
-    ("data/lang/cpp/cppmorloc.cpp", 2),
-    ("data/lang/cpp/cppmorloc.hpp", 2),
-    ("data/lang/cpp/mlc_arrow.hpp", 1),
-    ("data/lang/cpp/pool.cpp", 1),
-    ("data/lang/py/pymorloc.c", 1),
-    ("data/lang/r/rmorloc.c", 2),
-    ("data/lang/rust/rustmorloc/src/lib.rs", 6),
+    ("binders/cpp/cppmorloc.cpp", 2),
+    ("binders/cpp/cppmorloc.hpp", 2),
+    ("binders/cpp/mlc_arrow.hpp", 1),
+    ("binders/cpp/pool.cpp", 1),
+    ("binders/py/pymorloc.c", 1),
+    ("binders/r/rmorloc.c", 2),
+    ("binders/rust/rustmorloc/src/lib.rs", 6),
 ];
 
 #[test]
 fn bindings_resolve_received_references_only_through_the_check() {
     let repo = repo_root();
-    let mut files = walk(&repo.join("data").join("lang"), &["c", "cpp", "hpp", "h"], &[]);
+    let mut files = walk(&repo.join("binders"), &["c", "cpp", "hpp", "h"], &[]);
     files.extend(walk(&crate_dir("rustmorloc").join("src"), &["rs"], &[]));
     let mut counts: HashMap<String, usize> = HashMap::new();
     for f in &files {
@@ -1581,7 +1581,7 @@ fn a_python_call_that_may_wait_for_a_stream_lock_is_found() {
 
 #[test]
 fn python_waits_for_a_stream_lock_only_without_the_gil() {
-    let text = std::fs::read_to_string(repo_root().join("data/lang/py/pymorloc.c")).unwrap();
+    let text = std::fs::read_to_string(repo_root().join("binders/py/pymorloc.c")).unwrap();
     let found = gil_held_calls(&text, PY_NOGIL_CALLS);
     assert!(found.is_empty(), "SLOT-37: pymorloc.c calls these holding the GIL:\n{}", found.join("\n"));
     assert!(!text.contains("Py_mod_gil"), "SLOT-37: an in-place batch's sizes hold only while the GIL is held");
@@ -1602,7 +1602,7 @@ fn every_rust_crate_in_the_repository_is_scanned() {
         }
     }
     let mut found = Vec::new();
-    for top in ["data/rust", "data/lang"] {
+    for top in ["runtime", "binders"] {
         manifests(&repo_root().join(top), &mut found);
     }
     let unscanned: Vec<String> = found

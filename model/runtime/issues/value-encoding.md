@@ -61,7 +61,7 @@
   in 32-bit type". Single-limb messages name the value. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/wire/w3.loc.
 - **Python reads a `Bool` byte through `*(bool*)`.** [read, 2026-10-21]
-  Violates WIRE-8. data/lang/py/pymorloc.c:2261 `PyBool_FromLong(*(bool*)
+  Violates WIRE-8. binders/py/pymorloc.c:2261 `PyBool_FromLong(*(bool*)
   data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:2148), C++
   and Rust compare a `uint8_t`.
 - **Packet landing is checked by convention, not by type.** [read,

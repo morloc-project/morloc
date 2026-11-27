@@ -98,13 +98,13 @@ reference is not (PANIC-14).
   passes under `cargo test` and fails under `cargo test --release` (exit 10,
   the user's verdict, where 11 is expected): with optimization the panic's
   location is the user's file. Pools are built in release. Repro:
-  `cargo test --release --manifest-path data/lang/rust/rustmorloc/Cargo.toml
-  --target-dir data/rust/target --lib a_std_panic_raised` with
+  `cargo test --release --manifest-path binders/rust/rustmorloc/Cargo.toml
+  --target-dir runtime/target --lib a_std_panic_raised` with
   `LD_LIBRARY_PATH=/opt/morloc/lib` (without the pool flags `test-suite/run
   rust` passes).
 - **A panic located in libmorloc's own source is not attributed by path.**
   [read 2026-11-26] Gap in PANIC-9. libmorloc is built from the snapshot
-  `$MORLOC_HOME/rust.staging` (install.sh), so its panic locations name that
+  `$MORLOC_HOME/runtime.staging` (install.sh), so its panic locations name that
   directory, which no rule claims for the runtime (rustmorloc's `side_of`
   knows its own crate, runtime-types and the pool's files). Such a location
   falls to the backtrace walk, where a frame under a registered user

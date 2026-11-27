@@ -829,18 +829,18 @@ mod build_id_tests {
 
     #[test]
     fn every_binding_checks_the_build_it_was_made_with() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let read = |p: &str| std::fs::read_to_string(repo.join(p)).unwrap();
         for (path, call) in [
-            ("data/lang/cpp/cppmorloc.cpp", "morloc_require_build(0)"),
-            ("data/lang/py/pymorloc.c", "morloc_require_build(MORLOC_BINDING_BUILD_ID)"),
-            ("data/lang/r/rmorloc.c", "morloc_require_build(MORLOC_BINDING_BUILD_ID)"),
-            ("data/lang/rust/pool.rs", "::rustmorloc::require_build();"),
+            ("binders/cpp/cppmorloc.cpp", "morloc_require_build(0)"),
+            ("binders/py/pymorloc.c", "morloc_require_build(MORLOC_BINDING_BUILD_ID)"),
+            ("binders/r/rmorloc.c", "morloc_require_build(MORLOC_BINDING_BUILD_ID)"),
+            ("binders/rust/pool.rs", "::rustmorloc::require_build();"),
         ] {
             assert!(read(path).contains(call), "LIFE-6: {path} must call {call}");
         }
-        assert!(!read("data/lang/cpp/init.sh").contains("BUILD_ID"), "LIFE-6: a compiled-in binding records no build id");
-        for path in ["data/lang/py/init.sh", "data/lang/r/init.sh"] {
+        assert!(!read("binders/cpp/init.sh").contains("BUILD_ID"), "LIFE-6: a compiled-in binding records no build id");
+        for path in ["binders/py/init.sh", "binders/r/init.sh"] {
             let text = read(path);
             assert!(
                 text.contains("--build-id") && text.contains("-DMORLOC_BINDING_BUILD_ID=0x${BUILD_ID}ULL"),

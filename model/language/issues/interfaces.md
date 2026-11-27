@@ -1,6 +1,6 @@
 # Interfaces
 
-Holes against model/language/interfaces.md. Paths are under data/rust/.
+Holes against model/language/interfaces.md. Paths are under runtime/.
 MCP-specific entries are in model/runtime/issues/mcp.md. Entries marked
 [read, survey] come from one read-only pass over the code and have not been
 re-checked.
