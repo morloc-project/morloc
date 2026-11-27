@@ -929,7 +929,7 @@ provisionRustRuntime verbose config homeDir = do
   if replacePersisted
     then do
       sayInfo verbose "Persisting the runtime source to $MORLOC_HOME/runtime"
-      let previous = homeDir </> "rust.old"
+      let previous = homeDir </> "runtime.old"
       removePathIfExists previous
       when persistedExists $ renameDirectory persistedRuntimeDir previous
       renameDirectory snapshot persistedRuntimeDir
