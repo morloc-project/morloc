@@ -177,6 +177,12 @@ buildProgram (manifest, wrappers, pools) = do
   swapTarget <- swapTargetOf
   origDir <- liftIO SD.getCurrentDirectory
 
+  forM_ wrappers $ \(WrapperFile path _) -> do
+    isDir <- liftIO $ SD.doesDirectoryExist path
+    when isDir . MM.throwRejected . pretty $
+      "Cannot write the launcher '" <> path <> "': a directory of that name already exists. "
+        <> "Choose a different output name with --cli-out/-o, or remove the directory."
+
   -- Resolve the project root while the working directory is still the one it was
   -- parsed relative to. 'stateProjectRoot' is the entry file's directory as typed,
   -- so `morloc make main.loc` makes it "."; resolved after the chdir below it would
@@ -388,13 +394,6 @@ removeDirIfExists dir = do
 
 writeWrapper :: WrapperFile -> IO ()
 writeWrapper (WrapperFile path body) = do
-  -- A directory occupying the launcher path is the common recoverable
-  -- mistake (the chosen output name collides with an existing directory);
-  -- name the conflict instead of leaking a raw "is a directory" IOError.
-  isDir <- SD.doesDirectoryExist path
-  when isDir . ioError . userError $
-    "Cannot write the launcher '" <> path <> "': a directory of that name already exists. "
-      <> "Choose a different output name with --cli-out/-o, or remove the directory."
   SD.createDirectoryIfMissing True (takeDirectory path)
   MT.writeFile path body
   callProcess "chmod" ["755", path]

@@ -121,3 +121,19 @@ model/issues/LIST.md), checked against the code 2026-11-04 [read].
   again: `_PyLong_AsByteArray`, `_PyLong_FromByteArray`, `_PyLong_NumBits`,
   `_PyObject_GetDictPtr`; public replacements exist since 3.13
   (`PyLong_AsNativeBytes`, `PyLong_FromNativeBytes`).
+
+- **A local install by branch fails for any branch not checked out.**
+  [reproduced, 2026-11-27] PKG-4: `morloc install ./mod@branch:dev`
+  clones the repository, then runs `git checkout refs/heads/dev`
+  (installLocalGitRepoIO, library/Morloc/Module.hs); a fresh clone has
+  only its default branch under refs/heads, so the checkout fails with
+  "pathspec 'refs/heads/dev' did not match". Repro: a repo with branches
+  main and dev, main checked out, `morloc install <dir>@branch:dev`.
+
+- **A package.yaml parse failure other than LoadSettingsException is
+  unhandled.** [read, 2026-11-27] readPackageYamlIO
+  (library/Morloc/Module.hs) catches ParseException with a lambda that
+  matches only the LoadSettingsException constructor (GHC warns
+  -Wincomplete-uni-patterns); any other ParseException reaching it dies
+  as a PatternMatchFail instead of a refusal naming the file. Whether
+  loadYamlSettings can throw another constructor is unverified.

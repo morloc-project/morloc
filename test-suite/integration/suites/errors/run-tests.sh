@@ -12,11 +12,17 @@
 #   its Makefile runs calls that fail, writing to obs.txt one count per call
 #   of the lines that carry the expected error. Each count must be >= 1.
 #
+#   Either kind fails if git asks for credentials or morloc dies of an
+#   uncaught exception. The suite runs without network: offline-bin/git
+#   answers every remote clone as GitHub answers one for a missing
+#   repository.
+#
 #   run-tests.sh [NAME...]     default: every case directory
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+export PATH="$SCRIPT_DIR/offline-bin:$PATH"
 
 if [[ $# -gt 0 ]]; then
     cases=("$@")
@@ -31,7 +37,11 @@ else
 fi
 
 broke() {
-    grep -q -i -E 'compiler bug|internal (compiler )?error|panicked at|CallStack \(from HasCallStack\)|Prelude\.' <<< "$1"
+    grep -q -i -E 'compiler bug|internal (compiler )?error|panicked at|CallStack \(from HasCallStack\)|Prelude\.|^morloc: ' <<< "$1"
+}
+
+prompted() {
+    grep -q -E "^Username for '" <<< "$1"
 }
 
 pass=0
@@ -66,6 +76,8 @@ for c in ${cases[@]+"${cases[@]}"}; do
     why=""
     if [[ $status -eq 124 ]]; then
         why="timed out"
+    elif prompted "$out"; then
+        why="git asked for credentials"
     elif [[ $kind == build ]]; then
         if [[ $status -eq 0 ]]; then
             why="build succeeded"
