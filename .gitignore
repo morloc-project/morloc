@@ -22,6 +22,5 @@ CLAUDE.md
 claude-memory/
 .RData
 .Rhistory
-pools/
 nexus
 out/
