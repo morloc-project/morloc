@@ -16,16 +16,11 @@ by descriptor fields -- no hardcoded language-specific code.
 -}
 module Morloc.CodeGenerator.Grammars.Translator.Generic
   ( translate
-  , CodegenManifest (..)
-  , printProgram
   , manifoldName
   ) where
 
 import Morloc.Data.Zip (zipSame, zipWithSame)
 import Data.Foldable (toList)
-import qualified Data.Aeson as Aeson
-import qualified Data.Binary as Binary
-import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -79,9 +74,6 @@ import System.FilePath (addTrailingPathSeparator, dropExtension, isAbsolute, nor
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.List (stripPrefix)
 import Numeric (showHex)
-import qualified System.Exit as Exit
-import System.IO (hClose, openBinaryTempFile)
-import qualified System.Process as Proc
 
 -- | Simple template substitution: replace {{key}} with value
 substituteT :: Text -> [(Text, Text)] -> Text
@@ -89,14 +81,7 @@ substituteT = foldl (\t (k, v) -> T.replace ("{{" <> k <> "}}") v t)
 
 translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 translate lang srcs es = do
-  desc <- loadDescriptorForLang lang
-  case ldCodegenCommand desc of
-    Just cmd -> translateExternal cmd lang desc srcs es
-    Nothing -> translateBuiltin lang desc srcs es
-
--- | Translate using the built-in generic renderer.
-translateBuiltin :: Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
-translateBuiltin lang desc0 srcs es = do
+  desc0 <- loadDescriptorForLang lang
   -- The program's generated classes in this language (GEN-11), which the
   -- record constructors build by name.
   registry0 <- gets stateLangRegistry
@@ -245,116 +230,6 @@ sourceHookCommands lang desc srcs = do
         , ("stem", q (T.pack (takeBaseName path)))
         ]
     shellQuote t = "'" <> T.replace "'" "'\\''" t <> "'"
-
--- | Translate using an external codegen tool.
-translateExternal ::
-  Text -> Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> MorlocMonad Script
-translateExternal cmd lang desc srcs es = do
-  home <- asks MC.configHome
-  lib <- MT.pack <$> asks MC.configLibrary
-
-  includeDocs <-
-    mapM
-      (translateSource desc)
-      (nubOrdOn normalise . mapMaybe srcPath $ srcs)
-
-  debugLog (vsep (map pseudocodeSerialManifold es) <> "\n")
-
-  reservesLocals lang desc
-  let srcNamer = qualifiedSrcName desc lib
-
-  debugInfo <- makeManifoldDebugInfoLookup
-  traceInfo <- makeTraceLabelLookup
-  debugMode <- gets stateDebugTrace
-  closureAsts <- computeClosureSchemas lang es
-  let wireAsts = wireCodecAsts (concat [caps <> bnds <> [res] | (caps, bnds, res) <- Map.elems closureAsts] <> programSerialAsts es)
-      (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
-        convs <- mapM (wireConverter desc (genericLowerConfig desc srcNamer debugInfo traceInfo debugMode)) wireAsts
-        tbl <- getSchemaTable
-        return ((docs, convs), tbl)
-  labels <- collectLogLabels <$> gets stateManifoldConfig
-  templates <- collectRenderedTemplates lang
-  let closureTable = Map.map (renderClosureCodecs desc) closureAsts
-  -- Out-of-process codegen path: includes stay at module top (no fork-defer),
-  -- so pass them as sources and leave the deferred-includes slot empty.
-  stageTable <- stageTableEntries
-  let program = (buildProgram labels templates includeDocs [] (fst mDocs) es schemas closureTable) {ipStageTable = stageTable, ipWireConverters = map render (snd mDocs)}
-
-  -- find the lang.yaml path for the codegen tool
-  let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
-
-  -- serialize IProgram to a temp file
-  tmpDir <- liftIO Dir.getTemporaryDirectory
-  (tmpPath, tmpHandle) <- liftIO $ openBinaryTempFile tmpDir "iprogram.bin"
-  liftIO $ do
-    BL.hPut tmpHandle (Binary.encode program)
-    hClose tmpHandle
-
-  -- invoke the codegen command: cmd lang.yaml iprogram.bin
-  let cmdStr = T.unpack cmd
-  (exitCode, stdoutStr, stderrStr) <-
-    liftIO $
-      Proc.readCreateProcessWithExitCode
-        (Proc.proc cmdStr [langYamlPath, tmpPath])
-        ""
-
-  -- clean up temp file
-  liftIO $ Dir.removeFile tmpPath
-
-  case exitCode of
-    Exit.ExitFailure code' ->
-      MM.throwFailed $
-        "External codegen '"
-          <> pretty cmd
-          <> "' failed with exit code "
-          <> pretty code'
-          <> ":\n"
-          <> pretty stderrStr
-    Exit.ExitSuccess -> do
-      -- parse the codegen manifest from stdout
-      let manifest = Aeson.decodeStrict (TE.encodeUtf8 (T.pack stdoutStr)) :: Maybe CodegenManifest
-      case manifest of
-        Nothing ->
-          MM.throwFailed $
-            "External codegen '"
-              <> pretty cmd
-              <> "' produced invalid manifest on stdout"
-        Just m -> do
-          let exefile = ML.makeExecutablePoolName lang
-              poolContent = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr) (cgmPoolCode m)
-              buildCmds = map (SysRun . Code) (cgmBuildCommands m)
-              poolSubdir = getPoolSubdir lang
-          hooks <- sourceHookCommands lang desc srcs
-          return $
-            Script
-              { scriptBase = "pool"
-              , scriptLang = lang
-              , scriptCode = "." :/ Dir "pools" [Dir poolSubdir [File exefile (Code poolContent)]]
-              , scriptMake = hooks <> buildCmds
-              }
-
--- | Manifest returned by an external codegen tool on stdout.
-data CodegenManifest = CodegenManifest
-  { cgmPoolCode :: Text
-  -- ^ rendered pool file content
-  , cgmBuildCommands :: [Text]
-  -- ^ build commands to run after writing files
-  }
-  deriving (Show)
-
-instance Aeson.FromJSON CodegenManifest where
-  parseJSON = Aeson.withObject "CodegenManifest" $ \v ->
-    CodegenManifest
-      <$> v Aeson..: "pool_code"
-      <*> (v Aeson..:? "build_commands" Aeson..!= [])
-
-instance Aeson.ToJSON CodegenManifest where
-  toJSON m =
-    Aeson.object
-      [ "pool_code" Aeson..= cgmPoolCode m
-      , "build_commands" Aeson..= cgmBuildCommands m
-      ]
 
 {- | Load the language descriptor for a language.
 Tries embedded lang.yaml first, then falls back to filesystem.

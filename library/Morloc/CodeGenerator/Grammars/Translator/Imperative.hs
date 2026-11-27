@@ -110,7 +110,6 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.Data.Zip (indexed, mapIndexedM, zip3Indexed, zip3Same, zipSame, zipWith3Same, zipWithSame)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
-import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
@@ -121,7 +120,6 @@ import Data.Tuple (swap)
 import Data.Char (isAlpha, isAlphaNum)
 import qualified Data.Text as T
 import Data.Word (Word8)
-import GHC.Generics (Generic)
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Grammars.Common
   ( Chain (..)
@@ -333,9 +331,7 @@ data IType
     ITyOptional IType
   | -- | Type not known or not needed (Python, R)
     ITyUnknown
-  deriving (Show, Eq, Ord, Generic)
-
-instance Binary IType
+  deriving (Show, Eq, Ord)
 
 {- | Render an IType to an MDoc for use in code generation output.
 This is used by printers that need the type as rendered text.
@@ -404,9 +400,6 @@ data IProgram = IProgram
     -- type has a packer to and from its wire form; defined ahead of the
     -- closure table.
   }
-  deriving (Generic)
-
-instance Binary IProgram
 
 -- | Build an IProgram from pre-rendered sources and manifolds (pure, for Python/R).
 --

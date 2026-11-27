@@ -44,12 +44,10 @@ module Morloc.CodeGenerator.LogTemplate
   , renderRunLogTemplate
   ) where
 
-import Data.Binary (Binary)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import Morloc.Frontend.Rename (displayName)
@@ -78,9 +76,7 @@ data RenderedTemplate = RenderedTemplate
     -- the manifold unmeasured. Tab-separated because group, name and
     -- language are all identifiers, so none can contain a tab.
   }
-  deriving (Show, Eq, Generic)
-
-instance Binary RenderedTemplate
+  deriving (Show, Eq)
 
 -- | The built-in default. Used to fill any subfield neither a per-label
 -- nor a program-wide template supplies.
@@ -408,9 +404,7 @@ data RenderedRunLog = RenderedRunLog
     -- ^ The row the nexus renders once per benchmarked label at end of
     -- run, after aggregating that label's timing records.
   }
-  deriving (Show, Eq, Generic)
-
-instance Binary RenderedRunLog
+  deriving (Show, Eq)
 
 -- | Render the run-scope prologue and epilogue templates from the
 -- entry-point module. Substitutes compile-time placeholders ({module},

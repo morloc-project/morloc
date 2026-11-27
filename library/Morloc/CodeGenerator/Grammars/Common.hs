@@ -99,12 +99,10 @@ module Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Zip (indexed, zipSame, zipWithSameM)
 import Morloc.Frontend.Rename (displayName)
 import qualified Control.Monad.State as CMS
-import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 import Data.List.NonEmpty (NonEmpty)
-import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (Unpacked, containsFunF, generatedObject, isSerializable, serialAstToNativeType, serialAstToType, makeSerialAST, makeWireSerialAST, serialAstToMsgpackSchema, unpackedAsTypeF)
 import Morloc.Data.Doc
@@ -1281,9 +1279,7 @@ data DispatchEntry = DispatchEntry
   , dispatchArgCount :: Int
   , dispatchLogLabel :: Maybe Text
   }
-  deriving (Show, Eq, Ord, Generic)
-
-instance Binary DispatchEntry
+  deriving (Show, Eq, Ord)
 
 {- | Extract local dispatch entries from serial manifolds.
 Skips manifolds marked as remote workers. The label map (mid -> label) is
@@ -1463,9 +1459,6 @@ data StageEntry = StageEntry
   , seStage :: Int
   -- ^ the stage entry's manifold id
   }
-  deriving (Generic)
-
-instance Binary StageEntry
 
 -- | The program's stage table.
 stageTableEntries :: MorlocMonad (Map.Map Int StageEntry)
