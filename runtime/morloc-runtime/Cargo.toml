@@ -1,6 +1,6 @@
 [package]
 name = "morloc-runtime"
-version = "0.113.0"
+version = "0.114.0"
 edition = "2021"
 description = "Morloc runtime library: shared memory, serialization, IPC, packet protocol"
 # The compiler's version (SHIM-7); scripts/bump-version.sh sets it.

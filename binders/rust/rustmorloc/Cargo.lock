@@ -301,7 +301,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "morloc-runtime-types"
-version = "0.113.0"
+version = "0.114.0"
 dependencies = [
  "libc",
  "memchr",
@@ -389,7 +389,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rustmorloc"
-version = "0.113.0"
+version = "0.114.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",

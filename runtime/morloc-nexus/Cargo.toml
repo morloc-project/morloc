@@ -1,6 +1,6 @@
 [package]
 name = "morloc-nexus"
-version = "0.113.0"
+version = "0.114.0"
 edition = "2021"
 description = "Morloc nexus: CLI dispatcher for multi-language pool orchestration"
 # The compiler's version (SHIM-7); scripts/bump-version.sh sets it.
