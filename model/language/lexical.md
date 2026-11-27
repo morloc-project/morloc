@@ -24,7 +24,7 @@ first: a type, a constructor, a class or a kind. A lone `_` is a wildcard.
 Intent: proposed
 Code: conforms 2026-10-21
 
-`module import export source from as where type newtype data record object
+`deriving module import export source from as where type newtype data record object
 class instance effect escapable infixl infixr infix match let in do` and the
 literal words `True False Null Inf NaN` cannot be used as names.
 
