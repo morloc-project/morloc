@@ -379,6 +379,23 @@ packageTests =
         install cfg "github:debris/m" >>= accepted
         recorded <- SD.doesFileExist (configState cfg </> "fdb" </> "debris.m.module")
         assertBool "a directory without a record is reinstalled" recorded
+    , testCase "a local install by branch installs a branch not checked out" . withState $ \cfg -> do
+        tmp <- SD.getTemporaryDirectory
+        dir <- createTempDirectory tmp "morloc-pkg"
+        writePackage dir ["name: branchy", "library: weena"] (modLoc "branchy")
+        let git args = callProcess "git" (["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"] <> args)
+        git ["init", "-q"]
+        git ["add", "."]
+        git ["commit", "-q", "-m", "main"]
+        git ["checkout", "-q", "-b", "dev"]
+        writeFile (dir </> "main.loc") "module branchy (x)\n\nx :: Int\nx = 2\n"
+        git ["commit", "-q", "-a", "-m", "dev"]
+        git ["checkout", "-q", "main"]
+        git ["tag", "v1"]
+        install cfg (MT.pack (dir <> "@branch:v1")) >>= rejected "v1"
+        install cfg (MT.pack (dir <> "@branch:dev")) >>= accepted
+        loc <- readFile (configLibrary cfg </> "weena/branchy/main.loc")
+        assertBool ("installed main.loc is not dev's: " <> loc) ("x = 2" `T.isInfixOf` T.pack loc)
     ]
   where
     isLeftJust (Just (Left _)) = True

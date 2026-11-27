@@ -2048,7 +2048,7 @@ installLocalGitRepoIO sourceDir targetDir selector = do
       Install.copyAllFiltered sourceDir targetDir
     LatestOnBranch branch -> do
       runGit ["clone", "-q", sourceDir, targetDir]
-      runGit ["-C", targetDir, "checkout", "refs/heads/" ++ MT.unpack branch]
+      runGit ["-C", targetDir, "checkout", "-q", "-B", MT.unpack branch, "refs/remotes/origin/" ++ MT.unpack branch]
     CommitHash hash -> do
       runGit ["clone", "-q", sourceDir, targetDir]
       runGit ["-C", targetDir, "checkout", "--detach", MT.unpack hash]
